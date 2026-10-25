@@ -35,6 +35,8 @@ const LOGIN_COOKIE: &str = "__Host-domus-login";
 pub struct Api(Arc<Shared>);
 
 struct Shared {
+    browser: Option<super::browser::BrowserAssets>,
+    local: Option<super::local_runtime::LocalRuntime>,
     services: super::services::ServiceHost,
     request_slots: Semaphore,
     event_slots: Arc<Semaphore>,
@@ -87,7 +89,7 @@ impl From<Error> for ApiError {
             }
             Error::Remote(message) => {
                 eprintln!("{message}");
-                Self::new(StatusCode::BAD_GATEWAY, "identity service is unavailable")
+                Self::new(StatusCode::BAD_GATEWAY, "remote service is unavailable")
             }
             Error::Catalog {
                 reason,
@@ -227,6 +229,8 @@ impl Api {
             .ok_or_else(|| Error::InvalidInput("public origin must use HTTPS".into()))?
             .into();
         Ok(Self(Arc::new(Shared {
+            browser: None,
+            local: None,
             services: super::services::ServiceHost::with_catalog(store, configuration, catalog)?,
             request_slots: Semaphore::new(32),
             event_slots: Arc::new(Semaphore::new(4)),
@@ -240,7 +244,25 @@ impl Api {
 
     pub fn router(&self) -> Router {
         let protected = Router::new()
-            .route("/", get(browser_not_installed))
+            .route("/", get(browser_index))
+            .route("/assets/{name}", get(browser_asset))
+            .route("/api/local/status", get(local_status))
+            .route(
+                "/api/local/source-search",
+                post(local_search).layer(DefaultBodyLimit::max(512)),
+            )
+            .route(
+                "/api/local/source-folder",
+                post(local_folder).layer(DefaultBodyLimit::max(8192)),
+            )
+            .route(
+                "/api/jobs/{id}/plans/{version}/run",
+                post(local_run).layer(DefaultBodyLimit::max(512)),
+            )
+            .route(
+                "/api/jobs/{id}/plans/{version}/artwork/local",
+                post(upload_artwork).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+            )
             .route("/api/session", get(session))
             .route("/auth/logout", post(logout))
             .route("/api/locations", get(locations))
@@ -334,6 +356,33 @@ impl Api {
             .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
             .layer(middleware::from_fn_with_state(self.clone(), security))
             .with_state(self.clone())
+    }
+
+    pub fn with_browser(mut self, browser: super::browser::BrowserAssets) -> Result<Self> {
+        Arc::get_mut(&mut self.0)
+            .ok_or(Error::Internal("API already shared"))?
+            .browser = Some(browser);
+        Ok(self)
+    }
+
+    /// Only explicit anonymous development composition can enable native local
+    /// acquisition. Missing production credentials never activate these commands.
+    pub fn with_local_runtime(mut self, local: super::local_runtime::LocalRuntime) -> Result<Self> {
+        if self.0.broker.is_some() {
+            return Err(Error::InvalidInput(
+                "local acquisition is development-only".into(),
+            ));
+        }
+        Arc::get_mut(&mut self.0)
+            .ok_or(Error::Internal("API already shared"))?
+            .local = Some(local);
+        Ok(self)
+    }
+
+    fn local(&self) -> ApiResult<&super::local_runtime::LocalRuntime> {
+        self.0.local.as_ref().ok_or_else(|| {
+            ApiError::new(StatusCode::CONFLICT, "local acquisition is not configured")
+        })
     }
 
     /// Run this supervised refresh loop beside the HTTPS listener. Failure is
@@ -624,6 +673,14 @@ async fn prepare_catalog_plans(
 }
 
 async fn security(State(api): State<Api>, request: Request, next: Next) -> Response {
+    let timeout = if matches!(
+        request.uri().path(),
+        "/api/local/source-search" | "/api/local/source-folder"
+    ) {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_secs(25)
+    };
     let mut response = match check_request(&api, &request) {
         Err(error) => error.into_response(),
         Ok(()) => match api.0.request_slots.try_acquire() {
@@ -632,16 +689,14 @@ async fn security(State(api): State<Api>, request: Request, next: Next) -> Respo
                 "server is busy; retry later",
             )
             .into_response(),
-            Ok(_permit) => {
-                match tokio::time::timeout(Duration::from_secs(25), next.run(request)).await {
-                    Ok(response) => response,
-                    Err(_) => ApiError::new(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "request timed out; reload current state",
-                    )
-                    .into_response(),
-                }
-            }
+            Ok(_permit) => match tokio::time::timeout(timeout, next.run(request)).await {
+                Ok(response) => response,
+                Err(_) => ApiError::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "request timed out; reload current state",
+                )
+                .into_response(),
+            },
         },
     };
     let status = response.status();
@@ -772,15 +827,28 @@ fn check_request(api: &Api, request: &Request) -> ApiResult<()> {
         })
         .transpose()?
         .unwrap_or(0);
-    if content_length > 2097152 {
+    let segments = request.uri().path().split('/').skip(1).collect::<Vec<_>>();
+    let upload = matches!(
+        segments.as_slice(),
+        ["api", "jobs", _, "plans", _, "artwork", "local"]
+    );
+    let maximum = if upload {
+        8 * 1024 * 1024
+    } else {
+        2 * 1024 * 1024
+    };
+    if content_length > maximum {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "request body exceeds 2 MiB",
+            "request body exceeds its size limit",
         ));
     }
     let body_free = matches!(*request.method(), Method::GET | Method::HEAD)
         || request.uri().path() == "/auth/logout"
-        || request.uri().path().ends_with("/approve");
+        || matches!(
+            segments.as_slice(),
+            ["api", "jobs", _, "plans", _, "approve"]
+        );
     if body_free && (content_length != 0 || headers.contains_key(header::TRANSFER_ENCODING)) {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -970,6 +1038,82 @@ async fn logout(State(api): State<Api>, headers: HeaderMap) -> ApiResult<Respons
     set_cookie(&mut response, SESSION_COOKIE, "", 0)?;
     set_cookie(&mut response, LOGIN_COOKIE, "", 0)?;
     Ok(response)
+}
+
+async fn browser_index(State(api): State<Api>) -> Response {
+    if let Some(browser) = &api.0.browser {
+        return browser.response("/");
+    }
+    browser_not_installed().await.into_response()
+}
+
+async fn browser_asset(State(api): State<Api>, Path(name): Path<String>) -> Response {
+    match &api.0.browser {
+        Some(browser) => browser.response(&format!("/assets/{name}")),
+        None => browser_not_installed().await.into_response(),
+    }
+}
+
+async fn local_status(
+    State(api): State<Api>,
+) -> ApiResult<Json<super::local_runtime::LocalStatus>> {
+    Ok(Json(match &api.0.local {
+        Some(local) => local.status()?,
+        None => super::local_runtime::LocalStatus {
+            enabled: false,
+            busy: false,
+            last_error: None,
+        },
+    }))
+}
+
+async fn local_search(
+    State(api): State<Api>,
+    Json(request): Json<super::worker::SourceSearchRequest>,
+) -> ApiResult<Json<super::soulseek::search::SearchReport>> {
+    Ok(Json(api.local()?.search(request.release_id).await?))
+}
+
+async fn local_folder(
+    State(api): State<Api>,
+    Json(request): Json<super::worker::SourceFolderRequest>,
+) -> ApiResult<Json<super::worker::SourceFolderReport>> {
+    Ok(Json(api.local()?.folder(request).await?))
+}
+
+async fn local_run(
+    State(api): State<Api>,
+    Path((job, version)): Path<(i64, i64)>,
+    Json(request): Json<super::worker::StartLocalDownload>,
+) -> ApiResult<StatusCode> {
+    api.local()?.start(job, version, request)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UploadArtworkQuery {
+    acknowledge_permitted_use: bool,
+}
+
+async fn upload_artwork(
+    State(api): State<Api>,
+    Path((job, version)): Path<(i64, i64)>,
+    Query(query): Query<UploadArtworkQuery>,
+    bytes: axum::body::Bytes,
+) -> ApiResult<Json<ArtworkCandidate>> {
+    Ok(Json(
+        api.database(move |store| {
+            store.prepare_uploaded_artwork_or_ask(
+                job,
+                version,
+                &bytes,
+                None,
+                query.acknowledge_permitted_use,
+            )
+        })
+        .await?,
+    ))
 }
 
 async fn browser_not_installed() -> ApiError {

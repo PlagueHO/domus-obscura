@@ -173,6 +173,18 @@ This section replaces the earlier "Wall + inspector" direction where they differ
 
 ## Evidence on Hand
 
+The connected local Music browser now lives in `frontend/app`. It extends the
+saved proof of concept with real guarded HTTPS requests, exact-release plans,
+separate source and cover approvals, explicit one-shot acquisition and new-only
+publication. See `docs/local-development.md` for setup and remaining limits.
+It is not the complete V1 application. The local setup creates a developer
+certificate but never changes browser trust or enables a live account.
+
+Generated regression tests cover anonymous HTTPS approval through local MP3
+normalization/publication, exact folders/filenames, all required tags and unchanged
+encoded audio. Separate generated protocol-socket tests cover MP3/FLAC receive
+through publication. This is not new live-account acceptance.
+
 Issue #1 records the approved product scope. The current implementation is a local foundation, not the complete web application. One user-approved live 14-track MP3 test passed acquisition, normalization and private playback export on Windows. Independent checks verified names, tags, artwork and output receipts. The user confirmed clear first-track playback and the test cover in the desktop player. Exact pressing verification and production deployment remain unverified.
 
 ## Product Principles

@@ -206,6 +206,17 @@ cargo task scale
 
 Use the Windows launcher in place of the Cargo task prefix on Windows.
 
+The connected local Music browser is in `frontend/app`. `build` also builds it
+to `frontend/dist-app`. See `docs/local-development.md` for explicit anonymous
+HTTPS setup with a developer certificate. `scripts/local-setup.ps1` creates only
+a fresh Windows setup and never changes certificate trust or enables an account.
+Keep its optional `local_acquisition` development-only. The guarded run command
+uses only host-configured credentials/staging and approved source/cover/plan
+bindings. Hold the same fenced claim and staging lock through new-only
+publication. Never add automatic retries or overwrite existing album content.
+`settings-default` exports the authoritative defaults. `staging-init` creates
+and binds private staging through its normal ownership rules.
+
 ## Layout
 
 - crates/domus/src/domain: path, job-state, output-template, and edition-plan rules.

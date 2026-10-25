@@ -25,6 +25,8 @@ const USAGE: &str = "Usage:
   domus catalog-release <local-database> <release-id>
   domus catalog-plan-prepare <local-database> <release-id> <request-json>
   domus settings <local-database>
+  domus settings-default
+  domus staging-init <local-database> <absolute-root>
   domus settings-save <local-database> <expected-version-or-0> <settings-json>
   domus job-create <local-database>
   domus job-control <local-database> <job-id> <plan-version> <pause|cancel>
@@ -66,6 +68,15 @@ The database must be outside every configured media root.";
 
 fn run(args: &[String]) -> Result<()> {
     match args {
+        [command] if command == "settings-default" => {
+            println!("{}", serde_json::to_string(&OutputSettings::default())?);
+        }
+        [command, database, root] if command == "staging-init" => {
+            let mut store = Store::open_current_existing(Path::new(database))?;
+            let _staging =
+                domus::infrastructure::staging::StagingRoot::open(&mut store, Path::new(root))?;
+            println!("Private staging initialized and native identity bound.");
+        }
         [command] if command == "version" => {
             println!("Domus Obscura {}", env!("CARGO_PKG_VERSION"))
         }
@@ -94,6 +105,36 @@ fn run(args: &[String]) -> Result<()> {
             // serde_json emits integer JSON numbers, not JavaScript bigint values.
             let config = ts_rs::Config::default().with_large_int("number");
             let contracts = [
+                (
+                    "LocalStatus.ts",
+                    domus::infrastructure::local_runtime::LocalStatus::export_to_string(&config),
+                ),
+                (
+                    "SourceSearchRequest.ts",
+                    domus::infrastructure::worker::SourceSearchRequest::export_to_string(&config),
+                ),
+                (
+                    "SourceFolderRequest.ts",
+                    domus::infrastructure::worker::SourceFolderRequest::export_to_string(&config),
+                ),
+                (
+                    "StartLocalDownload.ts",
+                    domus::infrastructure::worker::StartLocalDownload::export_to_string(&config),
+                ),
+                (
+                    "SearchReport.ts",
+                    domus::infrastructure::soulseek::search::SearchReport::export_to_string(
+                        &config,
+                    ),
+                ),
+                (
+                    "SearchPeer.ts",
+                    domus::infrastructure::soulseek::search::SearchPeer::export_to_string(&config),
+                ),
+                (
+                    "SearchIssue.ts",
+                    domus::infrastructure::soulseek::search::SearchIssue::export_to_string(&config),
+                ),
                 (
                     "SourceFileMetadata.ts",
                     domus::domain::sources::SourceFileMetadata::export_to_string(&config),

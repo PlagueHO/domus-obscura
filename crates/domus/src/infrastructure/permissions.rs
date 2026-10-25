@@ -80,6 +80,41 @@ impl FilePermissions {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn private_test_directory() -> Result<tempfile::TempDir> {
+    let directory = tempfile::tempdir()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_permissions::constants::{SeObjectType, SecurityInformation};
+        use windows_permissions::{LocalBox, SecurityDescriptor, wrappers::SetSecurityInfo};
+        let permissions = FilePermissions::current()?;
+        let mut handle = std::fs::OpenOptions::new()
+            .read(true)
+            .access_mode(0x0006_0000)
+            .custom_flags(0x0200_0000)
+            .open(directory.path())?;
+        let descriptor: LocalBox<SecurityDescriptor> =
+            format!("D:P(A;OICI;FA;;;{})", permissions.user).parse()?;
+        SetSecurityInfo(
+            &mut handle,
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+            None,
+            None,
+            descriptor.dacl(),
+            None,
+        )?;
+        permissions.check(&handle, true)?;
+    }
+    Ok(directory)
+}
+
 fn permission_error() -> Error {
     Error::InvalidInput("file ownership or permissions allow untrusted access; private files require owner-only access".into())
 }
@@ -207,7 +242,7 @@ mod tests {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_permissions::constants::{SeObjectType, SecurityInformation};
         use windows_permissions::{LocalBox, SecurityDescriptor, wrappers::SetSecurityInfo};
-        let directory = tempfile::tempdir()?;
+        let directory = private_test_directory()?;
         let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)

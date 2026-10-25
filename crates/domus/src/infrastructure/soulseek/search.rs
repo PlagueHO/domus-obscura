@@ -14,7 +14,7 @@ const MAX_SEARCH_MESSAGES: usize = 256;
 const SEARCH_WINDOW: Duration = Duration::from_secs(45);
 const PEER_WINDOW: Duration = Duration::from_secs(2);
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub struct SearchPeer {
     pub peer: String,
     pub slot_free: bool,
@@ -23,13 +23,13 @@ pub struct SearchPeer {
     pub files: Vec<SearchFile>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
 pub struct SearchIssue {
     pub peer: String,
     pub error: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
 pub struct SearchReport {
     pub query: String,
     pub peers: Vec<SearchPeer>,

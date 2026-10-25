@@ -41,6 +41,8 @@ mod catalog_tests;
 mod control_tests;
 #[path = "https/development.rs"]
 mod development_tests;
+#[path = "https/local_album.rs"]
+mod local_album_tests;
 mod support;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;

@@ -15,5 +15,12 @@
     "verbatimModuleSyntax": true,
     "types": ["node", "vite/client"]
   },
-  "include": ["src", "local-test/src", "vite.config.ts", "vite.local-test.config.ts"]
+  "include": [
+    "src",
+    "app",
+    "local-test/src",
+    "vite.config.ts",
+    "vite.local-test.config.ts",
+    "vite.app.config.ts"
+  ]
 }

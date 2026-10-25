@@ -2,12 +2,13 @@ use super::*;
 use crate::application::{add_location, negotiate_transfer, scan_location};
 use crate::domain::{AudioFormat, JobState, OutputSettings, Page};
 use crate::infrastructure::catalog::{CatalogQuery, CatalogResult};
+use crate::infrastructure::permissions::private_test_directory as tempdir;
 use crate::infrastructure::store::{JobClaim, PlanRequest, SourceFile, Store};
 use rusqlite::{Connection, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use tempfile::{TempDir, tempdir};
+use tempfile::TempDir;
 
 struct Fixture {
     store: Store,

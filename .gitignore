@@ -18,3 +18,4 @@ client-secret*.txt
 service.local.json
 .impeccable/hook.cache.json
 .impeccable/questions/
+frontend/dist-app/

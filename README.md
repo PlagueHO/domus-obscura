@@ -1224,4 +1224,16 @@ List routes use `after` and `limit`, with a maximum of 200 rows. Folder browsing
 
 For a new snapshot, obtain `GET /api/events/cursor` before loading the paginated read models. Then stream events after that cursor and refresh affected read models. A cursor ahead of the database returns a conflict instead of silently skipping changes. Obtain a fresh cursor and reload the read models in that case. Keep-alive comments are sent every ten seconds. The browser application still needs to implement this recovery flow.
 
-Without a valid session, the root redirects the browser to sign-in. After sign-in, it reports that the browser application is not installed. This explicit unavailable response remains until application assets are implemented.
+Without a valid production session, the root redirects the browser to sign-in.
+With `browser_assets` configured, the root and bundled assets use the same guards
+as the API. Without installed assets, it reports the explicit unavailable response.
+Explicit development mode uses `_anonymous` instead of Entra and remains loopback-only.
+
+## Connected local Music browser
+
+See [Local album download with developer HTTPS](docs/local-development.md).
+The browser uses explicit `_anonymous` development mode and a valid developer
+certificate on loopback. It supports exact-release plans, separate source/cover
+approval, a single explicit download and verified new-only local publication.
+The static design reference remains in [docs/ui-poc](docs/ui-poc/README.md).
+This is not complete V1 deployment or live-account acceptance.

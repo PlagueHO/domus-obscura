@@ -184,10 +184,33 @@ impl Store {
                 "CAA image ID must be a positive decimal identifier".into(),
             ));
         }
+
         let result = if acknowledge_permitted_use {
             self.prepare_cached_caa_artwork(job, version, image, background, true)
         } else {
             Err(crate::domain::ArtworkIssue::Permission.into())
+        };
+        self.artwork_preparation_result(job, version, result)
+    }
+
+    /// A bounded browser upload has local, content-based provenance. Permission
+    /// to supply the image never approves its exact normalized JPEG preview.
+    pub fn prepare_uploaded_artwork_or_ask(
+        &mut self,
+        job: i64,
+        version: i64,
+        input: &[u8],
+        background: Option<[u8; 3]>,
+        acknowledge_permitted_use: bool,
+    ) -> Result<ArtworkCandidate> {
+        let result = if !acknowledge_permitted_use {
+            Err(crate::domain::ArtworkIssue::Permission.into())
+        } else if input.is_empty() || input.len() > 8 * 1024 * 1024 {
+            Err(Error::InvalidInput(
+                "cover upload must contain 1 to 8388608 bytes".into(),
+            ))
+        } else {
+            self.prepare_artwork_input(job, version, "local", input, background, None)
         };
         self.artwork_preparation_result(job, version, result)
     }

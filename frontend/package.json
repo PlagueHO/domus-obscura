@@ -5,6 +5,7 @@
   "scripts": {
     "check": "tsc --noEmit && vitest run",
     "build": "tsc --noEmit && vite build",
+    "build:app": "tsc --noEmit && vite build --config vite.app.config.ts",
     "build:local-test": "tsc --noEmit && vite build --config vite.local-test.config.ts"
   },
   "dependencies": {

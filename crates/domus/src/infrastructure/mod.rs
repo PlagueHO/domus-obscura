@@ -1,5 +1,6 @@
 pub mod api;
 pub mod artwork;
+pub mod browser;
 pub mod caa;
 pub mod catalog;
 pub mod entra;
@@ -8,6 +9,7 @@ pub mod flac;
 pub mod http;
 pub mod identity;
 mod local_file;
+pub mod local_runtime;
 pub mod mcp;
 pub mod media;
 pub mod mp3;

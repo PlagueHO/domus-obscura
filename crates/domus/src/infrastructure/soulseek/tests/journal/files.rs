@@ -381,6 +381,29 @@ fn complete_mp3_and_flac_albums_queue_receive_and_normalize_via_bound_channels()
                 .store
                 .transfers(fixture.job, fixture.version, Page::new(0, 200)?)?;
         assert!(transfers.iter().all(|file| file.state == "received"));
+        assert_eq!(
+            crate::application::publish_new_album(
+                &mut fixture.store,
+                &fixture.claim,
+                &staging,
+                run,
+            )?,
+            "complete"
+        );
+        let published = fixture
+            ._library
+            .path()
+            .join("F")
+            .join("FIXTURE ARTIST")
+            .join("FIXTURE ALBUM");
+        assert_eq!(std::fs::read_dir(&published)?.count(), 4);
+        for entry in std::fs::read_dir(&album)? {
+            let entry = entry?;
+            assert_eq!(
+                std::fs::read(entry.path())?,
+                std::fs::read(published.join(entry.file_name()))?
+            );
+        }
         assert!(acquire_album(&mut fixture.store, &fixture.claim, &staging, &mut peer).is_err());
         join(task)?;
     }

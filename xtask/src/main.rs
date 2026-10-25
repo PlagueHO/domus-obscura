@@ -128,6 +128,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             toolchains()?;
             contracts(true)?;
             pnpm(&["--filter", "@domus/frontend", "build"])?;
+            pnpm(&["--filter", "@domus/frontend", "build:app"])?;
             cargo(&["build", "--locked", "--package", "domus"])
         }
         Some("smoke") => cargo(&[

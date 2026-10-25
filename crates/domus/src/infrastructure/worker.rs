@@ -1,3 +1,4 @@
+use super::catalog::CatalogQuery;
 use super::filesystem::require_local_disk;
 use super::local_file::{protect_files, read_local};
 use super::soulseek::{SoulseekSession, public_peer_ip};
@@ -207,9 +208,16 @@ impl SearchConfiguration {
         path: &Path,
         folder_query: bool,
     ) -> Result<(Self, crate::domain::CatalogRelease, Credentials)> {
-        use super::catalog::CatalogQuery;
         let config: Self = serde_json::from_slice(&read_local(path, 16384, false)?)
             .map_err(|_| Error::InvalidInput("invalid source-read configuration".into()))?;
+        Self::validate(config, &[path], folder_query)
+    }
+
+    fn validate(
+        config: Self,
+        protected: &[&Path],
+        folder_query: bool,
+    ) -> Result<(Self, crate::domain::CatalogRelease, Credentials)> {
         config.services.validate_builtins()?;
         config
             .services
@@ -229,7 +237,9 @@ impl SearchConfiguration {
         }
         let query = CatalogQuery::release(&config.release_id)?;
         let store = Store::open_read_snapshot(&config.database)?;
-        protect_files(&store, &[path, &config.credentials_file])?;
+        let mut files = protected.to_vec();
+        files.push(&config.credentials_file);
+        protect_files(&store, &files)?;
         let cache = store.peek_catalog_cache(&query)?.ok_or_else(|| {
             Error::Conflict(
                 "load the exact MusicBrainz release with catalog-release before source reads"
@@ -380,9 +390,16 @@ struct ValidatedWorker {
 
 impl ValidatedWorker {
     fn read(path: &Path, snapshot: bool) -> Result<Self> {
-        let mut configuration: Configuration =
-            serde_json::from_slice(&read_local(path, 16384, false)?)
-                .map_err(|_| Error::InvalidInput("invalid worker configuration".into()))?;
+        let configuration: Configuration = serde_json::from_slice(&read_local(path, 16384, false)?)
+            .map_err(|_| Error::InvalidInput("invalid worker configuration".into()))?;
+        Self::validate(configuration, &[path], snapshot)
+    }
+
+    fn validate(
+        mut configuration: Configuration,
+        protected: &[&Path],
+        snapshot: bool,
+    ) -> Result<Self> {
         configuration.services.validate_builtins()?;
         configuration
             .services
@@ -410,7 +427,9 @@ impl ValidatedWorker {
         } else {
             Store::open_current_existing(&configuration.database)?
         };
-        protect_files(&store, &[path, &configuration.credentials_file])?;
+        let mut files = protected.to_vec();
+        files.push(&configuration.credentials_file);
+        protect_files(&store, &files)?;
         let state = store.job_state(configuration.job_id)?;
         if snapshot {
             store.require_job_running(configuration.job_id, configuration.plan_version)?;
@@ -482,13 +501,17 @@ impl PreparedWorker {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
+        Self::from_validated(ValidatedWorker::read(path, false)?)
+    }
+
+    fn from_validated(validated: ValidatedWorker) -> Result<Self> {
         let ValidatedWorker {
             configuration,
             mut store,
             state,
             source,
             credentials,
-        } = ValidatedWorker::read(path, false)?;
+        } = validated;
         if let Some(decision) =
             store.check_artwork(configuration.job_id, configuration.plan_version)?
         {
@@ -546,7 +569,11 @@ impl PreparedWorker {
         })
     }
 
-    pub fn run(mut self) -> Result<WorkerOutcome> {
+    pub fn run(self) -> Result<WorkerOutcome> {
+        self.execute(false)
+    }
+
+    fn execute(mut self, publish: bool) -> Result<WorkerOutcome> {
         self.store.renew_claim(&self.claim, 300)?;
         self.store.job_work_boundary(&self.claim)?;
         if !self.normalize_only
@@ -607,10 +634,186 @@ impl PreparedWorker {
         } else {
             None
         };
+        let publication_pending = if publish {
+            crate::application::publish_new_album(&mut self.store, &self.claim, &self.staging, run)?
+                != "complete"
+        } else {
+            true
+        };
         Ok(WorkerOutcome {
             normalization_run: run,
             playback_folder,
-            publication_pending: true,
+            publication_pending,
         })
     }
+}
+
+/// Operator-selected local acquisition settings. Browser input cannot select a
+/// database, credential file, server address or native destination.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalAcquisition {
+    pub staging_root: PathBuf,
+    pub credentials_file: PathBuf,
+    pub server: SocketAddrV4,
+    pub acknowledge_plaintext_login: bool,
+}
+
+impl LocalAcquisition {
+    pub fn validate(&self, store: &Store, services: &ServiceConfiguration) -> Result<()> {
+        services.validate_builtins()?;
+        services.require(Capability::Acquisition, "soulseek")?;
+        if !self.staging_root.is_absolute()
+            || !self.credentials_file.is_absolute()
+            || !self.acknowledge_plaintext_login
+            || self.server.port() == 0
+            || !public_peer_ip(*self.server.ip())
+        {
+            return Err(Error::InvalidInput(
+                "local acquisition needs absolute staging/credential paths, a public server and explicit plaintext-login acknowledgement".into(),
+            ));
+        }
+        protect_files(store, &[&self.credentials_file])?;
+        let root = super::filesystem::LibraryDirectory::open(&self.staging_root)?;
+        let canonical = std::fs::canonicalize(&self.staging_root)?;
+        require_local_disk(&canonical)?;
+        store.check_native_root(
+            canonical
+                .to_str()
+                .ok_or_else(|| Error::InvalidInput("staging path is not UTF-8".into()))?,
+            "staging",
+            root.native_root(),
+        )?;
+        Ok(())
+    }
+
+    fn metadata(
+        &self,
+        database: &Path,
+        services: ServiceConfiguration,
+        release_id: String,
+        folder: Option<FolderSelection>,
+    ) -> Result<(
+        SearchConfiguration,
+        crate::domain::CatalogRelease,
+        Credentials,
+    )> {
+        let is_folder = folder.is_some();
+        SearchConfiguration::validate(
+            SearchConfiguration {
+                services,
+                database: database.to_owned(),
+                credentials_file: self.credentials_file.clone(),
+                server: self.server,
+                release_id,
+                acknowledge_plaintext_login: self.acknowledge_plaintext_login,
+                folder,
+            },
+            &[],
+            is_folder,
+        )
+    }
+
+    pub fn search(
+        &self,
+        database: &Path,
+        services: ServiceConfiguration,
+        release_id: String,
+    ) -> Result<super::soulseek::search::SearchReport> {
+        let (config, release, credentials) = self.metadata(database, services, release_id, None)?;
+        let query = format!("{} {}", release.summary.artist, release.summary.title);
+        if query.len() > 256 || query.chars().any(char::is_control) {
+            return Err(Error::InvalidInput(
+                "release search text exceeds protocol bounds".into(),
+            ));
+        }
+        PreparedSearch {
+            credentials,
+            server: config.server,
+            query,
+        }
+        .run()
+    }
+
+    pub fn folder(
+        &self,
+        database: &Path,
+        services: ServiceConfiguration,
+        request: SourceFolderRequest,
+    ) -> Result<SourceFolderReport> {
+        let (config, release, credentials) = self.metadata(
+            database,
+            services,
+            request.release_id,
+            Some(FolderSelection {
+                peer: request.peer,
+                remote_folder: request.remote_folder,
+                format: request.format,
+            }),
+        )?;
+        PreparedFolder {
+            credentials,
+            server: config.server,
+            edition: release.selection(None)?,
+            selection: config
+                .folder
+                .ok_or(Error::Internal("folder selection missing"))?,
+        }
+        .run()
+    }
+
+    pub fn acquire_and_publish(
+        &self,
+        database: &Path,
+        services: ServiceConfiguration,
+        job_id: i64,
+        plan_version: i64,
+        request: StartLocalDownload,
+    ) -> Result<WorkerOutcome> {
+        if !request.acknowledge_new_only_publication {
+            return Err(Error::InvalidInput(
+                "new-only publication needs explicit acknowledgement".into(),
+            ));
+        }
+        let validated = ValidatedWorker::validate(
+            Configuration {
+                services,
+                database: database.to_owned(),
+                staging_root: self.staging_root.clone(),
+                credentials_file: self.credentials_file.clone(),
+                server: self.server,
+                job_id,
+                plan_version,
+                acknowledge_plaintext_login: self.acknowledge_plaintext_login,
+                export_for_playback: false,
+                source: None,
+                source_candidate: request.source_candidate,
+            },
+            &[],
+            false,
+        )?;
+        PreparedWorker::from_validated(validated)?.execute(true)
+    }
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSearchRequest {
+    pub release_id: String,
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFolderRequest {
+    pub release_id: String,
+    pub peer: String,
+    pub remote_folder: String,
+    pub format: crate::domain::AudioFormat,
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct StartLocalDownload {
+    pub source_candidate: Option<i64>,
+    pub acknowledge_new_only_publication: bool,
 }

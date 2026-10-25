@@ -2,7 +2,7 @@ use super::*;
 use axum::extract::ConnectInfo;
 use domus::infrastructure::server::PreparedServer;
 
-fn self_signed() -> TestResult<Certificates> {
+pub(super) fn self_signed() -> TestResult<Certificates> {
     let key = KeyPair::generate()?;
     let mut params = CertificateParams::new(vec!["localhost".into()])?;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
@@ -125,6 +125,28 @@ async fn development_https_uses_anonymous_without_sessions_or_entra() -> TestRes
     assert_eq!(identity["object_id"], "_anonymous");
     assert_eq!(identity["tenant_id"], "_development");
     assert_eq!(identity["client_id"], "_development");
+    let local: Value = serde_json::from_slice(
+        &client
+            .get(format!("{origin}/api/local/status"))
+            .send()
+            .await?
+            .bytes()
+            .await?,
+    )?;
+    assert_eq!(local["enabled"], false);
+    assert_eq!(local["busy"], false);
+    assert_eq!(
+        client
+            .post(format!("{origin}/api/local/source-search"))
+            .header(header::ORIGIN, &origin)
+            .header("x-domus-csrf", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(r#"{"release_id":"20000000-0000-4000-8000-000000000001"}"#)
+            .send()
+            .await?
+            .status(),
+        StatusCode::CONFLICT
+    );
     let again = client
         .get(format!("{origin}/api/session"))
         .header(header::COOKIE, "__Host-domus-session=not-an-identity")

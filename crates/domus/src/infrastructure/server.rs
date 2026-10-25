@@ -168,6 +168,8 @@ struct Configuration {
     client_secret_file: Option<PathBuf>,
     certificate_file: PathBuf,
     private_key_file: PathBuf,
+    browser_assets: Option<PathBuf>,
+    local_acquisition: Option<super::worker::LocalAcquisition>,
 }
 
 /// Plaintext credentials exist only in memory after bounded, local-file reads.
@@ -188,6 +190,11 @@ impl PreparedServer {
         configuration.services.validate_builtins()?;
         match configuration.environment {
             Environment::Production => {
+                if configuration.local_acquisition.is_some() {
+                    return Err(Error::InvalidInput(
+                        "local acquisition is development-only".into(),
+                    ));
+                }
                 if ![
                     &configuration.tenant_id,
                     &configuration.object_id,
@@ -269,6 +276,11 @@ impl PreparedServer {
             configuration.private_key_file.clone(),
         ];
         protected.extend(configuration.client_secret_file.iter().cloned());
+        protected.extend(configuration.browser_assets.iter().cloned());
+        if let Some(local) = &configuration.local_acquisition {
+            local.validate(&store, &configuration.services)?;
+            protected.push(local.credentials_file.clone());
+        }
         let protected = protected
             .iter()
             .map(std::fs::canonicalize)
@@ -323,7 +335,7 @@ impl PreparedServer {
             tls,
             hostname,
         } = self;
-        let api = match configuration.environment {
+        let mut api = match configuration.environment {
             Environment::Development => Api::development_with_services(
                 &configuration.origin,
                 store,
@@ -357,6 +369,24 @@ impl PreparedServer {
                 )?
             }
         };
+        if let Some(root) = &configuration.browser_assets {
+            let root = root.clone();
+            let browser =
+                tokio::task::spawn_blocking(move || super::browser::BrowserAssets::load(&root))
+                    .await
+                    .map_err(|_| Error::Internal("browser asset task failed"))??;
+            api = api.with_browser(browser)?;
+        }
+        if let Some(local) = configuration.local_acquisition.clone() {
+            let database = configuration.database.clone();
+            let services = configuration.services.clone();
+            let runtime = tokio::task::spawn_blocking(move || {
+                super::local_runtime::LocalRuntime::new(database, local, services)
+            })
+            .await
+            .map_err(|_| Error::Internal("local runtime task failed"))??;
+            api = api.with_local_runtime(runtime)?;
+        }
         let listener = TcpListener::bind(configuration.listen)?;
         let handle = axum_server::Handle::new();
         let serving = serve_listener(listener, tls.clone(), api.router(), handle.clone());
