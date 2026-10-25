@@ -232,8 +232,10 @@ fn source_review_never_approves_incomplete_ambiguous_or_advertised_bad_inputs() 
         "missing",
         "extra",
         "ambiguous",
-        "unknown-quality",
         "bad-quality",
+        "vbr",
+        "bad-quality-without-vbr",
+        "vbr-without-bitrate",
         "mixed-format",
     ] {
         let mut folder = listing();
@@ -251,8 +253,16 @@ fn source_review_never_approves_incomplete_ambiguous_or_advertised_bad_inputs() 
                 duplicate.remote_path = "Peer Music\\Generated Album\\01 - First.mp3".into();
                 folder.files.push(duplicate);
             }
-            "unknown-quality" => folder.files[0].vbr = None,
             "bad-quality" => folder.files[0].bitrate_kbps = Some(256),
+            "vbr" => folder.files[0].vbr = Some(true),
+            "bad-quality-without-vbr" => {
+                folder.files[0].bitrate_kbps = Some(256);
+                folder.files[0].vbr = None;
+            }
+            "vbr-without-bitrate" => {
+                folder.files[0].bitrate_kbps = None;
+                folder.files[0].vbr = Some(true);
+            }
             "mixed-format" => {
                 folder.files[0].remote_path = "Peer Music\\Generated Album\\First.flac".into();
                 folder.files[0].extension = "flac".into();
@@ -287,6 +297,51 @@ fn source_review_never_approves_incomplete_ambiguous_or_advertised_bad_inputs() 
             .store
             .prepare_source_candidate(fixture.job, fixture.version, overflow)?;
     assert!(approve(&mut fixture, &candidate).is_err());
+    Ok(())
+}
+
+#[test]
+fn source_review_accepts_unknown_attributes_without_inventing_audio_proof() -> TestResult {
+    for (bitrate, vbr) in [(Some(320), None), (None, Some(false)), (None, None)] {
+        let mut fixture = idle()?;
+        let mut folder = listing();
+        for file in &mut folder.files {
+            file.bitrate_kbps = bitrate;
+            file.vbr = vbr;
+        }
+        let candidate =
+            fixture
+                .store
+                .prepare_source_candidate(fixture.job, fixture.version, folder)?;
+        assert!(candidate.assessment.can_approve);
+        assert!(!candidate.assessment.advertised_quality_matches);
+        assert!(!candidate.assessment.audio_verified);
+        assert!(
+            fixture
+                .store
+                .approve_source_candidate(
+                    candidate.id,
+                    fixture.version,
+                    &candidate.review_sha256,
+                    false
+                )
+                .is_err()
+        );
+        let approved = approve(&mut fixture, &candidate)?;
+        assert!(!approved.assessment.audio_verified);
+        assert_eq!(approved.listing.files[0].bitrate_kbps, bitrate);
+        assert_eq!(approved.listing.files[0].vbr, vbr);
+        let current = claim(&mut fixture)?;
+        fixture
+            .store
+            .begin_reviewed_acquisition(&current, candidate.id)?;
+        let transfers =
+            fixture
+                .store
+                .transfers(fixture.job, fixture.version, Page::new(0, 200)?)?;
+        assert_eq!(transfers.len(), 2);
+        assert!(transfers.iter().all(|transfer| transfer.state == "planned"));
+    }
     Ok(())
 }
 

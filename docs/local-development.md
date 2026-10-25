@@ -62,8 +62,8 @@ Add `local_acquisition` to `service.local.json` and restart the API:
 
 ```json
 {
-  "staging_root": "C:\\DomusDev\\staging",
-  "credentials_file": "C:\\DomusDev\\soulseek.secret.json",
+  "staging_root": "D:\\DomusDev\\staging",
+  "credentials_file": "D:\\DomusDev\\soulseek.secret.json",
   "server": "PUBLIC_SERVER_IPV4:PORT",
   "acknowledge_plaintext_login": true
 }

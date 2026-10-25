@@ -586,6 +586,7 @@ dependencies = [
  "id3",
  "image",
  "metaflac",
+ "moxcms",
  "openidconnect",
  "png",
  "rand",

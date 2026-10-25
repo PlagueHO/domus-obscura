@@ -241,6 +241,11 @@ fn caa_redirects_keep_the_exact_archive_item_file_https_and_narrow_authorities()
     let archive = format!("https://archive.org/download/mbid-{RELEASE}/index.json");
     let shard = format!("https://ia800504.us.archive.org/9/items/mbid-{RELEASE}/index.json");
     assert_eq!(request.follow(&archive)?.follow(&shard)?.source(), shard);
+    let canadian = format!("https://dn721806.ca.archive.org/0/items/mbid-{RELEASE}/index.json");
+    assert_eq!(
+        request.follow(&archive)?.follow(&canadian)?.source(),
+        canadian
+    );
     request.follow(&format!(
         "https://s3.us.archive.org/mbid-{RELEASE}/index.json"
     ))?;
@@ -254,6 +259,15 @@ fn caa_redirects_keep_the_exact_archive_item_file_https_and_narrow_authorities()
         format!("https://archive.org@untrusted.example/download/mbid-{RELEASE}/index.json"),
         format!("https://archive.org.untrusted.example/download/mbid-{RELEASE}/index.json"),
         format!("https://untrusted.us.archive.org/9/items/mbid-{RELEASE}/index.json"),
+        format!(
+            "https://dn721806.ca.archive.org.untrusted.example/0/items/mbid-{RELEASE}/index.json"
+        ),
+        format!("https://dn721806.us.archive.org/0/items/mbid-{RELEASE}/index.json"),
+        format!("https://ia721806.ca.archive.org/0/items/mbid-{RELEASE}/index.json"),
+        format!("https://dnabc.ca.archive.org/0/items/mbid-{RELEASE}/index.json"),
+        format!("https://dn12345.ca.archive.org/0/items/mbid-{RELEASE}/index.json"),
+        format!("https://dn721806.ca.archive.org/0/items/mbid-{OTHER}/index.json"),
+        format!("https://dn721806.ca.archive.org/0/items/mbid-{RELEASE}/other.json"),
         format!("https://ia800504.us.archive.org/9/items/mbid-{OTHER}/index.json"),
         format!("https://ia800504.us.archive.org/9/items/mbid-{RELEASE}/index.json/extra"),
         "https://127.0.0.1/private".into(),
@@ -267,6 +281,9 @@ fn caa_redirects_keep_the_exact_archive_item_file_https_and_narrow_authorities()
     let expected =
         format!("https://archive.org/download/mbid-{RELEASE}/mbid-{RELEASE}-9007199254740995.png");
     image.follow(&expected)?;
+    image.follow(&format!(
+        "https://dn721806.ca.archive.org/0/items/mbid-{RELEASE}/mbid-{RELEASE}-9007199254740995.png"
+    ))?;
     assert!(image.follow(&archive).is_err());
     assert!(request.follow(&expected).is_err());
     assert!(CaaRequest::image(&listing, "123").is_err());

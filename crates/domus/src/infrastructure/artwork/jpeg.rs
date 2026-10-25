@@ -1,3 +1,4 @@
+use super::color::{IccProfile, MAX_ICC_BYTES};
 use super::{invalid, validate_dimensions, verify_exif};
 use crate::domain::ArtworkIssue;
 use crate::{Error, Result};
@@ -8,7 +9,12 @@ use turbojpeg::{Colorspace, Decompressor, Image, PixelFormat};
 const MAX_SCANS: u32 = 32;
 
 pub(super) fn decode(input: &[u8]) -> Result<DynamicImage> {
-    let (width, height, orientation) = verify_container(input)?;
+    let VerifiedJpeg {
+        width,
+        height,
+        orientation,
+        profile,
+    } = verify_container(input)?;
     let mut decoder = Decompressor::new()
         .map_err(|_| Error::Internal("cover JPEG decoder initialization failed"))?;
     decoder
@@ -29,27 +35,55 @@ pub(super) fn decode(input: &[u8]) -> Result<DynamicImage> {
     {
         return Err(ArtworkIssue::Unsupported.into());
     }
-    let mut rgb = RgbImage::new(width, height);
-    decoder
-        .decompress(
-            input,
-            Image {
-                pixels: rgb.as_mut(),
-                width: header.width,
-                pitch: header.width * 3,
-                height: header.height,
-                format: PixelFormat::RGB,
-            },
-        )
-        .map_err(|_| invalid("cover JPEG is corrupt or truncated"))?;
-    let mut image = DynamicImage::ImageRgb8(rgb);
+    let image = if header.colorspace == Colorspace::Gray && profile.is_some() {
+        let mut gray = image::GrayImage::new(width, height);
+        decoder
+            .decompress(
+                input,
+                Image {
+                    pixels: gray.as_mut(),
+                    width: header.width,
+                    pitch: header.width,
+                    height: header.height,
+                    format: PixelFormat::GRAY,
+                },
+            )
+            .map_err(|_| invalid("cover JPEG is corrupt or truncated"))?;
+        DynamicImage::ImageLuma8(gray)
+    } else {
+        let mut rgb = RgbImage::new(width, height);
+        decoder
+            .decompress(
+                input,
+                Image {
+                    pixels: rgb.as_mut(),
+                    width: header.width,
+                    pitch: header.width * 3,
+                    height: header.height,
+                    format: PixelFormat::RGB,
+                },
+            )
+            .map_err(|_| invalid("cover JPEG is corrupt or truncated"))?;
+        DynamicImage::ImageRgb8(rgb)
+    };
+    let mut image = match profile {
+        Some(profile) => profile.convert(image)?,
+        None => image,
+    };
     image.apply_orientation(orientation);
     Ok(image)
 }
 
 /// Check framing and limits before native decoding. The native decoder must
 /// also finish without warnings; an EOI marker alone cannot prove completeness.
-fn verify_container(input: &[u8]) -> Result<(u32, u32, Orientation)> {
+struct VerifiedJpeg {
+    width: u32,
+    height: u32,
+    orientation: Orientation,
+    profile: Option<IccProfile>,
+}
+
+fn verify_container(input: &[u8]) -> Result<VerifiedJpeg> {
     if !input.starts_with(&[0xff, 0xd8]) {
         return Err(invalid("cover JPEG start marker is invalid"));
     }
@@ -57,6 +91,8 @@ fn verify_container(input: &[u8]) -> Result<(u32, u32, Orientation)> {
     let mut frame = None;
     let mut orientation = None;
     let mut scans = 0;
+    let mut icc_chunks: Vec<Option<&[u8]>> = Vec::new();
+    let mut icc_bytes = 0usize;
     loop {
         let marker = next_marker(input, &mut position)?;
         if marker == 0xd9 {
@@ -67,11 +103,23 @@ fn verify_container(input: &[u8]) -> Result<(u32, u32, Orientation)> {
             if scans == 0 {
                 return Err(invalid("cover JPEG scan is missing"));
             }
-            return Ok((
+            let profile = if icc_chunks.is_empty() {
+                None
+            } else {
+                let mut bytes = Vec::with_capacity(icc_bytes);
+                for chunk in icc_chunks {
+                    bytes.extend_from_slice(
+                        chunk.ok_or_else(|| invalid("image JPEG ICC profile is incomplete"))?,
+                    );
+                }
+                Some(IccProfile::parse(&bytes)?)
+            };
+            return Ok(VerifiedJpeg {
                 width,
                 height,
-                orientation.unwrap_or(Orientation::NoTransforms),
-            ));
+                orientation: orientation.unwrap_or(Orientation::NoTransforms),
+                profile,
+            });
         }
         if !matches!(
             marker,
@@ -123,7 +171,24 @@ fn verify_container(input: &[u8]) -> Result<(u32, u32, Orientation)> {
                 orientation = Some(verify_exif(&data[6..])?);
             }
             0xe2 if data.starts_with(b"ICC_PROFILE\0") => {
-                return Err(ArtworkIssue::ColorProfile.into());
+                if data.len() <= 14 || data[12] == 0 || data[13] == 0 || data[12] > data[13] {
+                    return Err(invalid("image JPEG ICC profile chunk is invalid"));
+                }
+                let count = usize::from(data[13]);
+                if icc_chunks.is_empty() {
+                    icc_chunks.resize(count, None);
+                }
+                let slot = usize::from(data[12] - 1);
+                icc_bytes += data.len() - 14;
+                if icc_chunks.len() != count
+                    || icc_chunks[slot].is_some()
+                    || icc_bytes > MAX_ICC_BYTES
+                {
+                    return Err(invalid(
+                        "image JPEG ICC profile is repeated, inconsistent or exceeds its limit",
+                    ));
+                }
+                icc_chunks[slot] = Some(&data[14..]);
             }
             _ => {}
         }

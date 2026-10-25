@@ -3,4 +3,8 @@ import type { AudioFormat } from "./AudioFormat";
 import type { SourceMappingProblem } from "./SourceMappingProblem";
 import type { SourceTrackMatch } from "./SourceTrackMatch";
 
-export type SourceAssessment = { release_id: string, peer: string, folder: string, format: AudioFormat, tracks: Array<SourceTrackMatch>, problems: Array<SourceMappingProblem>, complete_mapping: boolean, advertised_quality_matches: boolean, edition_verified: boolean, audio_verified: boolean, requires_user_review: boolean, };
+/**
+ * `can_approve` permits unknown quality metadata, not an encoding claim.
+ * Known mismatches and incomplete mappings still block source approval.
+ */
+export type SourceAssessment = { release_id: string, peer: string, folder: string, format: AudioFormat, tracks: Array<SourceTrackMatch>, problems: Array<SourceMappingProblem>, complete_mapping: boolean, advertised_quality_matches: boolean, can_approve: boolean, edition_verified: boolean, audio_verified: boolean, requires_user_review: boolean, };

@@ -22,6 +22,7 @@ flate2 = "1.1.10"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 httpdate = "1.0.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+moxcms = { version = "0.8.1", default-features = false, features = ["lut"] }
 id3 = { version = "1.17.2", default-features = false, features = ["decode_picture"] }
 openidconnect = { version = "4.0.1", default-features = false }
 png = "0.18.1"

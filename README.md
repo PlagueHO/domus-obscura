@@ -4,6 +4,9 @@ Personal home-media management with Rust, React, and SQLite.
 
 **Status: foundation implementation only.** This is not the complete V1 application and is not ready for public exposure. The approved scope is in [issue #1](https://github.com/PlagueHO/domus-obscura/issues/1).
 
+See the [backend services and domains](docs/backend-architecture.md) for architecture
+diagrams, current boundaries and planned changes.
+
 ## Implemented locally
 
 - Shared Rust path validation, bounded pages, job states, and output-template previews.
@@ -442,8 +445,14 @@ Missing tracks, extra or mixed audio, unknown files and ambiguous matches remain
 visible problems. Common image/document/playlist assets are listed but are
 not selected for download. Only the separately approved cover is used for output.
 
-MP3 attributes must explicitly advertise 320 kbps and non-VBR to match the
-requested advertised quality. Missing attributes stay unknown. These attributes
+MP3 attributes must explicitly advertise 320 kbps and non-VBR to confirm the
+requested advertised quality. Missing attributes stay unknown but do not block
+source acknowledgement. Known non-320 bitrates or VBR still block approval.
+The [protocol documentation](https://nicotine-plus.org/doc/SLSKPROTOCOL.html#file-attribute-combinations)
+permits missing attributes; modern SoulseekQt MP3 results normally omit the VBR
+flag. Folder replies also carry per-file attributes, but peers can omit them.
+Do not infer CBR from a missing flag or manufacture values from search results.
+These attributes
 do not prove encoding. Even a complete mapping has `edition_verified: false`,
 `audio_verified: false` and `requires_user_review: true`. The report does not
 approve a source, prove rights, claim a job, queue audio or create staging.
@@ -472,7 +481,7 @@ create transfer intents or contact peers. Neither action approves artwork.
 
 The job must be idle in `queued` or `searching`, with no pending control or
 committed source. Destination observations must still match the approved plan.
-An incomplete or ambiguous mapping, unknown/different advertised MP3 quality,
+An incomplete or ambiguous mapping, different advertised MP3 quality,
 wrong digest or stale version blocks approval. Even an approved candidate keeps
 `edition_verified: false`, `audio_verified: false` and
 `requires_user_review: true`. Complete audio validation remains mandatory.
@@ -790,8 +799,9 @@ No operation silently approves artwork, substitutes a cover or skips required ar
 
 Prepare a permitted local replacement or select another verified cached CAA image
 with the existing commands. For transparency, pass an explicit RGB background.
-Animated, profiled and unsupported images need a supported replacement; this
-workflow does not implement frame extraction or color management.
+Valid supported RGB/grayscale profiles are converted to sRGB during preparation.
+Animated images and unsupported profile classes or coding still need a supported
+replacement. This workflow does not implement frame extraction.
 Read the retained JPEG preview and approve its exact hash. Then save the offered
 choice and resume the saved state:
 
@@ -831,7 +841,23 @@ The isolated Rust helper accepts static PNG and supported JPEG bytes. It applies
 
 JPEG input uses the safe [TurboJPEG binding](https://docs.rs/turbojpeg/1.5.1/turbojpeg/struct.Decompressor.html) and pinned [libjpeg-turbo 3.2.0](https://github.com/libjpeg-turbo/libjpeg-turbo/releases/tag/3.2.0). An independent bounded container walk requires one exact image, valid segment boundaries, an end marker without trailing data, 8-bit baseline/progressive coding, and at most 32 scans. Pixel bounds apply before native decoding. Only RGB, YCbCr and grayscale are accepted. Native decoding must finish without an error or warning. Generated baseline/progressive and color/grayscale tests reject missing end markers and incomplete entropy in each scan, including inputs with a restored end marker. Two earlier pure-Rust decoder candidates silently accepted that damage and are not used for input acceptance.
 
-Transparent pixels require an explicit background color. Opaque images with an alpha channel do not need that decision. The helper composites before resizing to prevent hidden colors from entering the result. PNG input must end with a complete `IEND` chunk and have no trailing data. Both formats reject malformed or ambiguous EXIF orientation instead of guessing. Animated images, ICC-profiled images and unsupported formats return typed decision errors. The preparation adapters persist these decisions as described above. Frame selection and color management remain unfinished; use a supported replacement.
+Transparent pixels require an explicit background color. Opaque images with an alpha channel do not need that decision. The helper composites before resizing to prevent hidden colors from entering the result. PNG input must end with a complete `IEND` chunk and have no trailing data. Both formats reject malformed or ambiguous EXIF orientation instead of guessing. Animated images and unsupported formats return typed decision errors. The preparation adapters persist these decisions as described above. Frame selection remains unfinished.
+
+The shared normalizer converts valid RGB/grayscale ICC profiles to sRGB with
+[moxcms 0.8.1](https://docs.rs/moxcms/0.8.1/moxcms/struct.ColorProfile.html).
+It preserves alpha and 16-bit PNG precision through conversion, before
+compositing and resizing. It never strips a profile and assumes the old pixels
+are sRGB. JPEG profile chunks must have a complete, consistent sequence without
+duplicates. PNG profile checks include chunk CRC, ordering, conflicts and a
+complete zlib stream without trailing data. Profiles are limited to 1 MiB,
+128 tags and bounded tone/lookup tables. Malformed profiles are errors, not
+recoverable questions. Valid but unsupported profile classes retain the explicit
+replacement decision. The API includes the saved issue reason in its error.
+
+This helper has no album-plan or UI dependency and can normalize artist images
+when an artist provider is added. The installed CAA adapter supplies exact-release
+artwork only; this change does not add artist-photo discovery or arbitrary URLs.
+Existing retained previews and approvals remain unchanged.
 
 Encoded input and output are each limited to 8 MiB. Source sides are limited to 8192 pixels, the pixel count to 16,777,216, and decoded pixel bytes to 64 MiB. Pixel checks occur before full image decoding. The [decoder allocation setting](https://docs.rs/image/0.25.10/image/struct.Limits.html) is best-effort, not a total-memory guarantee. Decoder metadata, conversion and resize buffers also use memory. The combined API/worker memory target remains unverified.
 
@@ -985,7 +1011,7 @@ The [CAA API](https://musicbrainz.org/doc/Cover_Art_Archive/API) uses release-sp
 
 The listing parser binds the response to one exact release. It preserves ordered image IDs, edit IDs, types, comments and separate provider approval flags. IDs remain decimal strings without JavaScript precision loss. An image request must come from that validated listing. It never substitutes a release group, another release, a thumbnail or an arbitrary source URL. The parser accepts at most 200 images and 2 MiB. Text and type counts have separate limits. Missing or inconsistent metadata returns an error rather than inferred values.
 
-The transport adapter makes only HTTPS requests. It starts at `coverartarchive.org`. Explicit redirect checks allow only the same release's archive item and exact filename at `archive.org`, `s3.us.archive.org` or a numeric `ia` shard under `us.archive.org`. At most four redirects are permitted. HTTP downgrade, changed items/files, credentials, queries, fragments and cycles fail. Legacy HTTP links in listing metadata become canonical HTTPS requests; an HTTP redirect is never followed. Unsupported archive routes fail explicitly.
+The transport adapter makes only HTTPS requests. It starts at `coverartarchive.org`. Explicit redirect checks allow only the same release's archive item and exact filename at `archive.org`, `s3.us.archive.org`, a numeric `ia` shard under `us.archive.org` or a numeric `dn` shard under `ca.archive.org`. At most four redirects are permitted. HTTP downgrade, changed items/files, credentials, queries, fragments and cycles fail. Legacy HTTP links in listing metadata become canonical HTTPS requests; an HTTP redirect is never followed. Unsupported archive routes fail explicitly.
 
 Each hop uses a new single-use capability from the existing catalog OS lock and monotonic budget. CAA and MusicBrainz conservatively share this budget and pause state. Automatic redirects, retries, proxies and content decompression are disabled. Response headers are bounded. Listing bodies are limited to 2 MiB and original image bodies to 8 MiB, including chunked responses. Only JSON listings and JPEG/PNG image content types are accepted. Images still require strict normalization; a content type and transport hash are not image validation. `Retry-After` survives failures. Unsupported intervals pause catalog requests. Each hop has a 15-second timeout and the complete operation has a 30-second limit.
 

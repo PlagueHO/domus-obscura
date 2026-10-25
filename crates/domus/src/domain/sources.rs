@@ -109,6 +109,8 @@ pub struct SourceMappingProblem {
     pub remote_path: Option<String>,
 }
 
+/// `can_approve` permits unknown quality metadata, not an encoding claim.
+/// Known mismatches and incomplete mappings still block source approval.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct SourceAssessment {
     pub release_id: String,
@@ -119,6 +121,7 @@ pub struct SourceAssessment {
     pub problems: Vec<SourceMappingProblem>,
     pub complete_mapping: bool,
     pub advertised_quality_matches: bool,
+    pub can_approve: bool,
     pub edition_verified: bool,
     pub audio_verified: bool,
     pub requires_user_review: bool,
@@ -331,6 +334,10 @@ pub fn assess_source(
                     | SourceMappingIssue::AdvertisedQualityUnknown
             )
         });
+    let can_approve = complete_mapping
+        && !problems
+            .iter()
+            .any(|problem| problem.issue == SourceMappingIssue::AdvertisedQualityMismatch);
     Ok(SourceAssessment {
         release_id: edition.release_id.clone(),
         peer: listing.peer.clone(),
@@ -340,6 +347,7 @@ pub fn assess_source(
         problems,
         complete_mapping,
         advertised_quality_matches,
+        can_approve,
         edition_verified: false,
         audio_verified: false,
         requires_user_review: true,

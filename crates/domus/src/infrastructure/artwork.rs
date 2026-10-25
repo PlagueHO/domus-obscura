@@ -8,6 +8,7 @@ use image::{DynamicImage, ImageDecoder, ImageFormat, Limits, Rgb, RgbImage};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
 
+mod color;
 mod jpeg;
 
 const MAX_COMPRESSED_BYTES: usize = 8 * 1024 * 1024;
@@ -72,7 +73,9 @@ impl CoverJpeg {
     }
 }
 
-/// CPU/blocking work for a bounded worker, not an async request thread.
+/// Shared image normalization for provider and local inputs, independent of
+/// album plans or UI state. CPU/blocking work belongs on a bounded worker.
+/// Valid RGB/grayscale ICC profiles are converted to sRGB before compositing.
 /// Other unsupported inputs and transparent pixels without an explicit
 /// background return errors instead of substituting content.
 pub fn normalize_cover(input: &[u8], background: Option<[u8; 3]>) -> Result<CoverJpeg> {
@@ -86,10 +89,14 @@ pub fn normalize_cover(input: &[u8], background: Option<[u8; 3]>) -> Result<Cove
     let image = match image::guess_format(input).map_err(|_| invalid("cover format is unknown"))? {
         ImageFormat::Jpeg => jpeg::decode(input)?,
         ImageFormat::Png => {
-            let orientation = verify_png(input)?;
+            let (orientation, profile) = verify_png(input)?;
             let decoder = PngDecoder::with_limits(Cursor::new(input), limits)
                 .map_err(|_| invalid("cover PNG header is invalid or exceeds decoder limits"))?;
-            decode(decoder, orientation)?
+            let image = decode(decoder, orientation)?;
+            match profile {
+                Some(profile) => profile.convert(image)?,
+                None => image,
+            }
         }
         _ => return Err(ArtworkIssue::Unsupported.into()),
     };
@@ -150,8 +157,8 @@ fn validate_dimensions(width: u32, height: u32, bytes_per_pixel: u64) -> Result<
     Ok(())
 }
 
-fn verify_png(input: &[u8]) -> Result<Orientation> {
-    verify_png_container(input)?;
+fn verify_png(input: &[u8]) -> Result<(Orientation, Option<color::IccProfile>)> {
+    let profile = verify_png_container(input)?;
     let mut decoder = png::Decoder::new_with_limits(
         Cursor::new(input),
         png::Limits {
@@ -160,6 +167,7 @@ fn verify_png(input: &[u8]) -> Result<Orientation> {
         },
     );
     decoder.set_ignore_text_chunk(true);
+    decoder.set_ignore_iccp_chunk(true);
     let header = decoder
         .read_header_info()
         .map_err(|_| invalid("cover PNG header is invalid or exceeds decoder limits"))?;
@@ -184,22 +192,23 @@ fn verify_png(input: &[u8]) -> Result<Orientation> {
     reader
         .finish()
         .map_err(|_| invalid("cover PNG is corrupt or truncated"))?;
-    if reader.info().icc_profile.is_some() {
-        return Err(ArtworkIssue::ColorProfile.into());
-    }
-    reader
+    let orientation = reader
         .info()
         .exif_metadata
         .as_deref()
         .map(verify_exif)
         .transpose()
-        .map(|orientation| orientation.unwrap_or(Orientation::NoTransforms))
+        .map(|orientation| orientation.unwrap_or(Orientation::NoTransforms))?;
+    Ok((orientation, profile))
 }
 
-fn verify_png_container(input: &[u8]) -> Result<()> {
+fn verify_png_container(input: &[u8]) -> Result<Option<color::IccProfile>> {
     let error = || invalid("cover PNG is truncated or has trailing data");
     let mut position = 8usize;
     let mut exif = false;
+    let mut profile = None;
+    let mut image_data = false;
+    let mut srgb = false;
     loop {
         let header = input
             .get(position..)
@@ -216,13 +225,69 @@ fn verify_png_container(input: &[u8]) -> Result<()> {
                 if length != 0 || end != input.len() {
                     return Err(error());
                 }
-                return Ok(());
+                return Ok(profile);
             }
             b"eXIf" => {
                 if exif {
                     return Err(invalid("cover EXIF orientation metadata is ambiguous"));
                 }
                 exif = true;
+            }
+            b"PLTE" | b"IDAT" => image_data = true,
+            b"sRGB" => {
+                if profile.is_some() {
+                    return Err(invalid("image PNG has conflicting color profiles"));
+                }
+                srgb = true;
+            }
+            b"iCCP" => {
+                if image_data || srgb || profile.is_some() {
+                    return Err(invalid(
+                        "image PNG color profile is repeated, late or conflicting",
+                    ));
+                }
+                let chunk = &input[position + 4..end - 4];
+                let mut crc = u32::MAX;
+                for byte in chunk {
+                    crc ^= u32::from(*byte);
+                    for _ in 0..8 {
+                        crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+                    }
+                }
+                if (!crc).to_be_bytes() != input[end - 4..end] {
+                    return Err(invalid("image PNG color profile checksum is invalid"));
+                }
+                let data = &input[position + 8..end - 4];
+                let name_end = data
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .ok_or_else(|| invalid("image PNG color profile name is invalid"))?;
+                if !(1..=79).contains(&name_end)
+                    || data.get(name_end + 1) != Some(&0)
+                    || data[..name_end]
+                        .iter()
+                        .any(|byte| !matches!(byte, 32..=126 | 161..=255))
+                    || data[0] == b' '
+                    || data[name_end - 1] == b' '
+                    || data[..name_end].windows(2).any(|pair| pair == b"  ")
+                {
+                    return Err(invalid("image PNG color profile header is invalid"));
+                }
+                let compressed = &data[name_end + 2..];
+                let mut decoder = flate2::Decompress::new(true);
+                let mut bytes = Vec::with_capacity(color::MAX_ICC_BYTES + 1);
+                let status = decoder
+                    .decompress_vec(compressed, &mut bytes, flate2::FlushDecompress::Finish)
+                    .map_err(|_| invalid("image PNG color profile compression is invalid"))?;
+                if status != flate2::Status::StreamEnd
+                    || bytes.len() > color::MAX_ICC_BYTES
+                    || decoder.total_in() != compressed.len() as u64
+                {
+                    return Err(invalid(
+                        "image PNG color profile exceeds its limit, is truncated or has trailing data",
+                    ));
+                }
+                profile = Some(color::IccProfile::parse(&bytes)?);
             }
             _ => {}
         }

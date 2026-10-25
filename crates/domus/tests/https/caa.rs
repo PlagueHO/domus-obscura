@@ -8,7 +8,7 @@ const RELEASE: &str = "20000000-0000-4000-8000-000000000001";
 const IMAGE: &str = "9007199254740995";
 const CAA: &str = "coverartarchive.org";
 const ARCHIVE: &str = "archive.org";
-const SHARD: &str = "ia800504.us.archive.org";
+const SHARD: &str = "dn721806.ca.archive.org";
 
 fn listing() -> Value {
     json!({

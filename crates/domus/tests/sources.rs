@@ -63,6 +63,7 @@ fn source_exact_names_and_numbers_map_in_release_order_without_approval_or_encod
         let report = assess_source(&edition(&["One", "Two"]), format, &listing(&names))?;
         assert!(report.complete_mapping);
         assert!(report.advertised_quality_matches);
+        assert!(report.can_approve);
         assert_eq!(report.tracks.len(), 2);
         assert!(report.problems.is_empty());
         assert!(report.tracks[0].remote_path.to_lowercase().contains("one."));
@@ -120,6 +121,7 @@ fn source_missing_extra_mixed_unknown_and_changed_title_files_block_complete_map
         )?;
         assert!(!report.complete_mapping, "{names:?}");
         assert!(!report.advertised_quality_matches);
+        assert!(!report.can_approve);
         assert!(!report.problems.is_empty());
     }
     Ok(())
@@ -140,13 +142,28 @@ fn source_advertised_mp3_quality_is_separate_from_name_mapping_and_real_validati
             Some(SourceMappingIssue::AdvertisedQualityUnknown),
         ),
         (
-            Some(256),
-            Some(false),
-            Some(SourceMappingIssue::AdvertisedQualityMismatch),
+            None,
+            None,
+            Some(SourceMappingIssue::AdvertisedQualityUnknown),
         ),
         (
             Some(320),
             Some(true),
+            Some(SourceMappingIssue::AdvertisedQualityMismatch),
+        ),
+        (
+            None,
+            Some(true),
+            Some(SourceMappingIssue::AdvertisedQualityMismatch),
+        ),
+        (
+            Some(256),
+            None,
+            Some(SourceMappingIssue::AdvertisedQualityMismatch),
+        ),
+        (
+            Some(256),
+            Some(false),
             Some(SourceMappingIssue::AdvertisedQualityMismatch),
         ),
     ] {
@@ -157,6 +174,10 @@ fn source_advertised_mp3_quality_is_separate_from_name_mapping_and_real_validati
         assert!(report.complete_mapping);
         assert_eq!(report.advertised_quality_matches, issue.is_none());
         assert_eq!(report.problems.first().map(|problem| problem.issue), issue);
+        assert_eq!(
+            report.can_approve,
+            issue != Some(SourceMappingIssue::AdvertisedQualityMismatch)
+        );
         assert!(!report.audio_verified);
     }
     Ok(())

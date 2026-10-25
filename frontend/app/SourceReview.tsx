@@ -264,9 +264,21 @@ export function SourceReview({
           </Badge>
           <p>
             Advertised quality{" "}
-            {selected.assessment.advertised_quality_matches ? "matches" : "does not match"} · Audio
-            not verified by metadata review
+            {selected.assessment.advertised_quality_matches
+              ? "matches"
+              : selected.assessment.problems.some(
+                    (problem) => problem.issue === "advertised_quality_mismatch",
+                  )
+                ? "does not match"
+                : "is unknown"}{" "}
+            · Audio not verified by metadata review
           </p>
+          {selected.assessment.can_approve && !selected.assessment.advertised_quality_matches && (
+            <p>
+              The peer did not supply all quality attributes. You can acknowledge this source.
+              Downloaded audio must pass full quality checks before tagging or publication.
+            </p>
+          )}
           {selected.assessment.problems.length > 0 && (
             <ul className="warning">
               {selected.assessment.problems.map((problem, index) => (
@@ -297,12 +309,12 @@ export function SourceReview({
               <Check
                 checked={acknowledged}
                 onChange={setAcknowledged}
-                disabled={command.busy || !selected.assessment.complete_mapping}
+                disabled={command.busy || !selected.assessment.can_approve}
               >
                 I checked that this is the exact edition, and I have permission to download it.
               </Check>
               <Button
-                disabled={command.busy || !acknowledged || !selected.assessment.complete_mapping}
+                disabled={command.busy || !acknowledged || !selected.assessment.can_approve}
                 onClick={() => void command.run(approve)}
               >
                 Acknowledge this exact source

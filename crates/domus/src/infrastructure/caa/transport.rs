@@ -196,6 +196,10 @@ impl CaaRequest {
 fn archive_shard(host: &str) -> bool {
     host.strip_prefix("ia")
         .and_then(|host| host.strip_suffix(".us.archive.org"))
+        .or_else(|| {
+            host.strip_prefix("dn")
+                .and_then(|host| host.strip_suffix(".ca.archive.org"))
+        })
         .is_some_and(|number| {
             (6..=12).contains(&number.len()) && number.bytes().all(|byte| byte.is_ascii_digit())
         })

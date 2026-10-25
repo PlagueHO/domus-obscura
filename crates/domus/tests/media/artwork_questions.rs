@@ -5,6 +5,35 @@ use serde_json::json;
 use std::process::Command;
 
 const USE_COVER: &str = "Use approved cover";
+#[path = "../support/icc.rs"]
+mod icc;
+
+#[test]
+fn artwork_malformed_profile_is_an_error_not_a_recoverable_question() -> TestResult {
+    use image::ImageEncoder;
+    let mut fixture = Fixture::build_inner(AudioFormat::Flac, false, false)?;
+    release_owner(&fixture)?;
+    let mut bytes = Vec::new();
+    let mut encoder = image::codecs::png::PngEncoder::new(&mut bytes);
+    encoder.set_icc_profile(vec![0; 128])?;
+    encoder.write_image(&[10, 20, 30], 1, 1, image::ExtendedColorType::Rgb8)?;
+    let path = fixture._state.path().join("malformed-profile.png");
+    std::fs::write(&path, bytes)?;
+    assert!(matches!(
+        fixture
+            .store
+            .prepare_local_artwork_or_ask(fixture.job, fixture.version, &path, None, true),
+        Err(Error::InvalidInput(_))
+    ));
+    assert!(fixture.store.questions(Page::new(0, 10)?)?.is_empty());
+    assert!(
+        fixture
+            .store
+            .artwork_candidates(fixture.job, fixture.version, Page::new(0, 10)?)?
+            .is_empty()
+    );
+    Ok(())
+}
 
 fn write_credentials(path: &std::path::Path) -> TestResult {
     std::fs::write(
@@ -335,7 +364,10 @@ fn artwork_preparation_pauses_for_permission_background_and_unsupported_input() 
         } else if issue == ArtworkIssue::ColorProfile {
             let mut bytes = Vec::new();
             let mut encoder = image::codecs::png::PngEncoder::new(&mut bytes);
-            encoder.set_icc_profile(vec![0; 128])?;
+            let mut profile = moxcms::ColorProfile::new_srgb();
+            profile.cicp = None;
+            profile.profile_class = moxcms::ProfileClass::Abstract;
+            encoder.set_icc_profile(icc::profile(profile)?)?;
             encoder.write_image(&[10, 20, 30], 1, 1, image::ExtendedColorType::Rgb8)?;
             bytes
         } else {

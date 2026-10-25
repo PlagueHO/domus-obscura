@@ -8,6 +8,8 @@ use domus::infrastructure::worker::LocalAcquisition;
 use id3::{TagLike, Version};
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
+#[path = "../support/icc.rs"]
+mod icc;
 #[path = "../support/media.rs"]
 #[allow(dead_code)]
 mod media;
@@ -141,11 +143,23 @@ async fn browser_caa_search_and_download_keep_exact_release_evidence_and_separat
         }]
     }))?;
     let raw = rusqlite::Connection::open(&database)?;
+    let mut profiled_cover = Vec::new();
+    {
+        use image::ImageEncoder;
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut profiled_cover);
+        encoder.set_icc_profile(icc::profile(moxcms::ColorProfile::new_adobe_rgb())?)?;
+        encoder.write_image(
+            &[80, 140, 180, 80, 140, 180],
+            2,
+            1,
+            image::ExtendedColorType::Rgb8,
+        )?;
+    }
     for (key, bytes, sources) in [
         (listing_source.clone(), listing, vec![listing_source]),
         (
             format!("{image_source}#mbid-{RELEASE}-{image_id}.png"),
-            media::cover_source()?,
+            profiled_cover,
             vec![
                 image_source,
                 format!(
@@ -258,12 +272,10 @@ async fn browser_caa_search_and_download_keep_exact_release_evidence_and_separat
     )
     .await?;
     assert_eq!(missing_permission.status(), StatusCode::CONFLICT);
-    assert!(
-        json_body(missing_permission).await?["error"]
-            .as_str()
-            .ok_or("error")?
-            .contains("question")
-    );
+    let error = json_body(missing_permission).await?;
+    let message = error["error"].as_str().ok_or("error")?;
+    assert!(message.contains("question"));
+    assert!(message.contains("confirm permitted use"));
     raw.execute(
         "UPDATE jobs SET plan_version=plan_version+1 WHERE id=?1",
         [job],
@@ -457,8 +469,8 @@ async fn anonymous_https_approves_exact_album_and_publishes_verified_mp3_folder(
         .map(|(index, title)| {
             json!({
                 "remote_path":format!("Peer\\Album\\{:02} - {title}.mp3",index+1),
-                "expected_bytes":source.len(),"extension":"mp3","bitrate_kbps":320,
-                "duration_seconds":1,"vbr":false,"sample_rate":44100,"bit_depth":null
+                "expected_bytes":source.len(),"extension":"mp3","bitrate_kbps":null,
+                "duration_seconds":null,"vbr":null,"sample_rate":null,"bit_depth":null
             })
         })
         .collect::<Vec<_>>();
@@ -472,6 +484,9 @@ async fn anonymous_https_approves_exact_album_and_publishes_verified_mp3_folder(
     )
     .await?;
     assert_eq!(candidate["assessment"]["complete_mapping"], true);
+    assert_eq!(candidate["assessment"]["can_approve"], true);
+    assert_eq!(candidate["assessment"]["advertised_quality_matches"], false);
+    assert_eq!(candidate["assessment"]["audio_verified"], false);
     command(
         &client,
         &origin,

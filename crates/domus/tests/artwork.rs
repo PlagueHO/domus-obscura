@@ -6,6 +6,10 @@ use std::io::Cursor;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[path = "artwork/color.rs"]
+mod color;
+#[path = "support/icc.rs"]
+mod icc;
 #[path = "artwork/native.rs"]
 mod native;
 
@@ -218,7 +222,7 @@ fn artwork_applies_all_eight_exif_orientations_before_or_after_image_data() -> T
 }
 
 #[test]
-fn artwork_profiles_and_animation_require_decisions() -> TestResult {
+fn artwork_invalid_profiles_fail_and_animation_requires_a_decision() -> TestResult {
     let image = DynamicImage::ImageRgb8(RgbImage::new(2, 1));
     let mut input = Vec::new();
     let mut encoder = image::codecs::png::PngEncoder::new(&mut input);
@@ -229,7 +233,7 @@ fn artwork_profiles_and_animation_require_decisions() -> TestResult {
         image.height(),
         image.color().into(),
     )?;
-    rejected(&input, "color-management");
+    rejected(&input, "ICC profile");
 
     let mut input = encode(&image, ImageFormat::Png)?;
     let animation = png_chunk(b"acTL", &[0, 0, 0, 1, 0, 0, 0, 0]);

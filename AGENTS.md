@@ -134,6 +134,19 @@ its review binding with all transfer intents. Preserve manual/legacy receipts
 without manufacturing reviews. Startup and candidate commands require the
 current schema; never migrate state as a side effect of worker loading.
 
+Before any investigation, design, implementation or change to an external-service
+client or service, read the current API or protocol documentation for the affected
+operations. Do not rely on internal knowledge, assumptions or existing code alone.
+Check request and response fields, optional metadata, limits, errors and documented
+client/version differences. Cite the relevant documentation in the explanation
+or directly related repository documentation. If documentation is missing or
+unclear, state that limit and check maintained reference clients or isolated
+protocol fixtures before drawing conclusions. Do not present assumptions as facts.
+For Soulseek client or service work, always start with the
+[Soulseek protocol documentation maintained by Nicotine+](https://nicotine-plus.org/doc/SLSKPROTOCOL.html).
+It is a community reference, not an official specification; keep that distinction
+clear and check maintained client implementations when necessary.
+
 The Rust Soulseek client must support later extension to common client
 operations. Follow the "Soulseek client extension contract" in README.md.
 Keep wire codecs independent of sockets, SQLite, catalogs, worker state and
@@ -148,6 +161,13 @@ as a side effect of extension work. Preserve uncertainty and approval checks.
 Core services are in-process Rust modules, not separate servers.
 Keep discovery, metadata, artwork retrieval and acquisition behind the contracts
 in `application::services`. Register installed adapters in `ServiceHost`.
+Give every remote API integration a dedicated client struct behind an
+application-owned trait at the I/O boundary. Reuse an existing provider trait
+when it fits; do not add a redundant abstraction. Keep requests, protocol
+details, parsing and transport limits inside the adapter, not UI or route
+handlers. Keep workflow policy outside the client. Alternate providers and
+test clients must be replaceable through host registration without caller changes.
+Use shared cache functionality and preserve provider budgets.
 Use provider-scoped IDs. Never treat another provider's ID as a MusicBrainz ID
 or exact edition proof. Keep provider failures and independent pagination visible.
 Do not add hidden fallback, automatic identity mapping or acquisition retries.

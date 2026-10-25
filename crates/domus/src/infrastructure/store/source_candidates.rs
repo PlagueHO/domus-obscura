@@ -127,8 +127,8 @@ fn read(connection: &Connection, id: i64) -> Result<SourceCandidate> {
 }
 
 fn selectable(candidate: &SourceCandidate, plan: &StoredPlan) -> Result<Vec<SourceFile>> {
-    if !candidate.assessment.complete_mapping || !candidate.assessment.advertised_quality_matches {
-        return Err(Error::Conflict("source candidate has incomplete/ambiguous mapping or missing/different advertised quality; it cannot be approved".into()));
+    if !candidate.assessment.can_approve {
+        return Err(Error::Conflict("source candidate has incomplete/ambiguous mapping or different advertised quality; it cannot be approved".into()));
     }
     let files = candidate
         .assessment

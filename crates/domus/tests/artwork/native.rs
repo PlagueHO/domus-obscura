@@ -98,7 +98,7 @@ fn artwork_jpeg_framing_profiles_modes_and_limits_are_checked_before_decode() ->
     for position in [2, input.len() - 2] {
         let mut profiled = input.clone();
         profiled.splice(position..position, segment(0xe2, b"ICC_PROFILE\0\x01\x01")?);
-        rejected(&profiled, "color-management");
+        rejected(&profiled, "ICC profile");
     }
     let frame = input
         .windows(2)

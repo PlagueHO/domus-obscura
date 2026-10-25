@@ -16,6 +16,7 @@ flate2.workspace = true
 hyper-util.workspace = true
 httpdate.workspace = true
 image.workspace = true
+moxcms.workspace = true
 id3.workspace = true
 png.workspace = true
 openidconnect.workspace = true

@@ -35,6 +35,48 @@ Use Entra ID for one tenant/user pair in production. Explicit local development 
 - Share Rust policy across worker, API, CLI, and local MCP adapters.
 - Exclude playback, streaming, Plex integration, bulk cleanup, missing-track repair, multi-peer assembly, and runtime AI from V1.
 
+## Planned System Configuration Form
+
+The user requires a System configuration form to view and update backend JSON
+settings through the UI. This is a product requirement, not an implemented
+configuration editor. Keep system settings separate from personal preferences
+such as audio quality, image size and tag rules.
+
+Cover all supported backend JSON configuration fields through typed form controls,
+including optional and provider-specific settings. Show field descriptions,
+validation errors and whether a change needs a process restart. Distinguish saved
+configuration from the configuration currently active in each process. Never show
+a saved change as active before it takes effect.
+
+A backend JSON setting must control whether the form is editable or read-only.
+Read-only mode must still allow safe configuration viewing. Enforce this mode in
+the backend on every configuration write; disabled UI controls alone are not
+protection. Do not allow the UI to change this control setting or bypass it through
+another endpoint. The operator must change it outside the UI. The exact setting
+name and default need to be defined during implementation.
+
+Do not return saved passwords, tokens, private keys or other secret values to the
+browser. Show only their configured state. Where secret updates are supported,
+use write-only replacement controls; an unchanged or blank field must not erase
+an existing secret. Keep secret values out of logs, URLs and audit records.
+
+Validate proposed changes with the same authoritative Rust rules used at startup.
+Save changes atomically and reject stale edits instead of overwriting concurrent
+operator changes. Report failed saves and activation failures explicitly. Preserve
+the last valid configuration when validation or persistence fails. Record which
+settings changed without recording secrets.
+
+Keep production authentication, guarded browser commands, TLS validation, native
+root binding and other operational boundaries in force. A configuration save must
+not implicitly approve media work, rebind roots or change frozen plans, saved
+settings versions, approvals or receipts. Identify restart-only changes and
+changes that need a separate explicit operation.
+
+Acceptance must cover complete supported-field coverage, valid and invalid edits,
+secret redaction and replacement, stale-edit rejection, failed-save recovery and
+restart-required status. Verify that read-only mode rejects direct write requests
+as well as disabling form edits, and cannot be disabled from the UI.
+
 ## Future Conversational Workflow
 
 The user requested a chat interface for album discovery, acquisition and library
@@ -50,13 +92,153 @@ For that first test only, the user accepted the closest available complete
 remains unknown. This does not authorize silent edition substitution in the
 production acquisition workflow.
 
-## Proposed MP3 VBR Support
+## Service Contracts Independent of the UI
 
-The user requested consideration of MP3 variable bitrate (VBR) as a separate
-requested quality option because many source results advertise VBR. This is not
-yet approved or implemented. Keep the current MP3 320 kbps CBR validation unchanged.
-Define the VBR quality criteria and update source assessment, frozen plans,
-audio validation and shared contracts together before accepting VBR.
+The user requires services to remain useful beyond the current browser workflow.
+Treat the current UI as one client, not the service specification. Reuse the
+existing in-process `application::services` contracts and `ServiceHost`; do not
+introduce separate servers or a generic plugin framework for this requirement.
+
+Each remote API integration must have a dedicated client type behind an interface
+abstraction. In Rust, use a client struct and an application-owned trait at the
+real I/O boundary. Reuse existing provider traits where they fit; do not add a
+second interface with no distinct purpose. Alternate providers and test clients
+must be replaceable through host registration, without changing callers.
+Keep remote requests, protocol details, response parsing and transport limits
+inside the client adapter. Keep workflow policy outside it. Use the shared cache
+contract and normal provider budgets rather than per-client replacements.
+
+Keep provider operations, application policy and transport adapters separate.
+Discovery, metadata, artwork and source search must not require a browser page
+or an acquisition plan merely because the current screen uses one. Keep approved
+acquisition, preparation and publication behind their existing plan, permission,
+claim and receipt checks. Reusable reads must never become a route around those
+checks. Read services may still update bounded caches and provider budgets.
+
+Use typed requests and results with explicit filters, limits, pagination,
+provider-scoped IDs and capability information. Keep unsupported operations,
+unknown metadata, partial results, provider errors and retry conditions visible.
+Do not assume that every provider supports every filter. Share domain rules across
+HTTP, CLI and future clients instead of implementing policy in React or handlers.
+Keep credentials and native paths in trusted host configuration, not client tool
+arguments. No public MCP endpoint is authorized by this requirement.
+
+Separate user defaults from explicit per-operation choices. Freeze effective
+choices when creating an approved plan. Test service contracts without React and
+test adapter mapping separately. Extend contracts compatibly where possible;
+never silently reinterpret saved settings, approved plans or existing receipts.
+
+## Shared Local Cache Service
+
+The user requires one shared local cache service for provider adapters, APIs and
+other application features. Do not build separate storage, expiry and eviction
+implementations for each API client. Initial uses include album covers, artist
+images and reusable provider responses.
+
+Start with a simple file-based adapter behind a small in-process cache contract.
+Keep callers independent of file layout so a later storage adapter can replace
+the file implementation without changing provider or UI workflows. This is a
+product requirement, not an implemented cache migration or a new network service.
+
+Provide shared lookup, atomic storage, expiry, invalidation and bounded eviction.
+Use provider-scoped logical keys and content digests, not caller-supplied native
+paths. Keep cache files in application-owned local storage outside library roots.
+Bound item sizes and total storage. Coordinate concurrent readers and writers;
+never expose a partial write as a valid entry. Report misses, expired entries,
+corruption and storage failures distinctly. Do not silently serve stale content.
+
+Keep provider-specific freshness, HTTP validation and provenance rules in provider
+adapters. Keep provider request budgets and backoff separate from cache storage;
+every network request still needs its normal permit. Share cache mechanics, not
+assumptions that all providers have the same policy. Do not add arbitrary URL
+fetching, cache credentials or bypass image validation through the cache.
+
+Keep evictable entries separate from immutable approved artwork evidence, exact
+JPEG previews and acquisition receipts. Eviction must never remove evidence
+required by an approved plan or recovery. Preserve existing evidence bindings,
+freshness checks and provider limits when moving current caches to this service.
+Test cache behavior independently of React and live providers.
+
+## Planned Tag Update, Retention and Removal Rules
+
+The user requires future configurable rules for tags to update, tags to retain
+unchanged and tags to remove. This policy is not implemented. Current
+normalization writes a fresh supported tag set from the frozen exact release
+and approved cover; it does not retain other source tags.
+
+Keep these three actions explicit. Freeze the effective policy with the plan,
+show its effects before approval and verify the written tags against that policy.
+Retained tags must not bypass metadata validation or required output rules.
+Do not change current tag behavior until the supported rules are agreed.
+
+## Planned Image Size Setting and Cached Variants
+
+The user requires an image-size setting with targets of 200 x 200, 400 x 400
+(recommended) or 800 x 800 pixels. The album/artist image retrieval service must
+produce the scaled variant before artwork is embedded in MP3 files or written
+to the album folder. This is planned behavior, not the current implementation.
+Recommend 400 x 400 for new settings; do not change existing approved previews.
+
+Treat the target as a bounding box. Preserve aspect ratio without cropping,
+stretching or padding. Never enlarge an image. A square original can reach the
+selected square size; a non-square or smaller original retains its proportions
+and may produce smaller dimensions. Show the actual output dimensions.
+
+The retrieval service must orchestrate original retrieval, strict validation,
+color conversion and downscaling through the shared image-processing path.
+Keep remote API clients focused on transport and provider details. Do not
+duplicate resize logic in clients, UI components, MP3 writers or publication.
+The same image-processing capability must be reusable for artist images when
+an artist-image provider is installed.
+
+Use the shared cache service to retain both the original image and scaled
+variants. Bind each variant to the original content digest, target dimensions,
+normalization version and all output-affecting choices, including any explicit
+transparency background. Keep provider identity, provenance and freshness
+bindings. Reuse a valid original to create another size without downloading it
+again; do not reuse stale provider evidence as fresh acquisition authority.
+Apply the same size, integrity and eviction limits to cached variants.
+
+Freeze the selected target and processing version with each new plan and bind
+approval to the exact resulting JPEG. Use the same approved bytes for embedded
+artwork and `folder.jpg`. Settings changes must not silently replace existing
+previews, approvals or receipts. A different target needs a new preview and
+approval through a new plan version. Keep retained approved evidence separate
+from evictable cached originals and variants.
+
+Acceptance must cover all three targets, square and non-square originals,
+smaller originals with no enlargement, cache reuse without another fetch,
+variant-key separation and unchanged existing approvals. Verify that embedded
+artwork and the folder image match the exact approved JPEG bytes.
+
+## Planned Audio Format and Quality Preferences
+
+The user requested a planned user-settings system for accepted audio formats and
+quality options. Each option can be enabled or disabled and has an explicit
+priority. Include MP3 CBR, MP3 VBR, FLAC and M4A in the design. M4A is less preferred
+by the user; recommend keeping it disabled by default. VBR is an encoding mode,
+not a fixed bitrate. M4A is a container; distinguish AAC from lossless ALAC.
+
+This system is not implemented. Preserve existing MP3 320 kbps CBR and FLAC
+behavior until their replacements pass validation. Do not enable a new option
+until source assessment, complete audio validation, metadata writing and output
+verification support it without transcoding.
+
+Use one ordered list of accepted format/quality profiles. Recommend preserving
+MP3 320 kbps CBR as the initial enabled default, with other profiles opt-in.
+Freeze the policy version and selected profile with each plan. Settings changes
+must not change saved approvals. Recommend presenting a lower-priority match for
+review, not starting it automatically. A different selected format requires a
+new plan and approval; exact edition, complete single-peer album, source rights
+and exact cover approval remain separate requirements.
+
+Search may include extension terms such as `mp3`, `flac` or `m4a` as hints.
+They are not typed suffix or bitrate filters in the current protocol request.
+Always filter returned extensions and metadata locally. Group results by peer
+and folder and assess the complete listing before ranking eligible sources.
+Missing bitrate or CBR/VBR metadata is unknown, not a match or a mismatch.
+Keep partial searches and peer errors visible; a bounded search cannot prove
+that the preferred quality is unavailable across the network.
 
 ## Planned Provider Throttling Review
 

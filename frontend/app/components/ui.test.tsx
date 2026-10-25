@@ -5,8 +5,63 @@ import { Alert, Button, Cover } from "./ui";
 import { ArtworkReview } from "../ArtworkReview";
 import { OutputPreview } from "../../src/OutputPreview";
 import type { ArtworkCandidate } from "../../src/generated/ArtworkCandidate";
+import type { SourceCandidate } from "../../src/generated/SourceCandidate";
+import { SourceReview } from "../SourceReview";
 
 describe("production components", () => {
+  it.each([true, false])(
+    "keeps unknown quality distinct from mismatches (can approve: %s)",
+    (canApprove) => {
+      const candidate: SourceCandidate = {
+        id: 1,
+        job_id: 1,
+        plan_version: 2,
+        plan_sha256: "plan",
+        review_sha256: "review",
+        created_at: 1,
+        approved_at: null,
+        listing: { peer: "peer", folder: "remote", directories: 1, files: [] },
+        assessment: {
+          release_id: "release",
+          peer: "peer",
+          folder: "remote",
+          format: "mp3",
+          tracks: [],
+          complete_mapping: true,
+          advertised_quality_matches: false,
+          can_approve: canApprove,
+          edition_verified: false,
+          audio_verified: false,
+          requires_user_review: true,
+          problems: [
+            {
+              issue: canApprove ? "advertised_quality_unknown" : "advertised_quality_mismatch",
+              track_number: 1,
+              remote_path: "remote/One.mp3",
+            },
+          ],
+        },
+      };
+      const markup = renderToStaticMarkup(
+        <SourceReview
+          base="/api/jobs/1/plans/2"
+          releaseId="release"
+          format="mp3"
+          candidates={[candidate]}
+          selected={candidate}
+          onSelect={() => {}}
+          refresh={() => {}}
+          localEnabled
+        />,
+      );
+      expect(markup).toContain(canApprove ? "is unknown" : "does not match");
+      expect(markup.includes("You can acknowledge this source.")).toBe(canApprove);
+      expect(markup).toContain("not verified by metadata review");
+      const checkbox = markup.match(/<input[^>]*type="checkbox"[^>]*>/)?.[0];
+      expect(checkbox).toBeDefined();
+      expect(checkbox?.includes("disabled")).toBe(!canApprove);
+    },
+  );
   it("renders cover thumbnails and a separate exact preview below its label", () => {
     const candidate: ArtworkCandidate = {
       id: 4,

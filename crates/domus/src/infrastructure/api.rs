@@ -422,7 +422,16 @@ impl Api {
         self.0
             .services
             .database
-            .run(operation)
+            .run(move |store| match operation(store) {
+                Err(Error::ArtworkRequired(id)) => {
+                    let decision = store.artwork_decision(id)?;
+                    Err(Error::Conflict(format!(
+                        "artwork needs user input; question {id} is saved: {}",
+                        decision.issue
+                    )))
+                }
+                result => result,
+            })
             .await
             .map_err(ApiError::from)
     }

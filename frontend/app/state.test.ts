@@ -46,6 +46,7 @@ const source: SourceCandidate = {
     problems: [],
     complete_mapping: true,
     advertised_quality_matches: true,
+    can_approve: true,
     edition_verified: false,
     audio_verified: false,
     requires_user_review: true,
