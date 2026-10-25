@@ -88,8 +88,8 @@ fn run(args: &[String]) -> Result<()> {
                 JobState, OutputPreview, OutputSettings, OutputTemplate, PlannedTrack,
             };
             use domus::infrastructure::api::{
-                Answer, ApiMessage, ApproveArtwork, ArtistSearch, BrowseQuery,
-                CatalogBatchPlanRequest, CatalogPageQuery, CatalogPlanRequest,
+                Answer, ApiMessage, ApproveArtwork, ArtistSearch, BrowseQuery, CaaCoverOption,
+                CaaCoverSearch, CatalogBatchPlanRequest, CatalogPageQuery, CatalogPlanRequest,
                 CatalogPlanSelection, CatalogResumeRequest, CreateJob, CreatedJob, EventCursor,
                 PageQuery, PrepareCaaArtwork, ResumeArtwork, SaveSettings,
             };
@@ -313,6 +313,14 @@ fn run(args: &[String]) -> Result<()> {
                     SessionIdentity::export_to_string(&config),
                 ),
                 ("ApiMessage.ts", ApiMessage::export_to_string(&config)),
+                (
+                    "CaaCoverOption.ts",
+                    CaaCoverOption::export_to_string(&config),
+                ),
+                (
+                    "CaaCoverSearch.ts",
+                    CaaCoverSearch::export_to_string(&config),
+                ),
                 ("PageQuery.ts", PageQuery::export_to_string(&config)),
                 ("BrowseQuery.ts", BrowseQuery::export_to_string(&config)),
                 ("SaveSettings.ts", SaveSettings::export_to_string(&config)),

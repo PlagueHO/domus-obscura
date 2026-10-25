@@ -333,6 +333,7 @@ export function RequestPage({
                 }
               />
               <ArtworkReview
+                key={base}
                 base={base}
                 candidates={artwork.data ?? []}
                 selected={cover}

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { ArtworkCandidate } from "../src/generated/ArtworkCandidate";
 import type { ApproveArtwork } from "../src/generated/ApproveArtwork";
+import type { CaaCoverSearch } from "../src/generated/CaaCoverSearch";
+import type { PrepareCaaArtwork } from "../src/generated/PrepareCaaArtwork";
 import { request } from "./api";
 import { useCommand } from "./hooks";
 import { Alert, Button, Check, Empty } from "./components/ui";
@@ -22,7 +24,35 @@ export function ArtworkReview({
   const [exact, setExact] = useState(false);
   const [loaded, setLoaded] = useState<string>();
   const [imageError, setImageError] = useState(false);
+  const [search, setSearch] = useState<CaaCoverSearch>();
+  const [imageId, setImageId] = useState("");
+  const [providerPermitted, setProviderPermitted] = useState(false);
+  const [background, setBackground] = useState<"original" | "black" | "white">("original");
   const command = useCommand();
+  async function findCovers() {
+    const result = await request<CaaCoverSearch>(`${base}/artwork/caa/search`, { method: "POST" });
+    setSearch(result);
+    setImageId(
+      result.images.find((image) => image.front)?.image_id ?? result.images[0]?.image_id ?? "",
+    );
+    setProviderPermitted(false);
+  }
+  async function downloadCover() {
+    if (!imageId || !providerPermitted) return;
+    const body: PrepareCaaArtwork = {
+      image_id: imageId,
+      background:
+        background === "original" ? null : background === "black" ? [0, 0, 0] : [255, 255, 255],
+      acknowledge_permitted_use: true,
+    };
+    const candidate = await request<ArtworkCandidate>(`${base}/artwork/caa/download`, { body });
+    onSelect(candidate.id);
+    setExact(false);
+    setLoaded(undefined);
+    setImageError(false);
+    setProviderPermitted(false);
+    refresh();
+  }
   async function upload(file: File | undefined) {
     if (!file || !permitted) return;
     if (file.size === 0 || file.size > 8 * 1024 * 1024)
@@ -47,6 +77,71 @@ export function ArtworkReview({
     <section className="review-section" aria-labelledby="cover-heading">
       <h2 id="cover-heading">Choose the cover</h2>
       <p>
+        Find Cover Art Archive images for this exact release. Download a selected image to create a
+        normalized preview. Provider edit approval does not grant permission or approve your cover.
+      </p>
+      <Button
+        variant="secondary"
+        disabled={command.busy}
+        onClick={() => void command.run(findCovers)}
+      >
+        {command.busy ? "Working on cover…" : "Find covers for this edition"}
+      </Button>
+      {search && search.images.length === 0 && (
+        <Empty>
+          No Cover Art Archive images were found for this exact edition. You can upload a permitted
+          local cover below.
+        </Empty>
+      )}
+      {search && search.images.length > 0 && (
+        <fieldset disabled={command.busy}>
+          <legend>Cover Art Archive suggestions</legend>
+          <label>
+            Image for this edition
+            <select
+              value={imageId}
+              onChange={(event) => {
+                setImageId(event.target.value);
+                setProviderPermitted(false);
+              }}
+            >
+              {search.images.map((image) => (
+                <option key={image.image_id} value={image.image_id}>
+                  {image.front ? "Front cover" : "Other artwork"} · {image.image_id}
+                  {image.provider_approved === true ? " · Provider edit approved" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Background for transparent images
+            <select
+              value={background}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (value === "original" || value === "black" || value === "white")
+                  setBackground(value);
+              }}
+            >
+              <option value="original">No background selected</option>
+              <option value="black">Black</option>
+              <option value="white">White</option>
+            </select>
+          </label>
+          <Check checked={providerPermitted} onChange={setProviderPermitted}>
+            I have permission to use the selected Cover Art Archive image.
+          </Check>
+          <Button
+            disabled={command.busy || !providerPermitted || !imageId}
+            onClick={() => void command.run(downloadCover)}
+          >
+            Download cover preview
+          </Button>
+          <p>Downloaded previews appear below. Each exact JPEG needs separate approval.</p>
+        </fieldset>
+      )}
+      <h3>Or upload a local cover</h3>
+      <p>
         A local image keeps local provenance. Permission to use an image does not approve its
         normalized JPEG preview.
       </p>
@@ -69,8 +164,7 @@ export function ArtworkReview({
       <Alert error={command.error} />
       {candidates.length === 0 && (
         <Empty>
-          No cover candidates yet. Upload a permitted cover or prepare one with the existing artwork
-          commands.
+          No saved cover previews yet. Find a cover for this edition or upload a permitted image.
         </Empty>
       )}
       {candidates.length > 0 && (

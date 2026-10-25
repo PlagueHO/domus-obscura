@@ -44,6 +44,14 @@ async fn disabled_provider_roles_stop_api_queries_and_plan_batches_before_effect
                 "locations":[1],"accepts_incomplete_coverage":false,"bucket":null}
             }]})),
         ),
+        ("POST", "/api/jobs/1/plans/2/artwork/caa/search", None),
+        (
+            "POST",
+            "/api/jobs/1/plans/2/artwork/caa/download",
+            Some(json!({
+                "image_id":"123","background":null,"acknowledge_permitted_use":true
+            })),
+        ),
         (
             "POST",
             "/api/jobs/1/plans/2/artwork/caa",

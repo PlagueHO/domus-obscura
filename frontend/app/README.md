@@ -25,6 +25,13 @@ Plan approval uses a POST with no body. Source and artwork approvals use JSON.
 Source search and folder assessment have no client timeout, so the host's
 120-second operation window remains available.
 
+The request page lists Cover Art Archive images for the approved frozen release.
+Search and selected-image download are guarded POST commands. Downloads need
+separate permitted-use acknowledgement. The host retains provider evidence and
+normalizes each image before the browser can approve its exact JPEG.
+The existing `/artwork/caa` preparation route remains cache-only.
+No external image URLs are rendered. Local cover upload remains available.
+
 The app displays saved job states and publication receipts. An accepted start
 command is not completion. `backup_pending` remains separate from `complete`.
 Library browsing and setup views are read-only. Saved recovery questions and

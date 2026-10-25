@@ -103,8 +103,24 @@ describe("production components", () => {
     );
     expect(markup).toContain("I have permission to use");
     expect(markup).toMatch(/type="file"[^>]*disabled/);
-    expect(markup).toContain("No cover candidates yet");
+    expect(markup).toContain("No saved cover previews yet");
     expect(markup).not.toContain("CAA approved");
+  });
+  it("offers exact-edition provider search without external image requests or automatic approval", () => {
+    const markup = renderToStaticMarkup(
+      <ArtworkReview
+        base="/api/jobs/1/plans/2"
+        candidates={[]}
+        selected={undefined}
+        onSelect={() => {}}
+        refresh={() => {}}
+      />,
+    );
+    expect(markup).toContain("Find covers for this edition");
+    expect(markup).toContain("Provider edit approval does not grant permission");
+    expect(markup).toContain("Or upload a local cover");
+    expect(markup).not.toContain('src="https://');
+    expect(markup).not.toContain("Approve this exact cover");
   });
   it("displays exact Rust-owned filenames and tag text without template execution", () => {
     const markup = renderToStaticMarkup(

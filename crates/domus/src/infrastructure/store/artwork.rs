@@ -155,6 +155,16 @@ pub(super) fn check_cover(
 }
 
 impl Store {
+    /// Bind browser provider work to a current approved, writable plan before
+    /// network I/O. Call again after I/O; this does not grant cover approval.
+    pub fn artwork_provider_release(&self, job: i64, version: i64) -> Result<String> {
+        let plan = writable_plan(&self.connection, job, version)?;
+        if plan.approved_at.is_none() {
+            return Err(conflict());
+        }
+        Ok(plan.plan.edition.release_id)
+    }
+
     pub fn prepare_local_artwork_or_ask(
         &mut self,
         job: i64,

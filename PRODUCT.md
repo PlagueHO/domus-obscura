@@ -50,6 +50,14 @@ For that first test only, the user accepted the closest available complete
 remains unknown. This does not authorize silent edition substitution in the
 production acquisition workflow.
 
+## Proposed MP3 VBR Support
+
+The user requested consideration of MP3 variable bitrate (VBR) as a separate
+requested quality option because many source results advertise VBR. This is not
+yet approved or implemented. Keep the current MP3 320 kbps CBR validation unchanged.
+Define the VBR quality criteria and update source assessment, frozen plans,
+audio validation and shared contracts together before accepting VBR.
+
 ## Planned Provider Throttling Review
 
 The user requested this follow-up for the local service that contacts public
@@ -195,6 +203,10 @@ The connected local Music browser now lives in `frontend/app`. It extends the
 saved proof of concept with real guarded HTTPS requests, exact-release plans,
 separate source and cover approvals, explicit one-shot acquisition and new-only
 publication. See `docs/local-development.md` for setup and remaining limits.
+The request page can search Cover Art Archive for the frozen exact release and
+download a selected image through the installed provider service. It retains CAA
+evidence and requires separate permission acknowledgement and exact JPEG approval.
+Local cover upload remains available. This does not complete the approved UI port.
 It is not the complete V1 application. The local setup creates a developer
 certificate but never changes browser trust or enables a live account.
 

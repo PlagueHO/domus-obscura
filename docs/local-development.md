@@ -88,8 +88,10 @@ upload, port mapping, acquisition retry or scheduler starts as a side effect.
 3. Read a selected peer folder or import its bounded listing JSON. Inspect the
    complete track mapping. Separately acknowledge the exact edition and permitted
    download, then approve the digest-bound source review.
-4. Upload a permitted cover. Permission to use the image does not approve the
-   preview. Inspect the normalized JPEG and approve that exact candidate/hash.
+4. Select **Find covers for this edition** to list Cover Art Archive images for
+   the frozen release. Select an image, acknowledge permission and select
+   **Download cover preview**. Or upload a permitted local cover.
+   Inspect the normalized JPEG and approve that exact candidate/hash.
 5. Select **Start Download** after all approvals. Acknowledge new-only publication.
    It receives, validates, writes fresh metadata, verifies the result and copies
    it into the approved new album folder. Follow actual state in the queue.
@@ -105,6 +107,19 @@ shows the service's minimum wait from the time of the error response. Wait befor
 trying again; requests do not retry automatically. A paused provider needs review,
 not repeated searches. This error does not by itself mean the local setup is wrong.
 See [MusicBrainz rate limiting](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting).
+
+Cover search does not substitute another edition or release-group artwork.
+The listing is metadata, not a rights grant. The image download uses the installed
+Cover Art Archive adapter, its shared provider budget, bounded cache and guarded
+HTTPS redirect checks. Provider URLs and credentials cannot be supplied by the
+browser. No provider thumbnail URL is loaded directly by the browser.
+Downloaded images pass the normal strict normalization checks before becoming
+saved JPEG previews. Select a black or white background for transparent images
+when needed. Image problems can save an artwork recovery question; stale plans,
+storage errors and network errors remain failures. Preparation never approves a
+cover or starts audio acquisition. An empty exact-release listing can use the
+local upload option; it does not trigger a hidden fallback.
+See the [Cover Art Archive API](https://musicbrainz.org/doc/Cover_Art_Archive/API).
 
 Default MP3 output:
 

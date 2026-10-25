@@ -316,6 +316,14 @@ impl Api {
                 post(prepare_caa_artwork).layer(DefaultBodyLimit::max(1024)),
             )
             .route(
+                "/api/jobs/{id}/plans/{version}/artwork/caa/search",
+                post(search_caa_artwork).layer(DefaultBodyLimit::max(128)),
+            )
+            .route(
+                "/api/jobs/{id}/plans/{version}/artwork/caa/download",
+                post(download_caa_artwork).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
                 "/api/jobs/{id}/plans/{version}/artwork/approve",
                 post(approve_artwork).layer(DefaultBodyLimit::max(512)),
             )
@@ -1314,6 +1322,112 @@ pub struct PrepareCaaArtwork {
     pub image_id: String,
     pub background: Option<[u8; 3]>,
     pub acknowledge_permitted_use: bool,
+}
+
+#[derive(Serialize, ts_rs::TS)]
+pub struct CaaCoverOption {
+    pub image_id: String,
+    pub front: bool,
+    pub provider_approved: Option<bool>,
+}
+
+#[derive(Serialize, ts_rs::TS)]
+pub struct CaaCoverSearch {
+    pub release_id: String,
+    pub images: Vec<CaaCoverOption>,
+}
+
+async fn search_caa_artwork(
+    State(api): State<Api>,
+    Path((id, version)): Path<(i64, i64)>,
+) -> ApiResult<Json<CaaCoverSearch>> {
+    use crate::application::services::{ArtworkContent, ArtworkRequest, EntityRef};
+    api.0
+        .services
+        .artwork
+        .require_provider("cover-art-archive")?;
+    let release_id = api
+        .database(move |store| store.artwork_provider_release(id, version))
+        .await?;
+    let result = api
+        .0
+        .services
+        .artwork
+        .fetch(ArtworkRequest {
+            provider: "cover-art-archive".into(),
+            release: EntityRef {
+                provider: "musicbrainz".into(),
+                id: release_id.clone(),
+            },
+            image_id: None,
+        })
+        .await?;
+    api.database(move |store| store.artwork_provider_release(id, version))
+        .await?;
+    let images = match result.content {
+        ArtworkContent::Listing(images) => images
+            .into_iter()
+            .map(|image| CaaCoverOption {
+                image_id: image.entity.id,
+                front: image.front,
+                provider_approved: image.provider_approved,
+            })
+            .collect(),
+        ArtworkContent::Missing => Vec::new(),
+        ArtworkContent::Image { .. } => {
+            return Err(Error::Internal("artwork search returned image bytes").into());
+        }
+    };
+    Ok(Json(CaaCoverSearch { release_id, images }))
+}
+
+/// Fetch only a listing-bound image through the installed provider. Preparation
+/// still uses retained CAA evidence and never approves the normalized preview.
+async fn download_caa_artwork(
+    State(api): State<Api>,
+    Path((id, version)): Path<(i64, i64)>,
+    Json(request): Json<PrepareCaaArtwork>,
+) -> ApiResult<Json<ArtworkCandidate>> {
+    use crate::application::services::{ArtworkContent, ArtworkRequest, EntityRef};
+    api.0
+        .services
+        .artwork
+        .require_provider("cover-art-archive")?;
+    let release_id = api
+        .database(move |store| store.artwork_provider_release(id, version))
+        .await?;
+    if !request.acknowledge_permitted_use {
+        // Save the normal plan-bound permission question without network I/O.
+        return prepare_caa_artwork(State(api), Path((id, version)), Json(request)).await;
+    }
+    let result = api
+        .0
+        .services
+        .artwork
+        .fetch(ArtworkRequest {
+            provider: "cover-art-archive".into(),
+            release: EntityRef {
+                provider: "musicbrainz".into(),
+                id: release_id,
+            },
+            image_id: Some(request.image_id.clone()),
+        })
+        .await?;
+    match result.content {
+        ArtworkContent::Image { .. } => {}
+        ArtworkContent::Missing => {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "CAA cover was not found",
+            ));
+        }
+        ArtworkContent::Listing(_) => {
+            return Err(Error::Internal("artwork download returned a listing").into());
+        }
+    }
+    api.database(move |store| store.artwork_provider_release(id, version))
+        .await?;
+    prepare_caa_artwork(State(api), Path((id, version)), Json(request)).await
 }
 
 async fn prepare_caa_artwork(

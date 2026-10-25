@@ -100,6 +100,181 @@ async fn idle(client: &reqwest::Client, origin: &str) -> TestResult<Value> {
     Err("local worker did not finish".into())
 }
 
+#[tokio::test]
+async fn browser_caa_search_and_download_keep_exact_release_evidence_and_separate_approval()
+-> TestResult {
+    use axum::extract::ConnectInfo;
+    use domus::application::catalog::{CatalogPlanRequest, prepare_cached_catalog_plan};
+    let directory = private::tempdir()?;
+    let database = directory.path().join("state.db");
+    let library = directory.path().join("library");
+    std::fs::create_dir(&library)?;
+    let mut store = Store::open(&database)?;
+    let location = add_location(&store, &library, "main")?;
+    scan_location(&mut store, location)?;
+    let settings = store.save_settings(None, &OutputSettings::default())?;
+    seed_release(&database)?;
+    let job = store.enqueue(1)?;
+    let plan = prepare_cached_catalog_plan(
+        &mut store,
+        RELEASE,
+        CatalogPlanRequest {
+            job_id: job,
+            expected_version: 1,
+            settings_version: settings,
+            format: Some(domus::domain::AudioFormat::Mp3),
+            locations: vec![location],
+            accepts_incomplete_coverage: false,
+            bucket: None,
+        },
+    )?;
+    let base = format!("/api/jobs/{job}/plans/{}", plan.version);
+    let image_id = "9007199254740995";
+    let listing_source = format!("https://coverartarchive.org/release/{RELEASE}/");
+    let image_source = format!("https://coverartarchive.org/release/{RELEASE}/{image_id}");
+    let listing = serde_json::to_vec(&json!({
+        "release":format!("https://musicbrainz.org/release/{RELEASE}"),
+        "images":[{
+            "id":image_id,"edit":321,"types":["Front"],"front":true,"back":false,
+            "approved":true,"comment":"Generated cover",
+            "image":format!("{image_source}.png")
+        }]
+    }))?;
+    let raw = rusqlite::Connection::open(&database)?;
+    for (key, bytes, sources) in [
+        (listing_source.clone(), listing, vec![listing_source]),
+        (
+            format!("{image_source}#mbid-{RELEASE}-{image_id}.png"),
+            media::cover_source()?,
+            vec![
+                image_source,
+                format!(
+                    "https://archive.org/download/mbid-{RELEASE}/mbid-{RELEASE}-{image_id}.png"
+                ),
+            ],
+        ),
+    ] {
+        raw.execute(
+            "INSERT INTO caa_cache(cache_key,body,sha256,sources,fetched_at,expires_at,accessed_at_ms)
+             VALUES (?1,?2,?3,?4,unixepoch(),unixepoch()+86400,unixepoch()*1000)",
+            rusqlite::params![key, bytes, Sha256::digest(&bytes).to_vec(), serde_json::to_string(&sources)?],
+        )?;
+    }
+    let origin = "https://localhost:8443";
+    let router = Api::development(origin, Store::open_existing(&database)?)?.router();
+    let call = |path: String, body: Option<Value>, guarded: bool| {
+        let router = router.clone();
+        async move {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::HOST, "localhost:8443")
+                .header(header::CONTENT_TYPE, "application/json");
+            if guarded {
+                builder = builder
+                    .header(header::ORIGIN, origin)
+                    .header("x-domus-csrf", "1");
+            }
+            let mut request = builder.body(match body {
+                Some(body) => Body::from(serde_json::to_vec(&body)?),
+                None => Body::empty(),
+            })?;
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+            Ok::<_, Box<dyn std::error::Error>>(router.oneshot(request).await?)
+        }
+    };
+    let search = format!("{base}/artwork/caa/search");
+    let download = format!("{base}/artwork/caa/download");
+    let body = json!({"image_id":image_id,"background":null,"acknowledge_permitted_use":true});
+    for (path, body) in [
+        (search.clone(), None),
+        (download.clone(), Some(body.clone())),
+    ] {
+        assert_eq!(
+            call(path, body, false).await?.status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        call(search.clone(), None, true).await?.status(),
+        StatusCode::CONFLICT
+    );
+    store.approve_plan(job, plan.version)?;
+    let response = call(search.clone(), None, true).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let found = json_body(response).await?;
+    assert_eq!(found["release_id"], RELEASE);
+    assert_eq!(found["images"][0]["image_id"], image_id);
+    assert_eq!(found["images"][0]["front"], true);
+    assert_eq!(found["images"][0]["provider_approved"], true);
+    assert!(found["images"][0].get("url").is_none());
+    let response = call(
+        download.clone(),
+        Some(json!({
+            "image_id":"123", "background":null,"acknowledge_permitted_use":true
+        })),
+        true,
+    )
+    .await?;
+    assert!(!response.status().is_success());
+    let response = call(download.clone(), Some(body.clone()), true).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let candidate = json_body(response).await?;
+    assert!(candidate["approved_at"].is_null());
+    let candidate_id = candidate["id"].as_i64().ok_or("candidate ID")?;
+    let jpeg = store.artwork_jpeg(job, plan.version, candidate_id)?;
+    assert_eq!(
+        candidate["sha256"],
+        format!("{:x}", Sha256::digest(jpeg.bytes()))
+    );
+    let evidence = store
+        .artwork_caa_evidence(job, plan.version, candidate_id)?
+        .ok_or("CAA evidence")?;
+    assert_eq!(evidence.release_id, RELEASE);
+    assert_eq!(evidence.image.id, image_id);
+    assert!(evidence.permitted_use_acknowledged);
+    assert!(store.approved_artwork(job, plan.version).is_err());
+    let repeat = call(download.clone(), Some(body), true).await?;
+    assert_eq!(repeat.status(), StatusCode::OK);
+    assert_eq!(json_body(repeat).await?["id"], candidate["id"]);
+    assert_eq!(
+        raw.query_row(
+            "SELECT generation FROM catalog_gate WHERE id=1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        0
+    );
+    assert_eq!(std::fs::read_dir(&library)?.count(), 0);
+    // The old cache-only preparation route stays separate from network fetching.
+    let missing_permission = call(
+        download,
+        Some(json!({
+            "image_id":image_id,"background":null,"acknowledge_permitted_use":false
+        })),
+        true,
+    )
+    .await?;
+    assert_eq!(missing_permission.status(), StatusCode::CONFLICT);
+    assert!(
+        json_body(missing_permission).await?["error"]
+            .as_str()
+            .ok_or("error")?
+            .contains("question")
+    );
+    raw.execute(
+        "UPDATE jobs SET plan_version=plan_version+1 WHERE id=?1",
+        [job],
+    )?;
+    assert_eq!(
+        call(search, None, true).await?.status(),
+        StatusCode::CONFLICT
+    );
+    Ok(())
+}
+
 /// The API remains the real guarded HTTPS router. Only catalog input and already
 /// received peer bytes are generated. No live provider or account is contacted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
