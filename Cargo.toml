@@ -1,0 +1,61 @@
+[workspace]
+members = ["crates/domus", "xtask"]
+exclude = ["third_party/file-id-0.2.3"]
+resolver = "3"
+
+[patch.crates-io]
+file-id = { path = "third_party/file-id-0.2.3" }
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99.1"
+publish = false
+
+[workspace.dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
+cap-fs-ext = "4.0.3"
+cap-std = "4.0.3"
+cookie = "0.18.2"
+futures-util = "0.3.34"
+flate2 = "1.1.10"
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+httpdate = "1.0.3"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+id3 = { version = "1.17.2", default-features = false, features = ["decode_picture"] }
+openidconnect = { version = "4.0.1", default-features = false }
+png = "0.18.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2.2.0"
+rustix = { version = "1.1.5", features = ["process"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+same-file = "1.0.6"
+file-id = "=0.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10.9"
+symphonia = { version = "0.6.1", default-features = false, features = ["flac", "mp3"] }
+thiserror = "2.0.21"
+tempfile = "3.27.0"
+metaflac = "0.2.8"
+ts-rs = "12.0.1"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+rcgen = "0.14.10"
+tower = { version = "0.5", features = ["util"] }
+turbojpeg = { version = "1.5.1", default-features = false }
+windows-permissions = "0.2.4"
+winsafe = { version = "=0.0.29", default-features = false, features = ["advapi"] }
+rand = "0.8"
+rsa = "0.9"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+lto = "thin"
+strip = true

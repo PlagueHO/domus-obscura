@@ -1,0 +1,43 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Domus: check",
+      "type": "process",
+      "command": "cargo",
+      "args": ["task", "check"],
+      "windows": {
+        "command": "pwsh",
+        "args": ["-NoProfile", "-File", "${workspaceFolder}\\dev.ps1", "check"]
+      },
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "Domus: build",
+      "type": "process",
+      "command": "cargo",
+      "args": ["task", "build"],
+      "windows": {
+        "command": "pwsh",
+        "args": ["-NoProfile", "-File", "${workspaceFolder}\\dev.ps1", "build"]
+      },
+      "group": "build",
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "Domus: scale",
+      "type": "process",
+      "command": "cargo",
+      "args": ["task", "scale"],
+      "windows": {
+        "command": "pwsh",
+        "args": ["-NoProfile", "-File", "${workspaceFolder}\\dev.ps1", "scale"]
+      },
+      "problemMatcher": ["$rustc"]
+    }
+  ]
+}
