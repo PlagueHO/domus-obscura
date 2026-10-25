@@ -33,6 +33,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tower::ServiceExt;
 
+#[path = "support/private.rs"]
+mod private;
+
 #[path = "https/caa.rs"]
 mod caa_tests;
 #[path = "https/catalog.rs"]
@@ -1363,7 +1366,7 @@ async fn browser_sign_in_guards_commands_rotates_sessions_and_preserves_durable_
 #[test]
 fn service_bootstrap_rejects_public_binding_bad_tls_and_media_secret_overlap() -> TestResult {
     use domus::infrastructure::server::PreparedServer;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let state = directory.path();
     let database = state.join("state.db");
     let store = Store::open(&database)?;

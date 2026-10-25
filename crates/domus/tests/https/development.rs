@@ -280,7 +280,8 @@ async fn development_rejects_remote_peers_forwarded_identity_and_remote_origins(
 #[tokio::test]
 async fn explicit_development_bootstrap_accepts_developer_certificate_not_missing_production_auth()
 -> TestResult {
-    let directory = tempfile::tempdir()?;
+    tls::initialize_crypto()?;
+    let directory = private::tempdir()?;
     let state = directory.path();
     let database = state.join("state.db");
     drop(Store::open(&database)?);

@@ -11,8 +11,6 @@ use std::io::Cursor;
 #[path = "../support/media.rs"]
 #[allow(dead_code)]
 mod media;
-#[path = "../support/private.rs"]
-mod private;
 
 const RELEASE: &str = "20000000-0000-4000-8000-000000000001";
 const ARTIST: &str = "Fixture Artist";

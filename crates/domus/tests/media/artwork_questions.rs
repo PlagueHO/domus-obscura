@@ -6,6 +6,19 @@ use std::process::Command;
 
 const USE_COVER: &str = "Use approved cover";
 
+fn write_credentials(path: &std::path::Path) -> TestResult {
+    std::fs::write(
+        path,
+        br#"{"username":"fixture-user","password":"fixture-password"}"#,
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 fn release_owner(fixture: &Fixture) -> TestResult {
     Connection::open(&fixture.database)?
         .execute("UPDATE jobs SET lease_until=0 WHERE id=?1", [fixture.job])?;
@@ -251,10 +264,7 @@ fn artwork_questions_survive_restart_and_resume_real_normalization_without_redow
         // The real command must finish entirely from sealed local inputs. Its
         // configured public peer is not a fixture server and must not be used.
         let secret = fixture._state.path().join("credentials.json");
-        std::fs::write(
-            &secret,
-            br#"{"username":"fixture-user","password":"fixture-password"}"#,
-        )?;
+        write_credentials(&secret)?;
         let config = fixture._state.path().join("worker.json");
         std::fs::write(
             &config,
@@ -380,10 +390,7 @@ fn worker_missing_cover_saves_one_question_and_cli_resolves_it_without_starting_
     let mut fixture = Fixture::build_inner(AudioFormat::Flac, true, false)?;
     release_owner(&fixture)?;
     let credentials = fixture._state.path().join("credentials.json");
-    std::fs::write(
-        &credentials,
-        br#"{"username":"fixture-user","password":"fixture-password"}"#,
-    )?;
+    write_credentials(&credentials)?;
     let configuration = fixture._state.path().join("worker.json");
     std::fs::write(
         &configuration,

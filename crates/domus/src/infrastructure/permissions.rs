@@ -100,6 +100,11 @@ fn check_sddl(sddl: &str, user: &str, private: bool) -> Result<()> {
         .ok_or_else(permission_error)?;
     let trusted = |sid: &str| {
         sid == user
+            // Windows can serialize the current local account as LA or LG.
+            // Resolve it to the full SID; a matching RID alone is not authority.
+            || (matches!(sid, "LA" | "LG")
+                && windows_permissions::wrappers::ConvertStringSidToSid(sid)
+                    .is_ok_and(|resolved| resolved.to_string() == user))
             || matches!(sid, "SY" | "BA" | "S-1-5-18" | "S-1-5-32-544")
             || (sid == "LS" && user == "S-1-5-19")
             || (sid == "NS" && user == "S-1-5-20")
@@ -166,6 +171,21 @@ fn read_only_rights(rights: &str) -> bool {
 mod tests {
     use super::*;
     const USER: &str = "S-1-5-21-1-2-3-1001";
+
+    #[test]
+    fn local_account_aliases_require_the_exact_resolved_sid()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for alias in ["LA", "LG"] {
+            let resolved = windows_permissions::wrappers::ConvertStringSidToSid(alias)?.to_string();
+            let sddl = format!("O:{alias}D:(A;;FA;;;{alias})");
+            assert!(check_sddl(&sddl, &resolved, true).is_ok());
+            for other in [USER, "S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-501"] {
+                assert!(check_sddl(&sddl, other, true).is_err());
+                assert!(check_sddl(&format!("O:{other}D:(A;;FA;;;{alias})"), other, true).is_err());
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn private_permissions_accept_only_trusted_owners_and_grants() {
