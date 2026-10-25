@@ -52,6 +52,22 @@ pub fn canonical_root(path: &Path) -> Result<PathBuf> {
     Ok(LibraryDirectory::canonical(path)?.0)
 }
 
+pub(crate) fn sync_directory(directory: &Dir) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // Traversal handles can use O_PATH, which cannot be synced. Reopen the
+        // same directory for reading without resolving its former native path.
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        directory.open_with(".", &options)?.sync_all()?;
+    }
+    // Windows flushes each writable file. Directory flushing and power-loss
+    // acceptance remain separate from this adapter.
+    #[cfg(windows)]
+    let _ = directory;
+    Ok(())
+}
+
 pub(crate) fn is_unsafe_cap_link(metadata: &cap_std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {

@@ -1,4 +1,6 @@
-use super::filesystem::{LibraryDirectory, is_unsafe_cap_link, is_unsafe_link};
+use super::filesystem::{
+    LibraryDirectory, is_unsafe_cap_link, is_unsafe_link, sync_directory as sync,
+};
 use super::permissions::FilePermissions;
 use super::store::{PublicationDestination, PublicationFile, Store};
 use crate::domain::LibraryPath;
@@ -271,13 +273,5 @@ fn verify(
     {
         return Err(conflict());
     }
-    Ok(())
-}
-
-fn sync(directory: &Dir) -> Result<()> {
-    #[cfg(unix)]
-    directory.try_clone()?.into_std_file().sync_all()?;
-    #[cfg(windows)]
-    let _ = directory;
     Ok(())
 }

@@ -1,6 +1,8 @@
 use super::artwork::CoverJpeg;
 use super::filesystem::NativeRoot;
-use super::filesystem::{LibraryDirectory, is_unsafe_cap_link, is_unsafe_link, require_local_disk};
+use super::filesystem::{
+    LibraryDirectory, is_unsafe_cap_link, is_unsafe_link, require_local_disk, sync_directory,
+};
 use super::media::{NormalizedAudio, normalize_audio};
 use super::permissions::FilePermissions;
 use super::store::{NormalizationRun, NormalizationWork, Store, TransferFile};
@@ -180,14 +182,6 @@ fn write_record(
     if hash_file(&mut file, bytes.len() as u64)? != expected {
         return Err(conflict());
     }
-    Ok(())
-}
-
-fn sync_directory(_directory: &Dir) -> Result<()> {
-    #[cfg(unix)]
-    _directory.try_clone()?.into_std_file().sync_all()?;
-    // Windows sync_all on each writable file uses FlushFileBuffers. A Unix-style
-    // directory fsync is not exposed by this adapter. Power-loss acceptance is separate.
     Ok(())
 }
 

@@ -130,3 +130,19 @@ fn open_directory_stays_bound_after_an_ancestor_rename() -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn directory_sync_keeps_root_and_child_handles_after_path_replacement() -> Result<()> {
+    let data = tempdir()?;
+    let media = data.path().join("library");
+    fs::create_dir_all(media.join("album"))?;
+    let root = LibraryDirectory::open(&media)?;
+    let child = root.open_directory(&LibraryPath::parse("album")?)?;
+    fs::rename(&media, data.path().join("moved"))?;
+    fs::write(&media, b"replacement, not a directory")?;
+    sync_directory(&root.directory)?;
+    sync_directory(&child.directory)?;
+    assert_eq!(fs::read(&media)?, b"replacement, not a directory");
+    Ok(())
+}
