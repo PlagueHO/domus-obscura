@@ -5,6 +5,7 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
   }
@@ -55,7 +56,13 @@ export async function request<T>(
     } catch {
       // A proxy or listener can return a non-JSON rejection.
     }
-    throw new ApiError(response.status, message);
+    const retryAfter = response.headers.get("Retry-After");
+    const seconds = retryAfter !== null && /^\d+$/.test(retryAfter) ? Number(retryAfter) : NaN;
+    throw new ApiError(
+      response.status,
+      message,
+      Number.isInteger(seconds) && seconds >= 0 && seconds <= 4294967295 ? seconds : null,
+    );
   }
   if (response.status === 204 || response.headers.get("content-length") === "0") {
     return undefined as T;

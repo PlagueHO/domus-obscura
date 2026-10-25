@@ -50,6 +50,24 @@ For that first test only, the user accepted the closest available complete
 remains unknown. This does not authorize silent edition substitution in the
 production acquisition workflow.
 
+## Planned Provider Throttling Review
+
+The user requested this follow-up for the local service that contacts public
+discography databases, including MusicBrainz. Review and complete graceful
+request throttling before treating that service as complete. This is later work,
+not part of the current local download test.
+
+- Reuse the existing durable provider budget and backoff controls.
+- Check each provider's current official request limits before implementation.
+- Coordinate requests across callers. Keep pending work bounded and reuse valid
+  cached results.
+- Handle rate-limit responses and `Retry-After` without rapid retry loops.
+  Preserve longer saved backoff and unsupported retry pauses.
+- Show a clear waiting state and retry timing when known. Keep provider errors
+  visible; do not show throttling as an empty search result.
+- Add isolated tests for concurrent callers, throttling, backoff and recovery.
+  Metadata recovery must not retry acquisition or bypass approvals.
+
 ## Brand Commitments
 
 The name is Domus Obscura. Use shadcn/ui and a very dark, futuristic cyberpunk

@@ -93,6 +93,46 @@ describe("same-origin client", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["1", "120", "4294967295"])(
+    "retains the service retry interval %s without retrying",
+    async (retryAfter) => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValue(
+          Response.json(
+            { error: "MusicBrainz is rate limited or temporarily unavailable" },
+            { status: 503, headers: { "Retry-After": retryAfter } },
+          ),
+        );
+      vi.stubGlobal("fetch", fetch);
+      await expect(request("/api/discovery/artists?query=Ramones")).rejects.toMatchObject({
+        status: 503,
+        retryAfterSeconds: Number(retryAfter),
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["", "-1", "1.5", "later", "4294967296"])(
+    "does not invent a retry interval for an unsupported header: %s",
+    async (retryAfter) => {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValue(
+            Response.json(
+              { error: "Unavailable" },
+              { status: 503, headers: { "Retry-After": retryAfter } },
+            ),
+          ),
+      );
+      await expect(request("/api/discovery/artists?query=Ramones")).rejects.toMatchObject({
+        retryAfterSeconds: null,
+      });
+    },
+  );
+
   it("preserves unauthorized state instead of selecting anonymous mode", async () => {
     vi.stubGlobal(
       "fetch",

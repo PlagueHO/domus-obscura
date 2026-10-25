@@ -54,6 +54,30 @@ describe("production components", () => {
     expect(conflict).not.toContain('href="/auth/login"');
     expect(conflict).toContain('role="alert"');
   });
+  it.each([1, 120])("shows the service wait of %i seconds without setup advice", (seconds) => {
+    const markup = renderToStaticMarkup(
+      <Alert error={new ApiError(503, "MusicBrainz is rate limited.", seconds)} />,
+    );
+    expect(markup).toContain(`at least ${seconds} ${seconds === 1 ? "second" : "seconds"}`);
+    expect(markup).toContain("It will not retry automatically");
+    expect(markup).not.toContain("Check the service or setup");
+  });
+  it("does not present an unsupported provider pause as a timed retry", () => {
+    const markup = renderToStaticMarkup(
+      <Alert error={new ApiError(503, "Provider requests are paused.", 4294967295)} />,
+    );
+    expect(markup).toContain("Review the service before resuming");
+    expect(markup).not.toContain("4294967295");
+    expect(markup).not.toContain("After that wait");
+  });
+  it("does not invent timing for service errors without Retry-After", () => {
+    const markup = renderToStaticMarkup(
+      <Alert error={new ApiError(503, "Service unavailable.")} />,
+    );
+    expect(markup).toContain("Try the action later");
+    expect(markup).not.toContain("Check the service or setup");
+    expect(markup).not.toContain("at least");
+  });
   it("keeps default button semantics and disabled states", () => {
     const markup = renderToStaticMarkup(<Button disabled>Start Download</Button>);
     expect(markup).toContain('type="button"');

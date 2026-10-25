@@ -99,6 +99,13 @@ an alternate name can return the artist's canonical name. A search match is not
 edition proof. The query remains literal; it does not execute user search syntax.
 See the [MusicBrainz search fields](https://musicbrainz.org/doc/MusicBrainz_API/Search#Artist).
 
+MusicBrainz can reject requests because of rate limits or service load. The local
+service retains provider backoff and reuses valid cached results. The browser
+shows the service's minimum wait from the time of the error response. Wait before
+trying again; requests do not retry automatically. A paused provider needs review,
+not repeated searches. This error does not by itself mean the local setup is wrong.
+See [MusicBrainz rate limiting](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting).
+
 Default MP3 output:
 
 ```text

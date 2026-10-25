@@ -45,6 +45,19 @@ export function Alert({ error }: { error: unknown }) {
       <p>{errorText(error)}</p>
       {error instanceof ApiError && error.status === 401 ? (
         <a href="/auth/login">Sign in with Microsoft</a>
+      ) : error instanceof ApiError && error.retryAfterSeconds === 4294967295 ? (
+        <p>
+          Provider requests are paused. Review the service before resuming. Repeating the action
+          will not clear this pause.
+        </p>
+      ) : error instanceof ApiError && error.retryAfterSeconds !== null ? (
+        <p>
+          At the time of this response, the service required a wait of at least{" "}
+          {error.retryAfterSeconds} {error.retryAfterSeconds === 1 ? "second" : "seconds"}. After
+          that wait, try the action again. It will not retry automatically.
+        </p>
+      ) : error instanceof ApiError && (error.status === 429 || error.status === 503) ? (
+        <p>The service is busy or unavailable. Try the action later.</p>
       ) : (
         <p>Check the service or setup, then try the action again.</p>
       )}
