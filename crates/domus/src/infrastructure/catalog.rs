@@ -66,7 +66,8 @@ impl CatalogQuery {
         query
             .url
             .query_pairs_mut()
-            .append_pair("query", &format!("artist:\"{literal}\""));
+            // MusicBrainz's default artist fields include aliases and sort names.
+            .append_pair("query", &format!("\"{literal}\""));
         Ok(query)
     }
 

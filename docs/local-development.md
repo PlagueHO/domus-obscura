@@ -94,6 +94,11 @@ upload, port mapping, acquisition retry or scheduler starts as a side effect.
    It receives, validates, writes fresh metadata, verifies the result and copies
    it into the approved new album folder. Follow actual state in the queue.
 
+Artist search uses MusicBrainz's name, alias and sort-name fields. For example,
+an alternate name can return the artist's canonical name. A search match is not
+edition proof. The query remains literal; it does not execute user search syntax.
+See the [MusicBrainz search fields](https://musicbrainz.org/doc/MusicBrainz_API/Search#Artist).
+
 Default MP3 output:
 
 ```text

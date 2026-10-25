@@ -226,6 +226,23 @@ fn catalog_plan_cli_uses_only_fresh_verified_cache_and_never_approves_or_starts_
 }
 
 #[test]
+fn catalog_artist_search_uses_name_alias_and_sort_name_default_fields() -> TestResult {
+    for text in ["The Ramones", "Ramones", "  The Ramones  "] {
+        let query = CatalogQuery::artists(text, 0, 24)?;
+        let url = reqwest::Url::parse(query.source())?;
+        let expression = url
+            .query_pairs()
+            .find(|(key, _)| key == "query")
+            .ok_or("missing search query")?
+            .1
+            .into_owned();
+        assert_eq!(expression, format!("\"{}\"", text.trim()));
+        assert!(!expression.contains("artist:"));
+    }
+    Ok(())
+}
+
+#[test]
 fn catalog_search_is_literal_bounded_and_fixed_authority() -> TestResult {
     let query = CatalogQuery::artists("A+B / \" OR name:*", 25, 25)?;
     let url = reqwest::Url::parse(query.source())?;
@@ -236,7 +253,7 @@ fn catalog_search_is_literal_bounded_and_fixed_authority() -> TestResult {
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(
         pairs.get("query").map(|value| value.as_ref()),
-        Some("artist:\"A\\+B \\/ \\\" OR name\\:\\*\"")
+        Some("\"A\\+B \\/ \\\" OR name\\:\\*\"")
     );
     assert!(CatalogQuery::artists("", 0, 25).is_err());
     assert!(CatalogQuery::artists("x\nname:y", 0, 25).is_err());
