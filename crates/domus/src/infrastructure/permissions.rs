@@ -81,39 +81,10 @@ impl FilePermissions {
 }
 
 #[cfg(test)]
-pub(crate) fn private_test_directory() -> Result<tempfile::TempDir> {
-    let directory = tempfile::tempdir()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_permissions::constants::{SeObjectType, SecurityInformation};
-        use windows_permissions::{LocalBox, SecurityDescriptor, wrappers::SetSecurityInfo};
-        let permissions = FilePermissions::current()?;
-        let mut handle = std::fs::OpenOptions::new()
-            .read(true)
-            .access_mode(0x0006_0000)
-            .custom_flags(0x0200_0000)
-            .open(directory.path())?;
-        let descriptor: LocalBox<SecurityDescriptor> =
-            format!("D:P(A;OICI;FA;;;{})", permissions.user).parse()?;
-        SetSecurityInfo(
-            &mut handle,
-            SeObjectType::SE_FILE_OBJECT,
-            SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-            None,
-            None,
-            descriptor.dacl(),
-            None,
-        )?;
-        permissions.check(&handle, true)?;
-    }
-    Ok(directory)
-}
+#[path = "../../tests/support/private.rs"]
+mod private_fixture;
+#[cfg(test)]
+pub(crate) use private_fixture::tempdir as private_test_directory;
 
 fn permission_error() -> Error {
     Error::InvalidInput("file ownership or permissions allow untrusted access; private files require owner-only access".into())
@@ -250,7 +221,20 @@ mod tests {
             .access_mode(0xc004_0000)
             .open(directory.path().join("permissions.fixture"))?;
         let permissions = FilePermissions::current()?;
-        permissions.check(&file, true)?;
+        if let Err(error) = permissions.check(&file, true) {
+            use windows_permissions::wrappers::{
+                ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo,
+            };
+            let information = SecurityInformation::Owner | SecurityInformation::Dacl;
+            let descriptor = GetSecurityInfo(&file, SeObjectType::SE_FILE_OBJECT, information)?;
+            let sddl =
+                ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, information)?;
+            return Err(format!(
+                "{error}; generated fixture user={}, descriptor={sddl:?}",
+                permissions.user
+            )
+            .into());
+        }
         for rights in ["FR", "FW"] {
             let descriptor: LocalBox<SecurityDescriptor> =
                 format!("D:P(A;;FA;;;{})(A;;{rights};;;WD)", permissions.user).parse()?;

@@ -10,7 +10,10 @@ use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
 use std::path::PathBuf;
-use tempfile::{TempDir, tempdir};
+use tempfile::TempDir;
+#[path = "../support/private.rs"]
+mod private;
+use private::tempdir;
 
 #[path = "acquisition.rs"]
 mod acquisition;

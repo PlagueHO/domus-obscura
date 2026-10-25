@@ -3,7 +3,9 @@ use domus::domain::{LibraryPath, Page};
 use domus::infrastructure::filesystem::native_root_identity;
 use domus::infrastructure::staging::StagingRoot;
 use domus::infrastructure::store::Store;
-use tempfile::tempdir;
+#[path = "support/private.rs"]
+mod private;
+use private::tempdir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -40,6 +42,7 @@ fn replaced_media_root_never_scans_the_replacement_or_erases_cached_presence() -
     let root = scratch.path().join("root");
     let old = scratch.path().join("old");
     std::fs::create_dir(&root)?;
+    private::directory(&root)?;
     std::fs::write(root.join("original.mp3"), b"original bytes")?;
     let database = state.path().join("state.db");
     let mut store = Store::open(&database)?;
@@ -52,6 +55,7 @@ fn replaced_media_root_never_scans_the_replacement_or_erases_cached_presence() -
     drop(store);
     std::fs::rename(&root, &old)?;
     std::fs::create_dir(&root)?;
+    private::directory(&root)?;
     std::fs::write(root.join("replacement.mp3"), b"replacement sentinel")?;
     let replacement = native_root_identity(&root)?;
     assert_ne!(identity, replacement);

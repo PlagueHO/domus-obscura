@@ -11,36 +11,13 @@ use std::io::Cursor;
 #[path = "../support/media.rs"]
 #[allow(dead_code)]
 mod media;
+#[path = "../support/private.rs"]
+mod private;
 
 const RELEASE: &str = "20000000-0000-4000-8000-000000000001";
 const ARTIST: &str = "Fixture Artist";
 const ALBUM: &str = "Fixture Album";
 const TITLES: [&str; 3] = ["First Light", "Second Signal", "Third Return"];
-
-fn private_fixture(path: &std::path::Path) -> TestResult {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
-    #[cfg(windows)]
-    {
-        let identity = std::process::Command::new("whoami.exe").output()?;
-        assert!(identity.status.success());
-        let user = String::from_utf8(identity.stdout)?;
-        let output = std::process::Command::new("icacls.exe")
-            .arg(path)
-            .args(["/inheritance:r", "/grant:r"])
-            .arg(format!("{}:(OI)(CI)F", user.trim()))
-            .output()?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(())
-}
 
 fn seed_release(database: &std::path::Path) -> TestResult {
     let credit = json!([{"name":ARTIST,"joinphrase":"","artist":{
@@ -129,14 +106,13 @@ async fn idle(client: &reqwest::Client, origin: &str) -> TestResult<Value> {
 /// received peer bytes are generated. No live provider or account is contacted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anonymous_https_approves_exact_album_and_publishes_verified_mp3_folder() -> TestResult {
-    let directory = tempfile::tempdir()?;
-    private_fixture(directory.path())?;
+    let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     let library = directory.path().join("library");
     let scratch = directory.path().join("staging");
     std::fs::create_dir(&library)?;
     std::fs::create_dir(&scratch)?;
-    private_fixture(&scratch)?;
+    private::directory(&scratch)?;
     let credentials = directory.path().join("credentials.json");
     std::fs::write(
         &credentials,

@@ -1,5 +1,7 @@
 use std::process::Command;
-use tempfile::tempdir;
+#[path = "support/private.rs"]
+mod private;
+use private::tempdir;
 
 #[path = "cli/sources.rs"]
 mod source_tests;
