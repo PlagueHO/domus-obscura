@@ -42,7 +42,6 @@ fn replaced_media_root_never_scans_the_replacement_or_erases_cached_presence() -
     let root = scratch.path().join("root");
     let old = scratch.path().join("old");
     std::fs::create_dir(&root)?;
-    private::directory(&root)?;
     std::fs::write(root.join("original.mp3"), b"original bytes")?;
     let database = state.path().join("state.db");
     let mut store = Store::open(&database)?;
@@ -55,7 +54,6 @@ fn replaced_media_root_never_scans_the_replacement_or_erases_cached_presence() -
     drop(store);
     std::fs::rename(&root, &old)?;
     std::fs::create_dir(&root)?;
-    private::directory(&root)?;
     std::fs::write(root.join("replacement.mp3"), b"replacement sentinel")?;
     let replacement = native_root_identity(&root)?;
     assert_ne!(identity, replacement);
@@ -139,18 +137,26 @@ fn copied_owner_marker_does_not_authorize_a_replacement_staging_directory() -> T
     let root = scratch.path().join("root");
     let old = scratch.path().join("old");
     std::fs::create_dir(&root)?;
+    private::directory(&root)?;
     let mut store = Store::open(&state.path().join("state.db"))?;
     let staging = StagingRoot::open(&mut store, &root)?;
     let expected = native_root_identity(&root)?;
     drop(staging);
     std::fs::rename(&root, &old)?;
     std::fs::create_dir(&root)?;
+    private::directory(&root)?;
     let marker = std::fs::read(old.join("owner.lock"))?;
     std::fs::write(root.join("owner.lock"), &marker)?;
     let replacement = native_root_identity(&root)?;
     assert_ne!(expected, replacement);
-    assert!(StagingRoot::open(&mut store, &root).is_err());
-    assert!(store.bind_staging_root(&root, &replacement).is_err());
+    assert!(matches!(
+        StagingRoot::open(&mut store, &root),
+        Err(domus::Error::Conflict(_))
+    ));
+    assert!(matches!(
+        store.bind_staging_root(&root, &replacement),
+        Err(domus::Error::Conflict(_))
+    ));
     assert_eq!(std::fs::read(root.join("owner.lock"))?, marker);
     assert_eq!(std::fs::read_dir(&root)?.count(), 1);
     assert_eq!(std::fs::read(old.join("owner.lock"))?, marker);
