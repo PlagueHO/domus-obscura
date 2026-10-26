@@ -1,0 +1,41 @@
+name: Implementation task
+description: Complete a bounded part of the approved product or acceptance plan.
+title: "Task: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Use existing product decisions. Do not include secrets or media. A task is not approval for live operations.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Required outcome
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Current evidence
+      description: Link to the relevant source, product requirement and existing implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and safety boundaries
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use checkboxes. State the required result, not a proxy measurement.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Related work and decisions
+      description: Identify prerequisites, unresolved decisions and operations that need separate approval.
+    validations:
+      required: true

@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domus Obscura - Core sidebar, streaming-wall component style</title>
+<style nonce="__NONCE__">
+@font-face{font-family:Poster;src:url('/heading.ttf') format('truetype');font-display:swap}
+:root{color-scheme:dark;font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;--bg:#0b0a12;--surface:#13111c;--elev:#1c1928;--line:#2f2a43;--text:#e9e7f0;--text2:#b4b0c6;--dim:#9a95ae;--accent:#b98cff;--accent-soft:rgba(185,140,255,.13);--glow:0 10px 24px rgba(0,0,0,.5)}
+*{box-sizing:border-box}body{margin:0;background:#07060b;color:var(--text)}
+button,input,select,textarea{font:inherit;color:inherit}button,a,input,select{min-height:44px}button{cursor:pointer}button:disabled{cursor:not-allowed}a{color:inherit;text-decoration:none}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+svg{display:block}
+.poster{font-family:Poster,sans-serif;font-weight:400;text-transform:uppercase;letter-spacing:.035em;line-height:1.05;margin:0}
+.caps{font-size:12px;font-weight:600;letter-spacing:.14em;text-transform:uppercase}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+.study-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:14px 22px;background:#100e18;border-bottom:1px solid var(--line)}
+.study-bar strong{margin-right:8px;color:#dcc8ff}
+.study-bar button{border:1px solid var(--line);background:#181525;border-radius:5px;padding:8px 14px}
+.study-bar button[aria-pressed=true]{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.study-bar .narrow-toggle{margin-left:auto}
+.study-note{margin:0;padding:12px 22px 16px;color:var(--text2);font-size:14px;max-width:110ch}
+.preview{container-type:inline-size;margin:0 auto 24px;width:calc(100% - 32px);max-width:1640px;border:1px solid var(--line);border-radius:8px;overflow:hidden;box-shadow:0 14px 44px #0006}
+.preview.narrow{width:390px;max-width:calc(100% - 24px)}
+.app{position:relative;display:grid;grid-template-columns:204px minmax(0,1fr);grid-template-rows:auto minmax(840px,1fr);background:var(--bg)}
+.app.collapsed{grid-template-columns:68px minmax(0,1fr)}
+.topbar{grid-column:1/-1;display:flex;align-items:center;gap:12px;min-height:72px;padding:12px 24px;background:var(--bg);border-bottom:1px solid var(--line)}
+.brand{display:grid;line-height:1}.brand b{font-family:Poster,sans-serif;font-weight:400;font-size:30px;letter-spacing:.18em}.brand span{font-size:11px;font-weight:600;letter-spacing:.5em;color:var(--accent);margin-top:3px}
+.tools{margin-left:auto;display:flex;gap:4px}.tools button{position:relative;display:flex;align-items:center;gap:8px;min-width:44px;justify-content:center;background:none;border:1px solid transparent;border-radius:5px;padding:9px;color:var(--text2)}
+.tools button:hover,.tools button[aria-expanded=true]{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.tools svg,.side svg,.btn svg,.round svg,.tabs svg{width:20px;height:20px;flex:none}
+.count{font-size:11px;font-weight:600;border:1px solid var(--accent);color:var(--accent);border-radius:3px;padding:0 5px}.dot{position:absolute;top:8px;right:8px;width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.sidebar{grid-row:2;background:var(--surface);border-right:1px solid var(--line);padding:16px 12px;display:flex;flex-direction:column;gap:6px}
+.side{display:flex;align-items:center;gap:13px;width:100%;min-height:46px;padding:10px 13px;background:none;border:1px solid transparent;border-radius:5px;color:var(--text2);text-align:left;white-space:nowrap}
+.side:hover:not(:disabled){background:#1a1726;color:var(--text)}.side.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.side:disabled{color:var(--dim)}.side small{display:block;font-size:10px;letter-spacing:.08em;color:var(--dim);margin-top:1px}
+.side-gap{margin-top:auto}.side-sep{height:1px;background:var(--line);margin:10px 4px}
+.app.collapsed .label{display:none}.app.collapsed .side{justify-content:center;padding:10px}.app.collapsed .sidebar{padding:16px 8px}
+.main{grid-row:2;min-width:0;position:relative}
+.tabs{display:flex;gap:26px;padding:0 28px;border-bottom:1px solid var(--line)}
+.tabs button{display:flex;align-items:center;gap:9px;background:none;border:0;border-bottom:2px solid transparent;border-radius:0;color:var(--text2);padding:12px 2px;margin-bottom:-1px}
+.tabs button[aria-current=page]{border-bottom-color:var(--accent);color:var(--text)}
+.page{padding:0 28px 34px}
+.hero{position:relative;padding:34px 0 26px;overflow:hidden}
+.hero-copy{position:relative;z-index:1;max-width:640px}
+.hero h1{font-size:clamp(40px,6.2cqi,76px);color:#f1eff7}.hero .sub{margin:10px 0 20px;color:var(--text2);max-width:52ch}
+.hero-art{position:absolute;right:0;top:0;bottom:0;width:52%;opacity:.85;pointer-events:none;-webkit-mask-image:radial-gradient(ellipse at 68% 50%,#000 30%,transparent 70%);mask-image:radial-gradient(ellipse at 68% 50%,#000 30%,transparent 70%)}
+.hero-art svg{width:100%;height:100%}
+.app:not([data-variant=hero]) .hero-art{display:none}.app:not([data-variant=hero]) .hero{padding-top:28px;padding-bottom:20px}.app:not([data-variant=hero]) .hero h1{font-size:46px}
+.search-line{display:flex;gap:10px;flex-wrap:wrap;max-width:720px}.field{position:relative;flex:1 1 280px}.field svg{position:absolute;left:14px;top:13px;width:18px;height:18px;color:var(--accent)}
+.field input{width:100%;padding:11px 14px 11px 42px;background:var(--surface);border:1px solid #5a4d78;border-radius:5px}.field input::placeholder{color:var(--dim)}
+.field input:focus,.sel:focus{border-color:var(--accent);box-shadow:var(--glow);outline:none}
+.sel{background:var(--surface);border:1px solid #5a4d78;border-radius:5px;padding:0 12px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;background:transparent;border:1px solid var(--accent);color:var(--text);border-radius:5px;padding:10px 20px;font-size:12px;font-weight:600;letter-spacing:.14em;text-transform:uppercase}
+.btn svg{color:var(--accent);width:16px;height:16px}.btn:hover:not(:disabled){background:var(--accent-soft);box-shadow:var(--glow)}.btn:disabled{border-color:#4a4260;color:var(--dim)}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:30px;align-items:start}
+.app[data-variant=stage] .layout{display:block}
+.row{margin-bottom:26px}.row-head{display:flex;align-items:center;gap:14px;margin-bottom:12px}.row-head h2{font-size:28px}.row-head .more{color:var(--dim);font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;min-height:0;display:flex;align-items:center;gap:6px}
+.arrows{margin-left:auto;display:flex;gap:8px}.round{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;background:var(--surface);border:1px solid var(--line);padding:0;color:var(--text2)}.round:hover{border-color:var(--accent);color:var(--accent)}
+.tiles{display:flex;align-items:flex-start;gap:14px;overflow-x:auto;padding:6px 6px 12px;scroll-snap-type:x proximity;scrollbar-width:thin}
+.album{flex:0 0 148px;min-width:0;background:none;border:0;padding:0;text-align:left;scroll-snap-align:start}
+.album .art{display:block;aspect-ratio:1;border:1px solid var(--line);border-radius:5px;overflow:hidden;transition:transform 160ms ease-out,border-color 160ms ease-out}
+.album:hover .art{transform:translateY(-3px);border-color:#7a66a4}.album .art svg{width:100%;height:100%}
+.album .cap{display:block;margin-top:10px;font-size:14px;font-weight:600;line-height:1.3}.album .by{display:block;font-size:12px;color:var(--text2);margin-top:2px}
+.album[aria-pressed=true] .art{border-color:var(--accent);box-shadow:var(--glow)}
+.album.focus{flex-basis:420px;display:grid;grid-template-columns:148px minmax(0,1fr);gap:0;background:var(--surface);border:1px solid var(--accent);border-radius:6px;box-shadow:var(--glow);overflow:hidden}
+.album.focus .art{border:0;border-radius:0;box-shadow:none;height:148px}.album.focus:hover .art{transform:none}
+.focus-text{display:flex;flex-direction:column;justify-content:center;gap:9px;padding:14px 18px;min-width:0}.focus-text .poster{font-size:30px;overflow-wrap:anywhere}
+.meta{display:flex;gap:10px;align-items:center;font-size:12px;color:var(--text2);flex-wrap:wrap}.chip{border:1px solid var(--accent);color:var(--accent);border-radius:3px;padding:0 7px;font-size:11px;font-weight:600}.blurb{font-size:13px;color:var(--text2);line-height:1.45}
+.inspector{background:transparent;border-left:1px solid var(--line);padding-left:26px;min-width:0}
+.inspector h3,.stage h3{font-size:23px;margin:24px 0 10px}.inspector h3:first-child{margin-top:4px}
+.app[data-variant=panel] .inspector,.app[data-variant=combo] .inspector{background:var(--surface);border:1px solid var(--accent);border-radius:6px;box-shadow:var(--glow);padding:20px 22px}
+.selection{display:flex;gap:14px;align-items:center;margin-bottom:14px}.selection .mini{width:76px;flex:none;border-radius:4px;overflow:hidden}.selection .mini svg{width:100%}.selection p{margin:4px 0 0;color:var(--text2);font-size:13px}.selection h2{font-size:27px}
+.edition{display:flex;gap:11px;padding:11px 0;border-top:1px solid var(--line);align-items:flex-start;font-size:13px;cursor:pointer}.edition input{accent-color:#b98cff;margin:4px 0 0;min-height:0;flex:none}
+.edition strong{display:block;font-size:14px}.edition small{display:block;margin-top:3px;color:var(--text2);font-size:12px}
+.tracks{list-style:none;margin:0;padding:0}.tracks li{display:flex;gap:12px;font-size:13px;padding:8px 0;border-bottom:1px solid var(--line)}.tracks .n{width:18px;color:var(--dim);font-variant-numeric:tabular-nums}.tracks .d{margin-left:auto;color:var(--text2);font-variant-numeric:tabular-nums}
+.checks{margin:18px 0}.check{display:flex;gap:10px;align-items:center;padding:8px 0;font-size:13px}.check i{width:8px;height:8px;border:1px solid var(--dim);border-radius:50%;flex:none}.check span{margin-left:auto;color:var(--text2);font-size:12px}
+.inspector .btn,.stage .btn{width:100%;margin-top:6px}.note{color:var(--text2);font-size:12px;margin:12px 0 0}
+.stage{display:grid;grid-template-columns:240px minmax(0,1fr) 320px;gap:32px;padding:6px 0 30px;margin-bottom:26px;border-bottom:1px solid var(--line)}
+.stage .big{border:1px solid var(--accent);border-radius:6px;overflow:hidden;box-shadow:var(--glow)}.stage .big svg{width:100%}
+.stage h2{font-size:48px}.stage .by{color:var(--text2);margin:6px 0 14px}.stage .chips{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
+.empty{padding:26px 0;color:var(--text2)}
+.library{padding:34px 0}.library h1{font-size:46px}.library p{color:var(--text2);max-width:58ch}
+.drawer{position:absolute;right:0;top:72px;bottom:0;width:360px;max-width:100%;z-index:5;background:var(--elev);border-left:1px solid var(--accent);padding:22px;box-shadow:-12px 0 32px #0007;overflow:auto;animation:in 180ms ease-out}.drawer[hidden]{display:none}
+.drawer header{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}.drawer h2{font-size:30px}.drawer p{color:var(--text2);font-size:13px}
+.drawer .item{border-top:1px solid var(--line);padding:14px 0}.drawer .item strong{display:block;font-size:14px}.drawer .item span{font-size:13px;color:var(--text2)}
+.drawer .x{background:none;border:1px solid var(--line);border-radius:5px;width:44px;padding:0;display:grid;place-items:center}.drawer .x:hover{border-color:var(--accent);color:var(--accent)}.drawer .x svg{width:20px;height:20px}
+.status{border-top:1px solid #4a3f66;background:#130f1f;padding:14px 22px;font-size:14px;color:#e2d4fb;min-height:52px}
+@keyframes in{from{transform:translateX(22px);opacity:.4}to{transform:none;opacity:1}}
+@container(max-width:1000px){.app{grid-template-columns:176px minmax(0,1fr)}.layout{grid-template-columns:minmax(0,1fr) 270px;gap:22px}.stage{grid-template-columns:200px minmax(0,1fr)}.stage .side-col{grid-column:1/-1}.page,.tabs{padding-left:20px;padding-right:20px}.album.focus{flex-basis:380px}.tool-text{display:none}}
+@container(max-width:720px){.app,.app.collapsed{grid-template-columns:62px minmax(0,1fr)}.app:not(.collapsed){grid-template-columns:166px minmax(0,1fr)}.sidebar{padding:14px 6px}.topbar{padding:10px 14px;min-height:66px}.brand b{font-size:25px}.drawer{top:66px;width:100%}.page,.tabs{padding-left:14px;padding-right:14px}.tabs{gap:18px}.hero{padding-top:24px}.hero h1,.app:not([data-variant=hero]) .hero h1{font-size:36px}.layout{display:block}.inspector{border-left:0;border-top:1px solid var(--line);padding:22px 0 0}.app[data-variant=panel] .inspector,.app[data-variant=combo] .inspector{padding:18px}.album{flex-basis:132px}.album.focus{flex-basis:292px;grid-template-columns:112px minmax(0,1fr)}.album.focus .art{height:112px}.focus-text{padding:8px 11px;gap:5px}.focus-text .poster{font-size:23px}.focus-text .blurb{display:none}.stage{display:block}.stage .big{max-width:190px;margin-bottom:18px}.stage h2{font-size:38px}.row-head h2{font-size:24px}.arrows{display:none}.app:not(.collapsed) .side{gap:9px;padding:10px 8px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<div class="study-bar" role="group" aria-label="Core sidebar component-style variations"><strong>Core sidebar / streaming-wall style, violet</strong>
+<button data-variant="hero" aria-pressed="true">1. Hero + focus card</button>
+<button data-variant="focus" aria-pressed="false">2. Compact + focus card</button>
+<button data-variant="panel" aria-pressed="false">3. Framed inspector</button>
+<button data-variant="stage" aria-pressed="false">4. Featured edition</button>
+<button data-variant="combo" aria-pressed="false">5. Compact + framed inspector</button>
+<button class="narrow-toggle" aria-pressed="false">Narrow view</button></div>
+<p class="study-note" id="note"></p>
+<div class="preview" id="preview">
+<div class="app collapsed-off" id="app" data-variant="hero">
+ <header class="topbar"><a class="brand" href="#music" aria-label="Domus Obscura"><b>DOMUS</b><span>OBSCURA</span></a>
+  <nav class="tools" aria-label="Global tools"><button data-panel="queue" aria-label="Open global queue, 3 sample tasks" title="Global queue"><span data-icon="queue"></span><span class="tool-text caps">Queue</span><span class="count">3</span></button><button data-panel="notifications" aria-label="Open notifications, 1 sample notice" title="Notifications"><span data-icon="bell"></span><span class="dot"></span></button><button data-panel="chat" aria-label="Open chat preview" title="Chat preview"><span data-icon="chat"></span></button></nav></header>
+ <aside class="sidebar" aria-label="Application sidebar">
+  <button class="side" id="collapse" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar"><span data-icon="collapse"></span><span class="label caps">Collapse</span></button>
+  <div class="side-sep"></div>
+  <nav aria-label="Core functions"><button class="side on" aria-current="page" title="Music"><span data-icon="music"></span><span class="label caps">Music</span></button>
+  <button class="side" disabled title="TV - future core"><span data-icon="tv"></span><span class="label caps">TV<small>Future</small></span></button>
+  <button class="side" disabled title="Movies - future core"><span data-icon="movies"></span><span class="label caps">Movies<small>Future</small></span></button></nav>
+  <div class="side-gap"></div>
+  <button class="side" data-panel="settings" title="App settings"><span data-icon="settings"></span><span class="label caps">App settings</span></button>
+  <button class="side" data-panel="account" title="Account"><span data-icon="account"></span><span class="label caps">Account</span></button>
+ </aside>
+ <div class="main">
+  <nav class="tabs" aria-label="Music pages"><button data-page="music" aria-current="page" class="caps"><span data-icon="search"></span>Music</button><button data-page="library" class="caps"><span data-icon="library"></span>Library</button></nav>
+  <div class="page" id="page">
+   <section class="hero"><div class="hero-art" id="hero-art" aria-hidden="true"></div><div class="hero-copy"><h1 class="poster">Find the exact edition.</h1><p class="sub">Search an album, choose its exact edition, then review artwork, source and plan before anything is approved.</p>
+    <div class="search-line"><label class="field"><span class="sr-only">Search sample artists or albums</span><span data-icon="search"></span><input id="search" type="search" placeholder="Search artists or albums" autocomplete="off"></label><label><span class="sr-only">Target audio format</span><select class="sel" id="format"><option>MP3 320 kbps</option><option>FLAC</option></select></label></div></div></section>
+   <div id="results"></div>
+  </div>
+  <aside class="drawer" id="drawer" aria-label="Global tool" hidden><header><h2 class="poster" id="drawer-title"></h2><button class="x" aria-label="Close panel"><span data-icon="close"></span></button></header><div id="drawer-body"></div></aside>
+ </div>
+</div>
+<div class="status" id="status" role="status">Generated sample data only. No provider, approval, download or AI access.</div>
+</div>
+<script nonce="__NONCE__">
+const I={music:'<path d="M9 18V5l11-2v13M9 8l11-2"/><ellipse cx="6" cy="18" rx="3" ry="2"/><ellipse cx="17" cy="16" rx="3" ry="2"/>',tv:'<rect x="3" y="6" width="18" height="14" rx="2"/><path d="m8 2 4 4 4-4"/>',movies:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4m-4 8h4M17 8h4m-4 8h4"/>',search:'<circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/>',library:'<path d="M4 4v16M9 4v16M14 4v16m3-15 4 14"/>',queue:'<path d="M9 5h12M9 12h12M9 19h12"/><circle cx="4" cy="5" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="19" r="1"/>',bell:'<path d="M5 9a7 7 0 0 1 14 0v6l2 3H3l2-3ZM9 21h6"/>',chat:'<path d="M21 16a3 3 0 0 1-3 3H9l-6 3V6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3Z"/><path d="M7 8h10M7 13h6"/>',settings:'<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>',account:'<circle cx="12" cy="8" r="4"/><path d="M4 22v-3a8 8 0 0 1 16 0v3"/>',collapse:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18m7-13-3 4 3 4"/>',close:'<path d="m6 6 12 12M6 18 18 6"/>',left:'<path d="m15 5-7 7 7 7"/>',right:'<path d="m9 5 7 7-7 7"/>',go:'<path d="m9 5 7 7-7 7"/>'};
+const icon=n=>'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+I[n]+'</svg>';
+document.querySelectorAll('[data-icon]').forEach(e=>{e.outerHTML=icon(e.dataset.icon)});
+const frames=['<rect width="240" height="240" fill="#17213b"/><circle cx="121" cy="112" r="72" fill="#db80b1"/><circle cx="121" cy="112" r="48" fill="#17213b"/><ellipse cx="121" cy="112" rx="107" ry="26" fill="none" stroke="#cdbbf0" stroke-width="5" transform="rotate(-29 121 112)"/><circle cx="157" cy="49" r="10" fill="#e9e6c6"/><path d="M30 206h72" stroke="#e9e6c6" stroke-width="4"/>','<rect width="240" height="240" fill="#153b34"/><path d="M0 160 120 35 240 160v80H0" fill="#a4c573"/><path d="M35 240V130h28v110m35 0V95h30v145m35 0V130h28v110" fill="#153b34"/><circle cx="120" cy="38" r="12" fill="#ebd295"/>','<rect width="240" height="240" fill="#c94339"/><path d="M35 240V78a85 85 0 0 1 170 0v162" fill="none" stroke="#f0a369" stroke-width="20"/><path d="M82 240V90a38 38 0 0 1 76 0v150" fill="none" stroke="#392642" stroke-width="20"/>','<rect width="240" height="240" fill="#102742"/><path d="M0 160 120 40l120 120-120 100Z" fill="#4c83a1"/><path d="m30 160 90-90 90 90-90 90Z" fill="#102742"/><path d="m60 160 60-60 60 60-60 60Z" fill="#86c5cf"/><circle cx="120" cy="160" r="16" fill="#172540"/>','<rect width="240" height="240" fill="#bcace0"/><rect x="29" y="35" width="78" height="170" rx="39" fill="#493d76"/><rect x="133" y="35" width="78" height="170" rx="39" fill="#e2a4aa"/><circle cx="68" cy="80" r="23" fill="#e2a4aa"/><circle cx="172" cy="158" r="23" fill="#493d76"/>','<rect width="240" height="240" fill="#321e39"/><path d="m120 16 15 70 51-51-28 67 70 18-70 18 28 67-51-51-15 70-15-70-51 51 28-67-70-18 70-18-28-67 51 51Z" fill="#da619e"/><circle cx="120" cy="120" r="29" fill="#ebc4b1"/><circle cx="120" cy="120" r="12" fill="#321e39"/>'];
+const art=(i,slice)=>'<svg viewBox="0 0 240 240"'+(slice?' preserveAspectRatio="xMidYMid slice"':'')+' role="img" aria-label="Original abstract sample cover">'+frames[i]+'</svg>';
+const albums=[['Glass Satellites','Vanta Circuit','2024'],['Signal Gardens','Vanta Circuit','2022'],['Infrared Rooms','Vanta Circuit','2020'],['Night Canvas','Morrow Index','2024'],['Soft Machines','Sable Array','2023'],['Static Bloom','Pale Assembly','2021']].map((a,i)=>({id:i,title:a[0],artist:a[1],year:a[2]}));
+const tracks=[['Static Bloom','2:48'],['Glass Satellites','3:12'],['White Noise Gardens','2:36'],['Afterimage','4:05'],['A Quiet Signal','3:21']];
+const notes={hero:'Hero + focus card: closest to the reference. A poster headline sits over large cover art. The selected cover expands in its row. The inspector keeps the exact-edition review visible.',focus:'Compact + focus card: same row and card style without the hero. More artwork is visible at once. Better for repeated searches.',panel:'Framed inspector: rows stay plain. The selected album gets one violet-framed review panel, like the reference focus card.',combo:'Compact + framed inspector: no hero, so more artwork shows. The selected cover expands in its row, and the review sits in one violet-framed panel.',stage:'Featured edition: the selected album owns the top of the page with edition choices and review. Rows follow below. This replaces the side inspector.'};
+const $=s=>document.querySelector(s);const app=$('#app'),preview=$('#preview'),drawer=$('#drawer');
+let sel=0,variant='hero',edition='cd',page='music',opener=null;
+const al=()=>albums[sel];
+const tile=a=>{const on=a.id===sel;const focus=on&&(variant==='hero'||variant==='focus'||variant==='combo');
+ if(focus)return '<button class="album focus" data-album="'+a.id+'" aria-pressed="true" aria-label="Inspect '+a.title+' by '+a.artist+'"><span class="art">'+art(a.id)+'</span><span class="focus-text"><strong class="poster">'+a.title+'</strong><span class="meta"><span class="chip">'+a.year+'</span><span>CD or digital edition</span></span><span class="blurb">'+a.artist+' / 5 sample tracks / 2 sample editions</span></span></button>';
+ return '<button class="album" data-album="'+a.id+'" aria-pressed="'+on+'" aria-label="Inspect '+a.title+' by '+a.artist+'"><span class="art">'+art(a.id)+'</span><span class="cap">'+a.title+'</span><span class="by">'+a.artist+' / '+a.year+'</span></button>';};
+const row=(title,list,more)=>'<section class="row"><div class="row-head"><h2 class="poster">'+title+'</h2>'+(more?'<span class="more">'+more+icon('go').replace('<svg','<svg width="12" height="12"')+'</span>':'')+'<div class="arrows"><button class="round" data-scroll="-1" aria-label="Scroll '+title.toLowerCase()+' left">'+icon('left')+'</button><button class="round" data-scroll="1" aria-label="Scroll '+title.toLowerCase()+' right">'+icon('right')+'</button></div></div><div class="tiles">'+list.map(tile).join('')+'</div></section>';
+const editions=()=>['cd','digital'].map(k=>'<label class="edition"><input type="radio" name="edition" value="'+k+'"'+(edition===k?' checked':'')+'><span><strong>'+al().year+' / '+(k==='cd'?'CD':'Digital')+' edition</strong><small>5 tracks / sample release '+(k==='cd'?'A':'B')+'</small></span></label>').join('');
+const trackList=()=>'<ol class="tracks">'+tracks.map((t,i)=>'<li><span class="n">'+(i+1)+'</span><span>'+t[0]+'</span><span class="d">'+t[1]+'</span></li>').join('')+'</ol>';
+const checks='<div class="checks"><div class="check"><i></i>Artwork<span>Not prepared</span></div><div class="check"><i></i>Source<span>Not selected</span></div><div class="check"><i></i>Plan<span>Not approved</span></div></div>';
+const review='<button class="btn review">Review this edition'+icon('go')+'</button><p class="note">Choosing an edition does not approve artwork, a source, or a download.</p>';
+const inspector=()=>'<aside class="inspector" aria-label="Selected album">'+(variant==='panel'||variant==='combo'?'<div class="selection"><span class="mini">'+art(sel)+'</span><div><h2 class="poster">'+al().title+'</h2><p>'+al().artist+'</p></div></div>':'')+'<h3 class="poster">Exact edition</h3>'+editions()+'<h3 class="poster">Tracks</h3>'+trackList()+checks+review+'</aside>';
+const stage=()=>'<section class="stage" aria-label="Selected release"><div class="big">'+art(sel)+'</div><div><h2 class="poster">'+al().title+'</h2><p class="by">'+al().artist+' / '+al().year+'</p><div class="chips"><span class="chip">SAMPLE</span></div><h3 class="poster">Exact edition</h3>'+editions()+review+'</div><div class="side-col"><h3 class="poster">Tracks</h3>'+trackList()+checks+'</div></section>';
+function render(){
+ app.dataset.variant=variant;$('#note').textContent=notes[variant];
+ document.querySelectorAll('[data-variant]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.variant===variant)));
+ $('#hero-art').innerHTML=art(sel,true);
+ const q=$('#search').value.trim().toLowerCase();const found=albums.filter(a=>(a.title+' '+a.artist).toLowerCase().includes(q));
+ let wall;
+ if(!found.length)wall='<p class="empty">No sample albums match. Try Vanta Circuit or Glass Satellites.</p>';
+ else if(q)wall=row('Album results',found);
+ else wall=row('Vanta Circuit',found.slice(0,3),'View all')+row('More sample albums',found.slice(3),'View all');
+ $('#results').innerHTML=variant==='stage'?stage()+wall:'<div class="layout"><div>'+wall+'</div>'+inspector()+'</div>';
+}
+function showPage(p){page=p;document.querySelectorAll('[data-page]').forEach(b=>p===b.dataset.page?b.setAttribute('aria-current','page'):b.removeAttribute('aria-current'));
+ $('.hero').hidden=p!=='music';
+ if(p==='music')render();else $('#results').innerHTML='<section class="library"><h1 class="poster">Music library</h1><p>Library page position only. No indexed library is connected in this study.</p></section>';}
+function setCollapsed(c){app.classList.toggle('collapsed',c);const b=$('#collapse');b.setAttribute('aria-expanded',String(!c));b.setAttribute('aria-label',c?'Expand sidebar':'Collapse sidebar');b.title=c?'Expand sidebar':'Collapse sidebar';b.querySelector('.label').textContent=c?'Expand':'Collapse';}
+const panels={queue:['Global queue','<p>Illustrative tasks from every core. One scheduler would limit work running at once. Each core keeps its own rules and approvals.</p><div class="item"><strong>Glass Satellites</strong><span>Music / verifying output</span></div><div class="item"><strong>Example TV season</strong><span>TV / waiting / future-core example</span></div><div class="item"><strong>Example movie</strong><span>Movies / waiting / future-core example</span></div><p>The real concurrency limit is not decided here.</p>'],notifications:['Notifications','<p>Sample notice. No live task is connected.</p><div class="item"><strong>Artwork needs your review</strong><span>Music / Glass Satellites</span></div>'],chat:['Chat','<p>Future chat surface. No model, agent or MCP connection exists. Runtime AI is outside the current V1 scope.</p><div class="item"><strong>Example prompt</strong><span>Which Vanta Circuit albums am I missing?</span></div><label class="caps" for="chat-in" style="display:block;margin:18px 0 8px">Try the input layout</label><textarea id="chat-in" style="width:100%;min-height:90px;background:var(--bg);border:1px solid #5a4d78;border-radius:5px;padding:10px"></textarea><button class="btn" disabled style="width:100%;margin-top:10px">Send unavailable</button>'],settings:['App settings','<p>Shared settings would live here. Provider and media rules stay inside each core. This study changes nothing.</p>'],account:['Account','<p>Account control position only. No identity or session is loaded.</p>']};
+function closeDrawer(){drawer.hidden=true;document.querySelectorAll('[data-panel]').forEach(b=>b.setAttribute('aria-expanded','false'));opener?.focus({preventScroll:true});}
+document.addEventListener('click',e=>{
+ const v=e.target.closest('.study-bar [data-variant]');if(v){variant=v.dataset.variant;if(page==='music')render();return;}
+ if(e.target.closest('.narrow-toggle')){const n=preview.classList.toggle('narrow');e.target.closest('button').setAttribute('aria-pressed',String(n));setCollapsed(n);return;}
+ if(e.target.closest('#collapse')){setCollapsed(!app.classList.contains('collapsed'));return;}
+ const pg=e.target.closest('[data-page]');if(pg){showPage(pg.dataset.page);return;}
+ const a=e.target.closest('[data-album]');if(a){sel=Number(a.dataset.album);edition='cd';render();document.querySelector('[data-album="'+sel+'"]')?.focus({preventScroll:true});$('#status').textContent='Selected '+al().title+'. Sample editions are generated, not provider evidence.';return;}
+ const sc=e.target.closest('[data-scroll]');if(sc){sc.closest('.row').querySelector('.tiles').scrollBy({left:Number(sc.dataset.scroll)*320,behavior:'smooth'});return;}
+ if(e.target.closest('.review')){$('#status').textContent='Design study only: no plan, approval or download was created.';return;}
+ const p=e.target.closest('[data-panel]');if(p){if(!drawer.hidden&&drawer.dataset.panel===p.dataset.panel){closeDrawer();return;}opener=p;const d=panels[p.dataset.panel];document.querySelectorAll('[data-panel]').forEach(b=>b.setAttribute('aria-expanded',String(b===p)));drawer.dataset.panel=p.dataset.panel;$('#drawer-title').textContent=d[0];$('#drawer-body').innerHTML=d[1];drawer.hidden=false;drawer.querySelector('.x').focus({preventScroll:true});return;}
+ if(e.target.closest('.x'))closeDrawer();
+});
+document.addEventListener('change',e=>{if(e.target.name==='edition')edition=e.target.value;});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!drawer.hidden)closeDrawer();});
+$('#search').addEventListener('input',render);
+$('#format').addEventListener('change',e=>{$('#status').textContent='Target format: '+e.target.value+'. A preference only; no media was checked.';});
+document.querySelectorAll('[data-panel]').forEach(b=>{b.setAttribute('aria-controls','drawer');b.setAttribute('aria-expanded','false');});
+app.classList.remove('collapsed-off');render();
+</script>
+</body>
+</html>

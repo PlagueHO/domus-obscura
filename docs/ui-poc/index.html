@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domus Obscura - Cover wall layout studies</title>
+<style nonce="__NONCE__">
+@font-face{font-family:Poster;src:url('/heading.ttf') format('truetype');font-display:swap}
+:root{color-scheme:dark;font:15px/1.5 system-ui,sans-serif;background:#090a0f;color:#f4f3fc;--muted:#b5b4c6;--edge:#383744;--accent:#bd9aff}
+*{box-sizing:border-box}body{margin:0}button,input,select{font:inherit}button,a,input,select{min-height:44px}button,a{touch-action:manipulation}button{cursor:pointer}button:disabled{cursor:not-allowed}
+:focus-visible{outline:3px solid #d3baff;outline-offset:4px}button{border:1px solid var(--edge);border-radius:5px;background:#1b1c27;color:inherit;padding:9px 14px}button:hover{background:#292735}a{color:inherit;text-decoration:none}
+.study-header{padding:14px 22px;background:#191722;border-bottom:1px solid #534263;display:flex;gap:18px;align-items:center;flex-wrap:wrap}.study-header strong{color:#dfcbff}.study-header span{color:#d4ccdf;font-size:13px}
+.study-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:14px 22px;background:#101017}.study-controls button[aria-pressed=true]{background:#bd9aff;color:#1a102b;border-color:#bd9aff;font-weight:650}.study-controls .narrow-toggle{margin-left:auto}
+.study-description{padding:0 22px 16px;margin:0;color:#c9c4d5;font-size:14px;max-width:100ch}
+.preview{container-type:inline-size;margin:0 auto 24px;width:calc(100% - 32px);max-width:1640px;border:1px solid #40364f;border-radius:8px;overflow:hidden;box-shadow:0 14px 44px #0005}
+.preview.narrow{width:390px;max-width:calc(100% - 24px)}
+.shell{display:grid;grid-template-columns:154px minmax(0,1fr);min-height:820px;background:#0d0d15}
+.sidebar{background:#111119;border-right:1px solid #30303c;padding:24px 12px;display:flex;flex-direction:column;gap:36px}.wordmark{font-family:Poster,sans-serif;font-size:26px;line-height:1.05;letter-spacing:.025em;padding:0 8px;color:#eee4ff}.wordmark span{display:block;color:var(--accent)}
+.navigation{display:grid;gap:8px}.navigation a{padding:11px 12px;border-radius:5px;color:#c3bece;display:flex;align-items:center;gap:9px}.navigation a[aria-current=page]{background:#282036;color:#dcc7ff}.navigation a:hover{background:#24212d}.nav-mark{width:18px;display:inline-grid;place-items:center;font-size:17px;line-height:1}.utilities{margin-top:auto}.prototype{font-size:12px;color:#b7abc9;border-top:1px solid #383044;padding:16px 9px 0}
+.content{min-width:0;padding:26px 28px 32px}.page-title{display:flex;align-items:baseline;gap:15px;flex-wrap:wrap;margin-bottom:20px}h1,h2,h3{font-family:Poster,sans-serif;font-weight:400;line-height:1.1;letter-spacing:.025em;margin:0}h1{font-size:44px}h2{font-size:27px}h3{font-size:23px}.page-title p{margin:0;color:var(--muted);font-size:14px}
+.search-line{display:flex;gap:10px;margin-bottom:24px}.search-field{position:relative;flex:1}.search-field input{width:100%;padding:12px 14px 12px 42px;background:#1b1b27;border:1px solid #5d526f;color:#f4f3fc;border-radius:5px;min-height:48px}.search-field input::placeholder{color:#b7aec6}.search-field svg{position:absolute;left:14px;top:15px;stroke:#cfb4ff;width:18px;height:18px}.format{background:#1b1b27;border:1px solid #5d526f;color:#f4f3fc;padding:0 10px;border-radius:5px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+.workspace{display:grid;grid-template-columns:minmax(0,1fr) 286px;gap:28px;align-items:start}.wall{min-width:0}.shelf{margin-bottom:30px}.shelf-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px}.shelf-heading p{color:var(--muted);font-size:13px;margin:0}.tiles{display:flex;gap:15px;overflow-x:auto;padding:6px 6px 14px;scroll-snap-type:x proximity}
+.album{flex:0 0 142px;min-width:0;border:0;border-radius:0;background:transparent;padding:0;text-align:left;scroll-snap-align:start;position:relative}.album:hover{background:transparent}.album .art{display:block;width:100%;aspect-ratio:1;overflow:hidden;border:1px solid #39323f;border-radius:5px;transition:transform 150ms ease-out,outline-color 150ms ease-out}.album:hover .art,.album:focus-visible .art{transform:scale(1.025)}.album[aria-pressed=true] .art{outline:2px solid #c49eff;outline-offset:3px}.album .art svg{width:100%;height:100%;display:block}.album strong{display:block;margin-top:13px;font-size:14px;line-height:1.35;font-weight:600}.album .artist{display:block;font-size:13px;color:#c2b9cf;margin-top:3px}.album .year{display:block;font-size:12px;color:#b4aabd;margin-top:4px}
+.inspector{border-left:1px solid #44384f;padding-left:25px;min-width:0}.selection{display:flex;gap:14px;align-items:center;margin-bottom:22px}.selection .mini-art{width:78px;flex:none;aspect-ratio:1;overflow:hidden;border-radius:4px}.mini-art svg{width:100%;height:100%}.selection p{margin:5px 0 0;color:var(--muted);font-size:13px}.selection h2{font-size:27px}.detail-heading{display:flex;gap:10px;align-items:center;margin:24px 0 12px}.detail-heading h3{font-size:23px}.tag{font-size:11px;border:1px solid #66527d;color:#e1caff;border-radius:4px;padding:3px 6px;white-space:nowrap}
+.edition-option{display:flex;gap:10px;align-items:start;padding:12px 0;border-top:1px solid #34303f;cursor:pointer;font-size:13px}.edition-option input{accent-color:#bd9aff;min-height:0;margin:4px 0 0;flex:none}.edition-option strong{display:block;font-size:14px;font-weight:600}.edition-option small{display:block;margin-top:4px;color:#b9afc7;font-size:12px}
+.track-list{margin:0;padding:0;list-style:none}.track-list li{display:flex;gap:12px;align-items:baseline;font-size:13px;padding:8px 0;border-bottom:1px solid #2d2935}.track-list .number{width:18px;color:#ada1be;font-variant-numeric:tabular-nums}.track-list .duration{margin-left:auto;color:#bcb1ca;font-variant-numeric:tabular-nums}
+.checks{margin:22px 0}.check{display:flex;align-items:center;gap:10px;padding:9px 0;font-size:13px}.check .circle{width:8px;height:8px;border:1px solid #b5a1ca;border-radius:50%;flex:none}.check .state{margin-left:auto;color:#c5b8d6;font-size:12px}
+.primary{background:#b68afa;border-color:#b68afa;color:#1a102a;font-weight:650}.primary:hover{background:#caa7ff}.inspector .primary{width:100%;margin-top:8px}.disclaimer{color:#baaccb;font-size:12px;margin:12px 0 0;line-height:1.5}.edition-note{color:#cbb3eb;font-size:12px;margin:0 0 10px}
+.stage{display:grid;grid-template-columns:196px minmax(190px,1fr) minmax(190px,1fr);gap:27px;padding:0 0 27px;border-bottom:1px solid #44364f;margin-bottom:28px}.stage-art{width:100%;aspect-ratio:1;border-radius:5px;overflow:hidden}.stage-art svg{width:100%;height:100%}.stage h2{font-size:34px;margin-bottom:8px}.stage .artist-line{color:#cbbfd9;margin:0 0 14px;font-size:15px}.stage .checks{margin:12px 0}.stage .primary{margin-top:18px}.stage .track-list{margin-top:13px}.stage .edition-option{padding:8px 0}.stage .edition-meta{color:#beb0cd;font-size:13px}.full-wall .album{flex-basis:160px}
+.compare-wall .album{flex-basis:138px}.compare-area{display:grid;grid-template-columns:1fr 1fr;gap:28px;border-top:1px solid #473a54;padding-top:24px;margin-top:8px}.compare-head{grid-column:1/-1;display:flex;gap:15px;align-items:baseline;margin-bottom:-8px}.compare-head p{margin:0;font-size:13px;color:#beb1ce}.edition-compare{min-width:0;padding:0 0 18px}.edition-compare+.edition-compare{border-left:1px solid #44384f;padding-left:28px}.edition-compare h3{font-size:25px}.facts{display:grid;grid-template-columns:90px 1fr;gap:9px 15px;font-size:13px;margin:20px 0}.facts dt{color:#baacc9}.facts dd{margin:0}.compare-foot{border-top:1px solid #40334c;padding-top:22px;margin-top:16px;display:flex;justify-content:space-between;gap:20px;align-items:center}.compare-foot p{color:#c2b4d0;font-size:13px;margin:0;max-width:52ch}.empty{padding:24px 0;color:#d0c3e0}
+.feedback{border-top:1px solid #544068;padding:14px 22px;background:#1a1425;color:#e4d3fc;min-height:51px;font-size:14px}.choice-footer{display:flex;justify-content:space-between;gap:20px;align-items:center;padding:14px 22px 24px;max-width:1640px;margin:auto}.choice-footer p{margin:0;color:#c8bdd4;font-size:14px;max-width:72ch}
+@container(max-width:1100px){.shell{grid-template-columns:134px minmax(0,1fr)}.content{padding:24px 22px}.sidebar{padding:24px 8px}.wordmark{font-size:24px}.workspace{grid-template-columns:minmax(0,1fr) 255px;gap:22px}.inspector{padding-left:20px}.album{flex-basis:132px}.stage{grid-template-columns:160px minmax(160px,1fr);gap:22px}.stage-tracks{grid-column:1/-1;display:grid;grid-template-columns:160px 1fr;gap:22px}.stage-tracks .track-list{margin:0}.full-wall .album{flex-basis:143px}}
+@container(max-width:800px){.shell{grid-template-columns:1fr}.sidebar{border-right:0;border-bottom:1px solid #39303f;padding:16px 20px;display:flex;flex-direction:row;align-items:center;gap:20px}.wordmark{font-size:22px}.wordmark span{display:inline}.navigation{display:flex;gap:4px;flex-wrap:wrap}.navigation a{padding:9px}.nav-mark,.utilities,.prototype{display:none}.workspace{grid-template-columns:minmax(0,1fr) 250px;gap:20px}.album{flex-basis:126px}.inspector{padding-left:18px}.content{padding:24px 20px}}
+@container(max-width:620px){.sidebar{padding:15px 16px;gap:13px;flex-wrap:wrap}.wordmark{font-size:23px;white-space:nowrap}.navigation{width:100%;justify-content:space-between}.navigation a{padding:8px 9px;font-size:13px}.content{padding:22px 16px}.page-title{margin-bottom:18px;gap:7px}.page-title p{font-size:13px}.search-line{gap:8px;margin-bottom:22px}.search-field input{font-size:14px;padding-left:37px}.format{max-width:104px;font-size:13px}.workspace{display:flex;flex-direction:column;gap:24px}.wall,.inspector{width:100%}.inspector{border-left:0;border-top:1px solid #50405e;padding:23px 0 0}.album{flex-basis:136px}.shelf{margin-bottom:22px}.selection .mini-art{width:96px}.selection h2{font-size:31px}.stage{grid-template-columns:112px minmax(0,1fr);gap:17px;padding-bottom:23px}.stage h2{font-size:30px}.stage .artist-line{font-size:13px}.stage .primary{grid-column:1/-1;width:100%}.stage .edition-option{font-size:13px}.stage-tracks{display:block}.stage-tracks h3{margin-bottom:9px}.stage .stage-checks{grid-column:1/-1}.full-wall .album{flex-basis:136px}.compare-area{display:flex;flex-direction:column;gap:22px}.compare-head{display:block}.compare-head p{margin-top:8px}.edition-compare+.edition-compare{border-left:0;border-top:1px solid #493957;padding:24px 0 0}.compare-foot{flex-direction:column;align-items:stretch}.compare-foot .primary{width:100%}.study-description{font-size:13px}}
+.search-field input,.format{border-color:#80708f}
+@container(max-width:620px){.search-line{flex-wrap:wrap}.search-field{flex-basis:100%}.format{max-width:none;min-width:154px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<!-- DESIGN STUDY: Cover wall. Dark panels, untinted sample artwork, violet actions.
+Music search and edition review only. Generated data; no application, provider or media access. -->
+<header class="study-header"><strong>Domus Obscura / design preview</strong><span>Generated sample albums. No provider, approval or download access.</span></header>
+<div class="study-controls" aria-label="Layout studies">
+  <button data-layout="wall" aria-pressed="true">Wall + inspector</button>
+  <button data-layout="stage" aria-pressed="false">Release stage</button>
+  <button data-layout="compare" aria-pressed="false">Comparison shelf</button>
+  <button class="narrow-toggle" aria-pressed="false">Narrow view</button>
+</div>
+<p id="description" class="study-description"></p>
+<div class="preview" id="preview">
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="wordmark" href="#music" aria-label="Domus Obscura">DOMUS <span>OBSCURA</span></a>
+      <nav class="navigation" aria-label="Application">
+        <a href="#music" aria-current="page"><span class="nav-mark" aria-hidden="true">&#9835;</span>Music</a>
+        <a href="#library"><span class="nav-mark" aria-hidden="true">&#9638;</span>Library</a>
+        <a href="#queue"><span class="nav-mark" aria-hidden="true">&#8801;</span>Queue</a>
+        <a href="#settings"><span class="nav-mark" aria-hidden="true">&#9881;</span>Settings</a>
+      </nav>
+      <nav class="navigation utilities" aria-label="Other screens">
+        <a href="#inbox">Inbox</a><a href="#recovery">Recovery</a>
+        <span class="prototype">Music screen study<br>No live library data</span>
+      </nav>
+    </aside>
+    <main class="content">
+      <div class="page-title"><h1>MUSIC</h1><p>Find an album. Choose its exact edition.</p></div>
+      <div class="search-line">
+        <label class="search-field"><span class="sr-only">Search sample artists or albums</span><svg viewBox="0 0 24 24" fill="none" stroke-width="1.6" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 5 5"/></svg><input id="search" type="search" placeholder="Search artists or albums" autocomplete="off"></label>
+        <label><span class="sr-only">Target audio format</span><select id="format" class="format"><option>MP3 320 kbps</option><option>FLAC</option></select></label>
+      </div>
+      <div id="layout"></div>
+    </main>
+  </div>
+  <div class="feedback" id="feedback" role="status">Select a sample cover to inspect its editions. The preview makes no application changes.</div>
+</div>
+<footer class="choice-footer"><p>Compare the three layouts using the same artwork, type and colors. Narrow view shows how each layout stacks on a phone.</p><a href="/font-license.txt">Heading font license</a></footer>
+<script nonce="__NONCE__">
+const albums=[
+ {id:0,title:'Glass Satellites',artist:'Vanta Circuit',year:'2024',art:0},
+ {id:1,title:'Signal Gardens',artist:'Vanta Circuit',year:'2022',art:1},
+ {id:2,title:'Infrared Rooms',artist:'Vanta Circuit',year:'2020',art:2},
+ {id:3,title:'Night Canvas',artist:'Morrow Index',year:'2024',art:3},
+ {id:4,title:'Soft Machines',artist:'Sable Array',year:'2023',art:4},
+ {id:5,title:'Static Bloom',artist:'Pale Assembly',year:'2021',art:5},
+];
+const descriptions={
+ wall:'Wall + inspector: browse artwork on the left while the selected album and its exact editions stay visible on the right.',
+ stage:'Release stage: the selected album owns the top of the page, with its tracks and review checks above the artwork shelves.',
+ compare:'Comparison shelf: browse artwork, then compare two exact editions of the same album side by side before choosing one.',
+};
+const tracks=[['Static Bloom','2:48'],['Glass Satellites','3:12'],['White Noise Gardens','2:36'],['Afterimage','4:05'],['A Quiet Signal','3:21']];
+let selected=0,layout='wall',edition='cd';
+const title=()=>albums[selected];
+const art=(index)=>{
+ const frames=[
+  '<rect width="240" height="240" fill="#17213b"/><circle cx="121" cy="112" r="72" fill="#db80b1"/><circle cx="121" cy="112" r="48" fill="#17213b"/><ellipse cx="121" cy="112" rx="107" ry="26" fill="none" stroke="#cdbbf0" stroke-width="5" transform="rotate(-29 121 112)"/><circle cx="157" cy="49" r="10" fill="#e9e6c6"/><path d="M30 206h72" stroke="#e9e6c6" stroke-width="4"/>',
+  '<rect width="240" height="240" fill="#153b34"/><path d="M0 160 120 35 240 160v80H0" fill="#a4c573"/><path d="M35 240V130h28v110m35 0V95h30v145m35 0V130h28v110" fill="#153b34"/><circle cx="120" cy="38" r="12" fill="#ebd295"/><path d="M25 27h46m-46 9h30" stroke="#d9e9cc" stroke-width="3"/>',
+  '<rect width="240" height="240" fill="#c94339"/><path d="M35 240V78a85 85 0 0 1 170 0v162" fill="none" stroke="#f0a369" stroke-width="20"/><path d="M82 240V90a38 38 0 0 1 76 0v150" fill="none" stroke="#392642" stroke-width="20"/><path d="M20 210h200" stroke="#f4c990" stroke-width="2"/>',
+  '<rect width="240" height="240" fill="#102742"/><path d="M0 160 120 40l120 120-120 100Z" fill="#4c83a1"/><path d="m30 160 90-90 90 90-90 90Z" fill="#102742"/><path d="m60 160 60-60 60 60-60 60Z" fill="#86c5cf"/><circle cx="120" cy="160" r="16" fill="#172540"/><path d="M21 24h81" stroke="#c7dbe3" stroke-width="4"/>',
+  '<rect width="240" height="240" fill="#bcace0"/><rect x="29" y="35" width="78" height="170" rx="39" fill="#493d76"/><rect x="133" y="35" width="78" height="170" rx="39" fill="#e2a4aa"/><circle cx="68" cy="80" r="23" fill="#e2a4aa"/><circle cx="172" cy="158" r="23" fill="#493d76"/><path d="M111 21v198" stroke="#f4e5d4" stroke-width="2"/>',
+  '<rect width="240" height="240" fill="#321e39"/><path d="m120 16 15 70 51-51-28 67 70 18-70 18 28 67-51-51-15 70-15-70-51 51 28-67-70-18 70-18-28-67 51 51Z" fill="#da619e"/><circle cx="120" cy="120" r="29" fill="#ebc4b1"/><circle cx="120" cy="120" r="12" fill="#321e39"/>'
+ ];
+ return `<svg viewBox="0 0 240 240" role="img" aria-label="Original abstract sample cover">${frames[index]}</svg>`;
+};
+const tile=(album)=>`<button class="album" data-album="${album.id}" aria-pressed="${selected===album.id}" aria-label="Inspect ${album.title} by ${album.artist}"><span class="art">${art(album.art)}</span><strong>${album.title}</strong><span class="artist">${album.artist}</span><span class="year">${album.year} / sample album</span></button>`;
+const trackList=()=>`<ol class="track-list">${tracks.map(([name,duration],i)=>`<li><span class="number">${i+1}</span><span>${name}</span><span class="duration">${duration}</span></li>`).join('')}</ol>`;
+const checks=()=>'<div class="checks"><div class="check"><span class="circle" aria-hidden="true"></span>Artwork<span class="state">Not prepared</span></div><div class="check"><span class="circle" aria-hidden="true"></span>Source<span class="state">Not selected</span></div><div class="check"><span class="circle" aria-hidden="true"></span>Plan<span class="state">Not approved</span></div></div>';
+const editions=()=>`<label class="edition-option"><input type="radio" name="edition" value="cd" ${edition==='cd'?'checked':''}><span><strong>${title().year} / CD edition</strong><small>5 tracks / one disc / sample release A</small></span></label><label class="edition-option"><input type="radio" name="edition" value="digital" ${edition==='digital'?'checked':''}><span><strong>${title().year} / Digital edition</strong><small>5 tracks / sample release B</small></span></label>`;
+function shelves(full=false){
+ const query=document.querySelector('#search').value.trim().toLowerCase();
+ const found=albums.filter(a=>(a.title+' '+a.artist).toLowerCase().includes(query));
+ if(!found.length)return '<p class="empty">No sample albums match. Try Vanta Circuit or Glass Satellites.</p>';
+ if(query)return `<section class="shelf"><div class="shelf-heading"><h2>ALBUM RESULTS</h2><p>${found.length} sample albums</p></div><div class="tiles">${found.map(tile).join('')}</div></section>`;
+ return `<section class="shelf"><div class="shelf-heading"><h2>VANTA CIRCUIT</h2><p>Sample artist</p></div><div class="tiles">${albums.slice(0,3).map(tile).join('')}</div></section><section class="shelf"><div class="shelf-heading"><h2>MORE SAMPLE ALBUMS</h2></div><div class="tiles">${albums.slice(3).map(tile).join('')}</div></section>`;
+}
+function inspector(){return `<aside class="inspector" aria-label="Selected album"><div class="selection"><span class="mini-art">${art(title().art)}</span><div><h2>${title().title.toUpperCase()}</h2><p>${title().artist}</p></div></div><div class="detail-heading"><h3>EXACT EDITION</h3><span class="tag">Sample</span></div>${editions()}<div class="detail-heading"><h3>TRACKS</h3></div>${trackList()}${checks()}<button class="primary review">Review this edition</button><p class="disclaimer">Choosing an edition does not approve artwork, a source, or a download.</p></aside>`;}
+function stage(){return `<section class="stage" aria-label="Selected release"><div class="stage-art">${art(title().art)}</div><div><h2>${title().title.toUpperCase()}</h2><p class="artist-line">${title().artist}</p><p class="edition-note">Choose one exact sample edition</p>${editions()}<button class="primary review">Review this edition</button></div><div class="stage-tracks"><h3>SAMPLE TRACKS</h3>${trackList()}<div class="stage-checks">${checks()}</div></div></section><div class="wall full-wall">${shelves(true)}</div>`;}
+function compare(){
+ const panel=(kind)=>`<section class="edition-compare"><h3>${kind==='cd'?'CD EDITION':'DIGITAL EDITION'}</h3><dl class="facts"><dt>Release</dt><dd>Sample release ${kind==='cd'?'A':'B'}</dd><dt>Year</dt><dd>${title().year}</dd><dt>Medium</dt><dd>${kind==='cd'?'One CD':'Digital'}</dd><dt>Tracks</dt><dd>Five audio tracks</dd></dl>${trackList()}<label class="edition-option"><input type="radio" name="edition" value="${kind}" ${edition===kind?'checked':''}><span><strong>Select this edition</strong><small>Separate review is still required.</small></span></label></section>`;
+ return `<div class="wall compare-wall">${shelves(true)}</div><section class="compare-area" aria-label="Compare exact editions"><div class="compare-head"><h2>${title().title.toUpperCase()}</h2><p>Compare exact sample editions of this album</p></div>${panel('cd')}${panel('digital')}</section><div class="compare-foot"><p>Artwork, source and output each need their own review. Neither edition is approved.</p><button class="primary review">Review selected edition</button></div>`;
+}
+function render(){
+ document.querySelector('#description').textContent=descriptions[layout];
+ document.querySelector('#layout').innerHTML=layout==='wall'?`<div class="workspace"><div class="wall">${shelves()}</div>${inspector()}</div>`:layout==='stage'?stage():compare();
+ document.querySelectorAll('[data-layout]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.layout===layout)));
+}
+document.addEventListener('click',event=>{
+ const choice=event.target.closest('[data-layout]');
+ if(choice){layout=choice.dataset.layout;render();return;}
+ const album=event.target.closest('[data-album]');
+ if(album){selected=Number(album.dataset.album);edition='cd';render();document.querySelector(`[data-album="${selected}"]`)?.focus({preventScroll:true});document.querySelector('#feedback').textContent=`Selected ${title().title}. These are generated sample editions, not provider evidence.`;return;}
+ if(event.target.closest('.review')){document.querySelector('#feedback').textContent=`Design preview only: ${title().title}, ${edition==='cd'?'CD':'digital'} edition. No plan, approval or download was created.`;return;}
+ const navigation=event.target.closest('.sidebar a');
+ if(navigation){event.preventDefault();document.querySelector('#feedback').textContent=navigation.hash==='#music'?'Music is the current screen.':'This study covers Music only. The other application screens are not implemented here.';}
+ if(event.target.closest('.narrow-toggle')){const narrow=document.querySelector('#preview').classList.toggle('narrow');event.target.closest('button').setAttribute('aria-pressed',String(narrow));}
+});
+document.querySelector('#search').addEventListener('input',render);
+document.querySelector('#format').addEventListener('change',event=>{document.querySelector('#feedback').textContent=`Target format: ${event.target.value}. This is a design preference, not verification of any sample file.`;});
+document.addEventListener('change',event=>{if(event.target.name==='edition')edition=event.target.value;});
+render();
+</script>
+</body>
+</html>

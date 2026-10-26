@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a new capability or a change to product behavior.
+title: "Feature: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, tokens, private paths, music or recovery data.
+  - type: textarea
+    id: need
+    attributes:
+      label: User need
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: Separate confirmed requirements from recommendations and open decisions.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Scope and safety boundaries
+      description: State exclusions and required approval, identity and recovery rules.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable outcomes and isolated checks.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Related work and decisions
