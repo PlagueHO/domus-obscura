@@ -215,6 +215,14 @@ unchanged. Album covers, future artist images and provider responses can use the
 same port. Eviction cannot reach approved evidence or recovery records; they
 remain in their existing durable stores.
 
+Each file-cache operation holds its OS lock through reads, replacement and
+eviction. Its guard explicitly unlocks before releasing the adapter mutex.
+Closing the handle alone is not sufficient: a concurrent process launch can
+inherit the same open file description until execution replaces the child.
+The [Linux `flock` reference](https://man7.org/linux/man-pages/man2/flock.2.html)
+describes this lock lifetime. A retained-descriptor regression checks both
+exclusion during an operation and release after the guard exits.
+
 Configured CAA responses have a bounded, versioned envelope with original bytes
 and the complete source chain. Reads validate the chain, exact filename and
 24-hour freshness before use. Provider-budget completion commits before file

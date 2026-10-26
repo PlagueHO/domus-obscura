@@ -99,6 +99,14 @@ struct CacheOperation<'a> {
     inner: MutexGuard<'a, CacheDirectory>,
 }
 
+impl Drop for CacheOperation<'_> {
+    fn drop(&mut self) {
+        // Closing alone can retain the lock in a concurrent fork's inherited
+        // descriptor. Unlock before releasing the adapter mutex.
+        let _ = self._owner.unlock();
+    }
+}
+
 impl Deref for CacheOperation<'_> {
     type Target = CacheDirectory;
 
@@ -517,5 +525,36 @@ impl Cache for FileCache {
         }
         sync_directory(&inner.directory)?;
         Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::permissions::private_test_directory;
+
+    #[test]
+    fn shared_cache_operation_releases_lock_with_a_retained_duplicate()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let state = private_test_directory()?;
+        let root = private_test_directory()?;
+        let mut store = Store::open(&state.path().join("state.db"))?;
+        let cache = FileCache::open(&mut store, root.path(), CacheLimits::default())?;
+        let operation = cache.lock()?;
+        // A fork inherits the same open file description before close-on-exec.
+        let inherited = operation._owner.try_clone()?;
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.path().join("owner.lock"))?;
+        assert!(matches!(probe.try_lock(), Err(TryLockError::WouldBlock)));
+        drop(operation);
+        probe.try_lock()?;
+        probe.unlock()?;
+        let key = CacheKey::new("generated-provider", "originals", "retained duplicate")?;
+        cache.put(&key, b"complete bytes", 10, 20)?;
+        assert!(matches!(cache.lookup(&key, 15)?, CacheLookup::Hit(_)));
+        drop(inherited);
+        Ok(())
     }
 }
