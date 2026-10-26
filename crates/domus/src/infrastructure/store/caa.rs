@@ -1,9 +1,80 @@
 use super::Store;
+use crate::application::services::cache::{Cache, CacheKey, CacheLookup};
 use crate::infrastructure::caa::{CaaFetch, CaaImage, CaaPayload, CaaRequest, CaaResponse};
 use crate::{Error, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+const SHARED_PREFIX: &[u8; 8] = b"DOMCAA1\n";
+const MAX_SOURCES: usize = 24576;
+
+fn shared_key(request: &CaaRequest) -> Result<CacheKey> {
+    CacheKey::new("cover-art-archive", "responses-v1", &request.cache_key())
+}
+
+fn shared_response(
+    cache: &dyn Cache,
+    request: &CaaRequest,
+    now: u64,
+) -> Result<Option<CaaResponse>> {
+    let hit = match cache.lookup(&shared_key(request)?, now)? {
+        CacheLookup::Miss | CacheLookup::Expired => return Ok(None),
+        CacheLookup::Corrupt => return Err(invalid()),
+        CacheLookup::Hit(hit) => hit,
+    };
+    if hit.stored_at > now
+        || hit.expires_at != hit.stored_at.checked_add(86400).ok_or_else(invalid)?
+        || hit.bytes.len() < 12
+        || &hit.bytes[..8] != SHARED_PREFIX
+    {
+        return Err(invalid());
+    }
+    let length = u32::from_le_bytes(hit.bytes[8..12].try_into().map_err(|_| invalid())?) as usize;
+    if !(2..=MAX_SOURCES).contains(&length) || 12 + length >= hit.bytes.len() {
+        return Err(invalid());
+    }
+    let sources: Vec<String> =
+        serde_json::from_slice(&hit.bytes[12..12 + length]).map_err(|_| invalid())?;
+    request.validate_sources(&sources)?;
+    Ok(Some(CaaResponse {
+        fetch: CaaFetch {
+            sources,
+            payload: request.restore_payload(hit.bytes[12 + length..].to_vec())?,
+        },
+        fetched_at: i64::try_from(hit.stored_at).map_err(|_| invalid())?,
+        cached: true,
+    }))
+}
+
+pub(super) fn persist_shared(
+    cache: &dyn Cache,
+    request: &CaaRequest,
+    fetched: &CaaFetch,
+    fetched_at: i64,
+) -> Result<()> {
+    let Some(body) = request.validate_payload(&fetched.payload)? else {
+        return Ok(());
+    };
+    request.validate_sources(&fetched.sources)?;
+    let sources = serde_json::to_vec(&fetched.sources)?;
+    if !(2..=MAX_SOURCES).contains(&sources.len()) {
+        return Err(invalid());
+    }
+    let stored_at = u64::try_from(fetched_at).map_err(|_| invalid())?;
+    let mut bytes = Vec::with_capacity(12 + sources.len() + body.len());
+    bytes.extend_from_slice(SHARED_PREFIX);
+    bytes.extend_from_slice(&(sources.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&sources);
+    bytes.extend_from_slice(body);
+    cache.put(
+        &shared_key(request)?,
+        &bytes,
+        stored_at,
+        stored_at.checked_add(86400).ok_or_else(invalid)?,
+    )?;
+    Ok(())
+}
 
 fn invalid() -> Error {
     Error::Conflict("saved CAA evidence is invalid or does not match the exact release".into())
@@ -55,6 +126,21 @@ impl Store {
     /// A corrupt fresh entry fails explicitly. Expired entries cannot authorize
     /// new cover preparation. Frozen evidence has a separate lifetime.
     pub fn caa_cache(&self, request: &CaaRequest) -> Result<Option<CaaResponse>> {
+        if let Some(cache) = &self.cache {
+            if !self.connection.is_autocommit() {
+                return Err(Error::Conflict(
+                    "shared CAA cache reads must remain outside database transactions".into(),
+                ));
+            }
+            let now: i64 = self
+                .connection
+                .query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            return shared_response(
+                cache.as_ref(),
+                request,
+                u64::try_from(now).map_err(|_| invalid())?,
+            );
+        }
         let saved = self
             .connection
             .query_row(
@@ -165,6 +251,9 @@ impl Store {
     }
 
     pub(crate) fn touch_caa_cache(&mut self, request: &CaaRequest) -> Result<()> {
+        if self.cache.is_some() {
+            return Ok(());
+        }
         self.connection.execute(
             "UPDATE caa_cache SET accessed_at_ms=CAST(unixepoch('subsec')*1000 AS INTEGER)
              WHERE cache_key=?1",

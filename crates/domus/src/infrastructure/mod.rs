@@ -2,6 +2,7 @@ pub mod api;
 pub mod artwork;
 pub mod browser;
 pub mod caa;
+pub mod cache;
 pub mod catalog;
 pub mod entra;
 pub mod filesystem;

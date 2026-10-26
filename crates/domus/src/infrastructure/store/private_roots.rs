@@ -20,12 +20,25 @@ impl Store {
         root: &Path,
         native: &NativeRoot,
     ) -> Result<bool> {
+        self.reserve_private_root(root, native, "staging")
+    }
+
+    pub(crate) fn reserve_cache_root(&mut self, root: &Path, native: &NativeRoot) -> Result<bool> {
+        self.reserve_private_root(root, native, "cache")
+    }
+
+    fn reserve_private_root(
+        &mut self,
+        root: &Path,
+        native: &NativeRoot,
+        kind: &str,
+    ) -> Result<bool> {
         let root_text = root
             .to_str()
-            .ok_or_else(|| Error::InvalidInput("staging root must be valid Unicode".into()))?;
+            .ok_or_else(|| Error::InvalidInput("private root must be valid Unicode".into()))?;
         if self.path.starts_with(root) {
             return Err(Error::InvalidInput(
-                "staging must not contain the application database".into(),
+                "private roots must not contain the application database".into(),
             ));
         }
         self.check_state_overlap(native)?;
@@ -35,8 +48,8 @@ impl Store {
         super::native_roots::require_bound_roots(&transaction)?;
         let exists = transaction
             .query_row(
-                "SELECT id FROM private_roots WHERE root = ?1 AND kind = 'staging'",
-                [root_text],
+                "SELECT id FROM private_roots WHERE root = ?1 AND kind = ?2",
+                params![root_text, kind],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -52,16 +65,16 @@ impl Store {
             }
             if root.starts_with(&other) || Path::new(&other).starts_with(root) {
                 return Err(Error::InvalidInput(
-                    "staging, media and other private roots must not overlap".into(),
+                    "media and private roots must not overlap".into(),
                 ));
             }
         }
         drop(statement);
-        super::native_roots::register(&transaction, root_text, "staging", native)?;
+        super::native_roots::register(&transaction, root_text, kind, native)?;
         if !exists {
             transaction.execute(
-                "INSERT INTO private_roots(root, kind) VALUES (?1, 'staging')",
-                params![root_text],
+                "INSERT INTO private_roots(root, kind) VALUES (?1, ?2)",
+                params![root_text, kind],
             )?;
         }
         transaction.commit()?;

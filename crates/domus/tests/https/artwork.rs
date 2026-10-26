@@ -211,7 +211,7 @@ pub(super) async fn check_artwork(
         &caa_path,
         Some(cookie),
         Some(ORIGIN),
-        Some(request),
+        Some(request.clone()),
     )
     .await?;
     assert_eq!(prepared.status(), StatusCode::OK);
@@ -226,6 +226,36 @@ pub(super) async fn check_artwork(
     assert_eq!(evidence["permitted_use_acknowledged"], true);
     assert_eq!(evidence["image_sha256"], prepared["input_sha256"]);
     assert!(store.approved_artwork(job, 2).is_err());
+    let saved_gate: (i64, u32) = raw.query_row(
+        "SELECT next_request_ms,delay_seconds FROM catalog_gate WHERE id=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    raw.execute(
+        "UPDATE catalog_gate SET next_request_ms=9223372036854775807,delay_seconds=4294967295 WHERE id=1",
+        [],
+    )?;
+    let retrieved = api_request(
+        router,
+        "POST",
+        &format!("{base}/caa/download"),
+        Some(cookie),
+        Some(ORIGIN),
+        Some(request),
+    )
+    .await?;
+    assert_eq!(retrieved.status(), StatusCode::OK);
+    let retrieved = json_body(retrieved).await?;
+    assert_eq!(retrieved["id"], prepared["id"]);
+    assert_eq!(retrieved["sha256"], prepared["sha256"]);
+    assert_eq!(retrieved["width"], 40);
+    assert_eq!(retrieved["height"], 20);
+    assert_eq!(retrieved["approved_at"], Value::Null);
+    assert!(store.approved_artwork(job, 2).is_err());
+    raw.execute(
+        "UPDATE catalog_gate SET next_request_ms=?1,delay_seconds=?2 WHERE id=1",
+        rusqlite::params![saved_gate.0, saved_gate.1],
+    )?;
     assert_eq!(
         api_request(
             router,

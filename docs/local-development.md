@@ -26,6 +26,18 @@ The application uses the real guarded API, not `frontend/local-test`.
 It serves the built browser files from `frontend/dist-app`.
 Rebuild and restart after frontend changes. The browser has a Component library.
 
+Open **System** to inspect **Backend configuration**. The real file-backed HTTPS
+bootstrap supplies active and saved settings through
+`GET /api/system/configuration`. The active snapshot remains unchanged until
+restart. Changed saved JSON is explicitly unvalidated; reading it cannot change
+the running read-only policy. Secret-file paths and Entra identifiers remain
+hidden. Malformed, missing and oversized files return errors. A failed refresh
+retains the last values with a stale warning. Inspection creates no database,
+cache root or staging directory and starts no provider work.
+This view cannot save backend JSON. `system_settings_read_only: false` enables
+the existing library-policy and root/index commands, not backend-file editing.
+Full validated atomic persistence and stale-edit protection remain open.
+
 The saved design target is `docs/ui-poc/structure.html`, not the temporary
 functional forms. The connected app now uses the approved Orbit header and
 icon-only Media navigation, Home focus header, shared queue/status components
@@ -67,6 +79,17 @@ inputs are labelled as retained receipts, not a new source acknowledgement.
 Transfer and publication receipts remain separate from the review. Failed or
 stale required reads disable commands. These screens are a partial port; other
 retained V1 work remains open.
+
+Transfer receipts use 50-row keyset pages. The separate authenticated
+`GET /api/jobs/{id}/plans/{version}/transfers/summary` reads the frozen track
+count and all saved transfer states in one SQLite statement. The browser uses
+this whole-plan summary, not the visible page, to identify complete received
+inputs. A last uncertain or active transfer still blocks local continuation.
+Counts are saved ledger evidence, not proof of current staging bytes,
+publication or authority to retry. The worker still checks the live claim,
+approvals, complete source and sealed staging inputs. Failed summary or receipt
+reads keep commands and page controls disabled. Refresh the request to read
+them again. These reads do not scan, contact peers or change transfer state.
 
 **Saved request history** reads
 `GET /api/jobs/{id}/plans/{version}/events`. It uses bounded ID-based pages and
@@ -201,6 +224,19 @@ storage errors and network errors remain failures. Preparation never approves a
 cover or starts audio acquisition. An empty exact-release listing can use the
 local upload option; it does not trigger a hidden fallback.
 See the [Cover Art Archive API](https://musicbrainz.org/doc/Cover_Art_Archive/API).
+
+The HTTPS host can select the shared file cache through the optional top-level
+`cache` setting. See [CAA cache configuration](../README.md#durable-caa-artwork-evidence)
+for root requirements, limits and legacy CLI boundaries. This setting caches
+MusicBrainz responses, CAA listings, original images and normalized JPEG variants.
+The configured local source reader uses the same exact-release cache.
+The cover-download command also uses the shared image-retrieval service.
+Its native processor creates the selected JPEG on bounded blocking workers.
+The backend rechecks fresh provider evidence and the current plan before
+retaining the preview. Retrieval never approves the cover.
+It does not change
+existing previews or approvals. A corrupt or unavailable selected cache returns
+an error; it does not silently switch storage or send another provider request.
 
 Default MP3 output:
 

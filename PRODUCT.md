@@ -96,6 +96,17 @@ stale versions. Existing plans keep their saved settings. Other JSON configurati
 fields remain read-only until their validation, activation and recovery rules are
 implemented.
 
+The System page now includes a read-only backend configuration view through
+`GET /api/system/configuration`. The file-backed HTTPS host returns its active
+startup snapshot and a bounded, no-follow read of saved JSON. Secret-file paths
+and Entra identifiers appear only as configured states. Both raw JSON revisions
+are hashed. Changed saved JSON is labelled inactive, unvalidated and
+restart-required. Inspection does not migrate a database, open provider/cache
+roots, validate TLS, contact providers or activate settings. Normal authentication
+and development loopback/origin guards apply. A host without a configuration
+source returns an explicit unavailable error. No backend JSON write route exists.
+This view is not the completed editable configuration form.
+
 Do not return saved passwords, tokens, private keys or other secret values to the
 browser. Show only their configured state. Where secret updates are supported,
 use write-only replacement controls; an unchanged or blank field must not erase
@@ -178,10 +189,23 @@ other application features. Do not build separate storage, expiry and eviction
 implementations for each API client. Initial uses include album covers, artist
 images and reusable provider responses.
 
-Start with a simple file-based adapter behind a small in-process cache contract.
+The in-process cache contract and first file-based adapter are implemented.
+`application::services::cache::Cache` has provider-scoped lookup, atomic storage,
+invalidation and bounded expiry eviction. `infrastructure::cache::FileCache`
+uses a separately reserved, private local root and holds one OS lock for each
+complete operation. API and worker adapters can share that root. Schema 21
+retains all existing native bindings and permits the
+new cache root kind. An explicit `cache` setting in the HTTPS or read-service host
+selects this adapter for MusicBrainz responses, CAA listings, original images and normalized JPEG
+variants. There is no fallback to SQLite when this selected cache fails.
+Configured source reads use the same exact-release cache. There is no new cache API or
+automatic root creation. Hosts without `cache` retain legacy storage.
+
+Use the simple file-based adapter behind the small in-process cache contract.
 Keep callers independent of file layout so a later storage adapter can replace
 the file implementation without changing provider or UI workflows. This is a
-product requirement, not an implemented cache migration or a new network service.
+product requirement, not a new network service. Legacy hosts retain their
+existing storage until an operator selects the shared cache.
 
 Provide shared lookup, atomic storage, expiry, invalidation and bounded eviction.
 Use provider-scoped logical keys and content digests, not caller-supplied native
@@ -220,8 +244,15 @@ The user requires an image-size setting with targets of 200 x 200, 400 x 400
 (recommended) or 800 x 800 pixels. The album/artist image retrieval service must
 produce the scaled variant before artwork is embedded in MP3 files or written
 to the album folder. Album output settings now save one of these choices and
-freeze it with each new plan. The shared original-and-variant cache and artist
-image provider are still planned. New settings recommend 400 x 400 pixels;
+freeze it with each new plan. Configured shared-cache hosts retain the original
+CAA image and reuse content-bound JPEG variants during preview preparation.
+The application-owned `ImageService` now coordinates installed artwork retrieval
+with a replaceable image-processing port. The HTTPS cover-download flow uses it.
+Native processing uses bounded blocking work and the same strict normalizer and
+variant cache as local/cache-only preparation. Persistence rechecks the exact
+original, fresh CAA evidence, frozen target, processing profile and current plan.
+The service does not approve images or add a new MCP tool. Artist-image provider
+installation remains open. New settings recommend 400 x 400 pixels;
 legacy settings without a saved size retain the previous 1200-pixel limit.
 
 Treat the target as a bounding box. Preserve aspect ratio without cropping,
@@ -481,6 +512,11 @@ amber review surface. Missing source and cover editors open for review. Approved
 details remain available without repeating approval. Received inputs have a
 separate retained-input label, not an invented source acknowledgement.
 Transfer and publication receipts remain outside the approval surface.
+Transfer receipts have bounded 50-row pages. Separate whole-plan saved counts
+keep large albums independent of the visible page and retain planned, uncertain
+submission, active and received states. Retained-input continuation requires the
+complete count to match the frozen plan; it does not bypass worker checks or
+authorize a transfer retry.
 Stale or failed reads block commands. Saved decisions still require separate
 answer and recovery actions.
 Requests also expose bounded, read-only saved event history for the exact plan.

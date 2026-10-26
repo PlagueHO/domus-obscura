@@ -8,6 +8,149 @@ const ARTIST: &str = "10000000-0000-4000-8000-000000000001";
 const RELEASE: &str = "20000000-0000-4000-8000-000000000001";
 type Recorded = Vec<(Instant, String, axum::http::HeaderMap)>;
 
+#[tokio::test]
+async fn shared_cache_musicbrainz_reuses_exact_release_and_freezes_plans_without_sqlite_cache()
+-> TestResult {
+    use domus::application::services::cache::{Cache, CacheKey};
+    use domus::infrastructure::cache::{CacheLimits, FileCache};
+    use domus::infrastructure::store::PlanRequest;
+    let identity_material = certificates(AUTHORITY)?;
+    let provider = Provider::new()?;
+    let identity_server = FixtureServer::start(provider.router(), &identity_material, AUTHORITY)?;
+    let broker = EntraBroker::discover(
+        TENANT,
+        OBJECT,
+        CLIENT,
+        ClientSecret::new("generated-fixture-secret".into()),
+        RedirectUrl::new(format!("{ORIGIN}/auth/callback"))?,
+        trusted_http(&identity_material, &identity_server)?,
+    )
+    .await?;
+    let fixture = CatalogFixture::default();
+    let material = certificates(MUSIC_HOST)?;
+    let server = FixtureServer::start(fixture.router(), &material, MUSIC_HOST)?;
+    let state = private::tempdir()?;
+    let root = private::tempdir()?;
+    let media = tempfile::tempdir()?;
+    let database = state.path().join("state.db");
+    let mut store = Store::open(&database)?;
+    let location = domus::application::add_location(&store, media.path(), "main")?;
+    domus::application::scan_location(&mut store, location)?;
+    let settings = store.save_settings(None, &OutputSettings::default())?;
+    let job = store.enqueue(1)?;
+    let cache = Arc::new(FileCache::open(
+        &mut store,
+        root.path(),
+        CacheLimits::default(),
+    )?);
+    let api = Api::new_with_catalog(
+        ORIGIN,
+        store.with_cache(cache.clone()),
+        broker,
+        client(&material, &server)?,
+    )?;
+    let router = api.router();
+    assert_eq!(
+        api_request(
+            &router,
+            "GET",
+            "/api/system/configuration",
+            None,
+            None,
+            None
+        )
+        .await?
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let cookie = browser_login(&router, &provider, None).await?;
+    assert_eq!(
+        api_request(
+            &router,
+            "GET",
+            "/api/system/configuration",
+            Some(&cookie),
+            None,
+            None
+        )
+        .await?
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let path = format!("/api/discovery/releases/{RELEASE}");
+    let first = api_request(&router, "GET", &path, Some(&cookie), None, None).await?;
+    assert_eq!(first.status(), StatusCode::OK);
+    let result = json_body(first).await?;
+    assert_eq!(result["data"]["summary"]["id"], RELEASE);
+    assert_eq!(fixture.count()?, 1);
+    let raw = rusqlite::Connection::open(&database)?;
+    assert_eq!(
+        raw.query_row("SELECT count(*) FROM catalog_cache", [], |row| row
+            .get::<_, i64>(0))?,
+        0
+    );
+    let mut reopened = Store::open_current_existing(&database)?;
+    let reopened_cache = Arc::new(FileCache::open(
+        &mut reopened,
+        root.path(),
+        CacheLimits::default(),
+    )?);
+    let mut reopened = reopened.with_cache(reopened_cache);
+    let query = CatalogQuery::release(RELEASE)?;
+    let exact = domus::application::catalog::cached_catalog(
+        &mut reopened,
+        &query,
+        CatalogQuery::parse_release,
+    )?
+    .ok_or("exact release missing")?;
+    let plan = reopened.prepare_catalog_plan(
+        PlanRequest {
+            job_id: job,
+            expected_version: 1,
+            settings_version: settings,
+            format: None,
+            edition: exact.data.selection(None)?,
+            locations: vec![location],
+            accepts_incomplete_coverage: false,
+        },
+        exact,
+    )?;
+    assert_eq!(plan.version, 2);
+    assert_eq!(plan.plan.edition.tracks.len(), 2);
+    raw.execute("UPDATE catalog_gate SET next_request_ms=9223372036854775807,delay_seconds=4294967295 WHERE id=1", [])?;
+    let second = api_request(&router, "GET", &path, Some(&cookie), None, None).await?;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(json_body(second).await?["cached"], true);
+    assert_eq!(fixture.count()?, 1);
+    let key = CacheKey::new("musicbrainz", "responses-v1", query.source())?;
+    assert!(cache.invalidate(&key)?);
+    assert!(
+        domus::application::catalog::cached_catalog(
+            &mut reopened,
+            &query,
+            CatalogQuery::parse_release
+        )?
+        .is_none()
+    );
+    assert_eq!(
+        reopened
+            .plan(job, 2)?
+            .plan
+            .catalog
+            .ok_or("frozen evidence missing")?
+            .data
+            .summary
+            .id,
+        RELEASE
+    );
+    let missed = api_request(&router, "GET", &path, Some(&cookie), None, None).await?;
+    assert_eq!(missed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fixture.count()?, 1);
+    server.stop().await?;
+    identity_server.stop().await?;
+    Ok(())
+}
+
 #[path = "artwork.rs"]
 mod artwork_tests;
 #[path = "catalog_batches.rs"]

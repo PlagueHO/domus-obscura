@@ -27,7 +27,67 @@ pub struct TransferFile {
     pub payload_sha256: Option<Vec<u8>>,
 }
 
+/// Saved ledger counts for the whole exact plan, independent of receipt pages.
+/// This is not staging verification or authority to resume an uncertain transfer.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct TransferSummary {
+    pub job_id: i64,
+    pub plan_version: i64,
+    pub expected_tracks: u16,
+    pub total: u16,
+    pub planned: u16,
+    pub submitting: u16,
+    pub active: u16,
+    pub received: u16,
+    pub all_received: bool,
+}
+
 impl Store {
+    /// Read the frozen track count and all transfer states in one SQL snapshot.
+    /// Never infer complete input from a prefix of paginated receipts.
+    pub fn transfer_summary(&self, job: i64, version: i64) -> Result<TransferSummary> {
+        if job <= 0 || version <= 0 {
+            return Err(Error::InvalidInput(
+                "positive job and plan IDs are required".into(),
+            ));
+        }
+        self.connection
+            .query_row(
+                "SELECT json_array_length(p.body, '$.edition.tracks'), COUNT(f.id),
+                    COALESCE(SUM(f.state = 'planned'), 0),
+                    COALESCE(SUM(f.state = 'submitting'), 0),
+                    COALESCE(SUM(f.state = 'active'), 0),
+                    COALESCE(SUM(f.state = 'received'), 0),
+                    COALESCE(SUM(f.track_number <= json_array_length(p.body, '$.edition.tracks')
+                      AND f.state = 'received' AND f.received_bytes = f.expected_bytes
+                      AND length(f.payload_sha256) = 32), 0)
+             FROM job_plans p LEFT JOIN transfer_files f
+               ON f.job_id = p.job_id AND f.plan_version = p.version
+             WHERE p.job_id = ?1 AND p.version = ?2
+             GROUP BY p.job_id, p.version",
+                params![job, version],
+                |row| {
+                    let expected_tracks: u16 = row.get(0)?;
+                    let total: u16 = row.get(1)?;
+                    let sealed: u16 = row.get(6)?;
+                    Ok(TransferSummary {
+                        job_id: job,
+                        plan_version: version,
+                        expected_tracks,
+                        total,
+                        planned: row.get(2)?,
+                        submitting: row.get(3)?,
+                        active: row.get(4)?,
+                        received: row.get(5)?,
+                        all_received: expected_tracks > 0
+                            && total == expected_tracks
+                            && sealed == expected_tracks,
+                    })
+                },
+            )
+            .map_err(Error::from)
+    }
+
     pub(crate) fn validate_acquisition_source(
         &self,
         job: i64,

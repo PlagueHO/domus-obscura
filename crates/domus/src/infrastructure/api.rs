@@ -39,6 +39,7 @@ struct Shared {
     local: Option<super::local_runtime::LocalRuntime>,
     services: super::services::ServiceHost,
     system_settings_read_only: bool,
+    backend_configuration: Option<Arc<super::server::configuration::ConfigurationSource>>,
     request_slots: Semaphore,
     event_slots: Arc<Semaphore>,
     broker: Option<RwLock<Arc<EntraBroker>>>,
@@ -239,6 +240,7 @@ impl Api {
             local: None,
             services: super::services::ServiceHost::with_catalog(store, configuration, catalog)?,
             system_settings_read_only: false,
+            backend_configuration: None,
             request_slots: Semaphore::new(32),
             event_slots: Arc::new(Semaphore::new(4)),
             broker: broker.map(|broker| RwLock::new(Arc::new(broker))),
@@ -295,6 +297,7 @@ impl Api {
                 get(settings).merge(put(save_settings).layer(DefaultBodyLimit::max(16384))),
             )
             .route("/api/system/settings-policy", get(settings_policy))
+            .route("/api/system/configuration", get(backend_configuration))
             .route("/api/jobs", get(jobs).post(create_job))
             .route("/api/queue", get(queue))
             .route(
@@ -304,6 +307,10 @@ impl Api {
             .route("/api/plans", post(prepare_plan))
             .route("/api/jobs/{id}/plans/{version}", get(plan))
             .route("/api/jobs/{id}/plans/{version}/transfers", get(transfers))
+            .route(
+                "/api/jobs/{id}/plans/{version}/transfers/summary",
+                get(transfer_summary),
+            )
             .route(
                 "/api/jobs/{id}/plans/{version}/source-candidates",
                 get(source_candidates)
@@ -414,6 +421,18 @@ impl Api {
         Arc::get_mut(&mut self.0)
             .ok_or(Error::Internal("API already shared"))?
             .system_settings_read_only = read_only;
+        Ok(self)
+    }
+
+    pub(crate) fn with_backend_configuration(
+        mut self,
+        configuration: super::server::configuration::ConfigurationSource,
+    ) -> Result<Self> {
+        Arc::get_mut(&mut self.0)
+            .ok_or(Error::Internal(
+                "API configuration must finish before sharing",
+            ))?
+            .backend_configuration = Some(Arc::new(configuration));
         Ok(self)
     }
 
@@ -1372,6 +1391,21 @@ async fn settings_policy(State(api): State<Api>) -> Json<SystemSettingsPolicy> {
     })
 }
 
+async fn backend_configuration(
+    State(api): State<Api>,
+) -> ApiResult<Json<super::server::configuration::BackendConfigurationState>> {
+    let source = api.0.backend_configuration.clone().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend configuration inspection is not attached to this host",
+        )
+    })?;
+    let state = tokio::task::spawn_blocking(move || source.read())
+        .await
+        .map_err(|_| Error::Internal("backend configuration read task failed"))??;
+    Ok(Json(state))
+}
+
 #[derive(Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct SaveSettings {
@@ -1482,6 +1516,16 @@ async fn transfers(
     ))
 }
 
+async fn transfer_summary(
+    State(api): State<Api>,
+    Path((id, version)): Path<(i64, i64)>,
+) -> ApiResult<Json<super::store::TransferSummary>> {
+    Ok(Json(
+        api.database(move |store| store.transfer_summary(id, version))
+            .await?,
+    ))
+}
+
 async fn artwork_candidates(
     State(api): State<Api>,
     Path((id, version)): Path<(i64, i64)>,
@@ -1589,13 +1633,14 @@ async fn download_caa_artwork(
     Path((id, version)): Path<(i64, i64)>,
     Json(request): Json<PrepareCaaArtwork>,
 ) -> ApiResult<Json<ArtworkCandidate>> {
-    use crate::application::services::{ArtworkContent, ArtworkRequest, EntityRef};
+    use crate::application::services::images::ImageOptions;
+    use crate::application::services::{ArtworkRequest, EntityRef};
     api.0
         .services
         .artwork
         .require_provider("cover-art-archive")?;
-    let release_id = api
-        .database(move |store| store.artwork_provider_release(id, version))
+    let (release_id, size) = api
+        .database(move |store| store.artwork_provider_options(id, version))
         .await?;
     if !request.acknowledge_permitted_use {
         // Save the normal plan-bound permission question without network I/O.
@@ -1604,31 +1649,38 @@ async fn download_caa_artwork(
     let result = api
         .0
         .services
-        .artwork
-        .fetch(ArtworkRequest {
-            provider: "cover-art-archive".into(),
-            release: EntityRef {
-                provider: "musicbrainz".into(),
-                id: release_id,
+        .images
+        .retrieve(
+            ArtworkRequest {
+                provider: "cover-art-archive".into(),
+                release: EntityRef {
+                    provider: "musicbrainz".into(),
+                    id: release_id,
+                },
+                image_id: Some(request.image_id.clone()),
             },
-            image_id: Some(request.image_id.clone()),
-        })
-        .await?;
-    match result.content {
-        ArtworkContent::Image { .. } => {}
-        ArtworkContent::Missing => {
+            ImageOptions {
+                size,
+                background: request.background,
+            },
+        )
+        .await;
+    let retrieved = match result {
+        Ok(Some(image)) => Ok(image),
+        Ok(None) => {
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 "CAA cover was not found",
             ));
         }
-        ArtworkContent::Listing(_) => {
-            return Err(Error::Internal("artwork download returned a listing").into());
-        }
-    }
-    api.database(move |store| store.artwork_provider_release(id, version))
-        .await?;
-    prepare_caa_artwork(State(api), Path((id, version)), Json(request)).await
+        Err(error) => Err(error),
+    };
+    Ok(Json(
+        api.database(move |store| {
+            store.prepare_retrieved_caa_artwork_or_ask(id, version, retrieved)
+        })
+        .await?,
+    ))
 }
 
 async fn prepare_caa_artwork(

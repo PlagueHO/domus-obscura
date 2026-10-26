@@ -5,6 +5,212 @@ use serde_json::json;
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 const RELEASE: &str = "20000000-0000-4000-8000-000000000001";
 
+#[test]
+fn shared_cache_caa_preserves_provenance_expiry_and_exact_filename_without_legacy_fallback()
+-> TestResult {
+    use crate::application::services::cache::testing::MemoryCache;
+    use std::sync::Arc;
+    let state = tempfile::tempdir()?;
+    let mut store = Store::open(&state.path().join("state.db"))?;
+    let (parsed, raw) = listing(1, "png")?;
+    let request = CaaRequest::listing(RELEASE)?;
+    cache(
+        &mut store,
+        &request,
+        CaaPayload::Listing {
+            listing: parsed.clone(),
+            raw: raw.clone(),
+        },
+    )?;
+    let shared = Arc::new(MemoryCache::default());
+    let store = store.with_cache(shared.clone());
+    assert!(store.caa_cache(&request)?.is_none());
+    let now: i64 = store
+        .connection
+        .query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+    let fetch = CaaFetch {
+        sources: request.sources(),
+        payload: CaaPayload::Listing {
+            listing: parsed.clone(),
+            raw,
+        },
+    };
+    persist_shared(shared.as_ref(), &request, &fetch, now)?;
+    let saved = store.caa_cache(&request)?.ok_or("shared listing missing")?;
+    assert_eq!(saved.fetched_at, now);
+    assert_eq!(saved.fetch.sources, fetch.sources);
+    assert!(saved.cached);
+    assert!(shared_response(shared.as_ref(), &request, now as u64 + 86399)?.is_some());
+    assert!(shared_response(shared.as_ref(), &request, now as u64 + 86400)?.is_none());
+    assert!(shared_response(shared.as_ref(), &request, now as u64 - 1)?.is_none());
+    let image = CaaRequest::image(&parsed, "1")?;
+    let bytes = b"transport hashes alone are not image validity".to_vec();
+    persist_shared(
+        shared.as_ref(),
+        &image,
+        &CaaFetch {
+            sources: image.sources(),
+            payload: CaaPayload::Image {
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                bytes,
+            },
+        },
+        now,
+    )?;
+    let changed = CaaRequest::image(&listing(1, "jpg")?.0, "1")?;
+    assert!(store.caa_cache(&changed)?.is_none());
+    assert!(
+        store
+            .caa_cache(&CaaRequest::listing(
+                "20000000-0000-4000-8000-000000000002"
+            )?)?
+            .is_none()
+    );
+    assert!(shared.invalidate(&shared_key(&request)?)?);
+    assert!(store.caa_cache(&request)?.is_none());
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT count(*) FROM caa_cache", [], |row| row
+                .get::<_, i64>(0))?,
+        1
+    );
+    persist_shared(
+        shared.as_ref(),
+        &request,
+        &CaaFetch {
+            sources: request.sources(),
+            payload: CaaPayload::Missing,
+        },
+        now,
+    )?;
+    assert!(store.caa_cache(&request)?.is_none());
+    persist_shared(shared.as_ref(), &request, &fetch, now)?;
+    {
+        let mut entries = shared.entries.lock().map_err(|_| "cache lock")?;
+        let entry = entries
+            .get_mut(shared_key(&request)?.digest())
+            .ok_or("shared listing missing")?;
+        entry.bytes[0] ^= 1;
+    }
+    assert!(store.caa_cache(&request).is_err());
+    Ok(())
+}
+
+#[test]
+fn shared_cache_caa_rejects_malformed_envelopes_and_transactional_reads() -> TestResult {
+    use crate::application::services::cache::testing::MemoryCache;
+    use std::sync::Arc;
+    let state = tempfile::tempdir()?;
+    let shared = Arc::new(MemoryCache::default());
+    let store = Store::open(&state.path().join("state.db"))?.with_cache(shared.clone());
+    let request = CaaRequest::listing(RELEASE)?;
+    let now: i64 = store
+        .connection
+        .query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+    let (parsed, raw) = listing(1, "png")?;
+    let fetch = CaaFetch {
+        sources: request.sources(),
+        payload: CaaPayload::Listing {
+            listing: parsed,
+            raw,
+        },
+    };
+    for mutation in 0..6 {
+        persist_shared(shared.as_ref(), &request, &fetch, now)?;
+        {
+            let mut entries = shared.entries.lock().map_err(|_| "cache lock")?;
+            let entry = entries
+                .get_mut(shared_key(&request)?.digest())
+                .ok_or("shared listing missing")?;
+            match mutation {
+                0 => entry.bytes[0] ^= 1,
+                1 => entry.bytes.truncate(11),
+                2 => entry.bytes[8..12].copy_from_slice(&u32::MAX.to_le_bytes()),
+                3 => entry.expires_at += 1,
+                4 => {
+                    let sources = serde_json::to_vec(&vec!["https://example.invalid/"])?;
+                    let mut bytes = SHARED_PREFIX.to_vec();
+                    bytes.extend_from_slice(&(sources.len() as u32).to_le_bytes());
+                    bytes.extend_from_slice(&sources);
+                    bytes.extend_from_slice(b"{}");
+                    entry.bytes = bytes;
+                }
+                _ => entry.bytes[12] = b'!',
+            }
+            entry.sha256 = Sha256::digest(&entry.bytes).into();
+        }
+        assert!(store.caa_cache(&request).is_err(), "mutation {mutation}");
+    }
+    persist_shared(shared.as_ref(), &request, &fetch, now)?;
+    store.connection.execute_batch("BEGIN DEFERRED")?;
+    assert!(store.caa_cache(&request).is_err());
+    store.connection.execute_batch("ROLLBACK")?;
+    assert!(store.caa_cache(&request)?.is_some());
+    Ok(())
+}
+
+struct TransactionProbe {
+    cache: crate::application::services::cache::testing::MemoryCache,
+    database: std::path::PathBuf,
+}
+
+impl Cache for TransactionProbe {
+    fn lookup(&self, key: &CacheKey, now: u64) -> Result<CacheLookup> {
+        Connection::open(&self.database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+        self.cache.lookup(key, now)
+    }
+    fn put(&self, key: &CacheKey, bytes: &[u8], now: u64, expires: u64) -> Result<[u8; 32]> {
+        Connection::open(&self.database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+        self.cache.put(key, bytes, now, expires)
+    }
+    fn invalidate(&self, key: &CacheKey) -> Result<bool> {
+        self.cache.invalidate(key)
+    }
+    fn evict_expired(&self, now: u64, limit: u16) -> Result<u16> {
+        self.cache.evict_expired(now, limit)
+    }
+}
+
+#[tokio::test]
+async fn shared_cache_caa_commits_budget_before_storage_and_never_rolls_it_back_on_failure()
+-> TestResult {
+    use std::sync::{Arc, atomic::Ordering};
+    for fail in [false, true] {
+        let state = tempfile::tempdir()?;
+        let database = state.path().join("state.db");
+        let shared = Arc::new(TransactionProbe {
+            cache: Default::default(),
+            database: database.clone(),
+        });
+        shared.cache.fail_put.store(fail, Ordering::SeqCst);
+        let mut store = Store::open(&database)?.with_cache(shared);
+        let (parsed, raw) = listing(1, "png")?;
+        let request = CaaRequest::listing(RELEASE)?;
+        let fetched = CaaFetch {
+            sources: request.sources(),
+            payload: CaaPayload::Listing {
+                listing: parsed,
+                raw,
+            },
+        };
+        let mut permit = store.claim_catalog_request()?;
+        permit.start().await?;
+        let result = store.complete_caa_request(permit, 9, &request, &fetched);
+        assert_eq!(result.is_err(), fail);
+        let (lease, delay, count): (i64, u32, i64) = store.connection.query_row(
+            "SELECT lease_until_ms,delay_seconds,(SELECT count(*) FROM caa_cache) FROM catalog_gate WHERE id=1", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(lease, 0);
+        assert_eq!(delay, 9);
+        assert_eq!(count, 0);
+        assert_eq!(store.caa_cache(&request)?.is_none(), fail);
+        assert!(store.claim_catalog_request().is_err());
+    }
+    Ok(())
+}
+
 fn listing(id: u32, extension: &str) -> Result<(CaaListing, Vec<u8>)> {
     let raw = serde_json::to_vec(&json!({
         "release":format!("https://musicbrainz.org/release/{RELEASE}"),

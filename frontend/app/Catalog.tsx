@@ -18,6 +18,7 @@ import { useCommand, useResource } from "./hooks";
 import { Alert, Badge, Button, Card, Check, Cover, Empty, Pager } from "./components/ui";
 import { AlbumCard } from "./components/Media";
 import { searchGap } from "./Search";
+import { BackendConfiguration } from "./BackendConfiguration";
 
 const audioChoices: { format: AudioFormat; label: string }[] = [
   { format: "mp3", label: "MP3 · 320 kbps CBR" },
@@ -512,6 +513,7 @@ export function Settings({
       {savedVersion !== undefined && (
         <p role="status">System output settings were saved as version {savedVersion}.</p>
       )}
+      <BackendConfiguration />
       <Card title="Shared library output">
         {settings ? (
           <>

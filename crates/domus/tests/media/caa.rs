@@ -46,7 +46,7 @@ fn schema_thirteen_upgrade_preserves_legacy_previews_without_fabricated_evidence
     );
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        20
+        21
     );
     Ok(())
 }
@@ -83,6 +83,113 @@ fn cached_cover(fixture: &Fixture, bytes: &[u8]) -> TestResult {
         )?;
     }
 
+    Ok(())
+}
+
+#[test]
+fn shared_cache_caa_preview_retains_approval_and_normalization_after_complete_cache_eviction()
+-> TestResult {
+    use domus::application::services::cache::{Cache, CacheKey};
+    use domus::infrastructure::cache::{CacheLimits, FileCache};
+    use std::sync::Arc;
+    let mut fixture = Fixture::build_inner(AudioFormat::Flac, true, false)?;
+    cached_cover(&fixture, &cover_source()?)?;
+    let root = super::private::tempdir()?;
+    let cache = Arc::new(FileCache::open(
+        &mut fixture.store,
+        root.path(),
+        CacheLimits::default(),
+    )?);
+    let raw = Connection::open(&fixture.database)?;
+    let mut statement =
+        raw.prepare("SELECT cache_key,body,sources,fetched_at,expires_at FROM caa_cache")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (key, body, sources, fetched, expires) = row?;
+        let mut envelope = b"DOMCAA1\n".to_vec();
+        envelope.extend_from_slice(&(sources.len() as u32).to_le_bytes());
+        envelope.extend_from_slice(sources.as_bytes());
+        envelope.extend_from_slice(&body);
+        cache.put(
+            &CacheKey::new("cover-art-archive", "responses-v1", &key)?,
+            &envelope,
+            u64::try_from(fetched)?,
+            u64::try_from(expires)?,
+        )?;
+    }
+    drop(statement);
+    raw.execute("DELETE FROM caa_cache", [])?;
+    fixture.store = fixture.store.with_cache(cache.clone());
+    let candidate = fixture.store.prepare_cached_caa_artwork(
+        fixture.job,
+        fixture.version,
+        IMAGE,
+        None,
+        true,
+    )?;
+    assert!(candidate.approved_at.is_none());
+    let duplicate = fixture.store.prepare_cached_caa_artwork(
+        fixture.job,
+        fixture.version,
+        IMAGE,
+        None,
+        true,
+    )?;
+    assert_eq!(duplicate.id, candidate.id);
+    let evidence = serde_json::to_value(fixture.store.artwork_caa_evidence(
+        fixture.job,
+        fixture.version,
+        candidate.id,
+    )?)?;
+    assert_eq!(cache.evict_expired(u64::MAX, 64)?, 3);
+    assert!(
+        fixture
+            .store
+            .prepare_cached_caa_artwork(fixture.job, fixture.version, IMAGE, None, true)
+            .is_err()
+    );
+    fixture.store.approve_artwork(
+        fixture.job,
+        fixture.version,
+        candidate.id,
+        &candidate.sha256,
+    )?;
+    let retained = Store::open_current_existing(&fixture.database)?;
+    let cover = retained.approved_artwork(fixture.job, fixture.version)?;
+    assert_eq!(
+        format!("{:x}", Sha256::digest(cover.bytes())),
+        candidate.sha256
+    );
+    assert_eq!(
+        serde_json::to_value(retained.artwork_caa_evidence(
+            fixture.job,
+            fixture.version,
+            candidate.id
+        )?)?,
+        evidence
+    );
+    let staging = fixture.staging.as_ref().ok_or("staging")?;
+    domus::application::normalize_album(&mut fixture.store, &fixture.claim, staging, &cover)?;
+    assert_eq!(
+        fixture.store.job_state(fixture.job)?.as_deref(),
+        Some("publishing")
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT generation FROM catalog_gate WHERE id=1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        0
+    );
     Ok(())
 }
 

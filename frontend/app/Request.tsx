@@ -5,6 +5,7 @@ import type { SourceCandidate } from "../src/generated/SourceCandidate";
 import type { ArtworkCandidate } from "../src/generated/ArtworkCandidate";
 import type { PublicationDestination } from "../src/generated/PublicationDestination";
 import type { TransferFile } from "../src/generated/TransferFile";
+import type { TransferSummary } from "../src/generated/TransferSummary";
 import type { StartLocalDownload } from "../src/generated/StartLocalDownload";
 import type { QuestionDetails } from "../src/generated/QuestionDetails";
 import { OutputPreview } from "../src/OutputPreview";
@@ -17,6 +18,7 @@ import { ArtworkReview } from "./ArtworkReview";
 import { CancelJob, JobStatus } from "./components/Media";
 import { RequestHistory } from "./RequestHistory";
 import { PublicationRecovery } from "./PublicationRecovery";
+import { TransferProgress, allInputsReceived } from "./TransferProgress";
 
 export function RequestProgress({
   planApproved,
@@ -68,6 +70,8 @@ export function RequestPage({
   const [poll, setPoll] = useState(false);
   const [sourcePages, setSourcePages] = useState([0]);
   const [artworkPages, setArtworkPages] = useState([0]);
+  const [transferPages, setTransferPages] = useState([0]);
+  const transferAfter = transferPages.at(-1) ?? 0;
   const sourceAfter = sourcePages.at(-1) ?? 0;
   const artworkAfter = artworkPages.at(-1) ?? 0;
   const job = useResource(
@@ -98,13 +102,14 @@ export function RequestPage({
   );
   const receipts = useResource(
     async (signal) => {
-      const [publication, transfers] = await Promise.all([
+      const [publication, transfers, summary] = await Promise.all([
         request<PublicationDestination[]>(`${base}/publication`, { signal }),
-        request<TransferFile[]>(`${base}/transfers?limit=100`, { signal }),
+        request<TransferFile[]>(`${base}/transfers?after=${transferAfter}&limit=50`, { signal }),
+        request<TransferSummary>(`${base}/transfers/summary`, { signal }),
       ]);
-      return { publication, transfers };
+      return { publication, transfers, summary };
     },
-    `${base}:${job.data?.state ?? ""}`,
+    `${base}:${job.data?.state ?? ""}:${transferAfter}`,
     poll ? 2000 : 0,
   );
   const [sourceId, setSourceId] = useState<number>();
@@ -134,13 +139,10 @@ export function RequestPage({
     (coverId === undefined
       ? (artwork.data?.find((item) => item.approved_at !== null) ?? artwork.data?.[0])
       : undefined);
-  const allReceived = Boolean(
-    receipts.data &&
-    stored &&
-    receipts.data.transfers.length === stored.plan.edition.tracks.length &&
-    receipts.data.transfers.length > 0 &&
-    receipts.data.transfers.every((file) => file.state === "received"),
-  );
+  const allReceived =
+    !receipts.loading &&
+    !receipts.error &&
+    allInputsReceived(receipts.data?.summary, id, version, stored?.plan.edition.tracks.length ?? 0);
   function refresh() {
     setHistoryRevision((value) => value + 1);
     job.refresh();
@@ -515,10 +517,13 @@ export function RequestPage({
             )}
             {!["publishing", "backup_pending", "complete", "cancelled"].includes(current.state) && (
               <section className="review-section">
-                <h2>Start the approved download</h2>
+                <h2>
+                  {allReceived ? "Continue approved local work" : "Start the approved download"}
+                </h2>
                 <p className="warning">
-                  New folders only. This action connects to the configured source, downloads media,
-                  writes tags in private staging, then publishes to the approved local roots.
+                  {allReceived
+                    ? "The worker rechecks retained inputs, then continues approved local processing and new-only publication. It does not download again."
+                    : "New folders only. This action connects to the configured source, downloads media, writes tags in private staging, then publishes to the approved local roots."}{" "}
                   Existing files are never overwritten. A failed copy stays for recovery.
                 </p>
                 <p>
@@ -593,14 +598,27 @@ export function RequestPage({
           </Card>
           <section className="review-section">
             <h2>Transfer receipts</h2>
+            {receipts.error && receipts.data ? (
+              <p className="warning">
+                The receipt read failed. These retained counts and rows are not a current response.
+                Use Refresh request to read them again. Commands and receipt pages stay disabled.
+              </p>
+            ) : null}
+            {receipts.loading && <p role="status">Reading saved receipts…</p>}
+            {receipts.data?.summary && <TransferProgress summary={receipts.data.summary} />}
             {receipts.data?.transfers.length ? (
-              <div className="table-scroll">
-                <table>
+              <div
+                className="table-scroll"
+                role="region"
+                aria-label="Transfer receipt rows"
+                tabIndex={0}
+              >
+                <table className="transfer-receipts">
                   <thead>
                     <tr>
-                      <th>Track / source</th>
-                      <th>Saved state</th>
-                      <th>Received</th>
+                      <th scope="col">Track / source</th>
+                      <th scope="col">Saved state</th>
+                      <th scope="col">Received</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -620,11 +638,36 @@ export function RequestPage({
                   </tbody>
                 </table>
               </div>
-            ) : (
-              <Empty>No transfer receipts yet. A plan or acknowledgement is not a download.</Empty>
-            )}
-            {(receipts.data?.transfers.length ?? 0) >= 100 && (
-              <p className="muted">Showing the first 100 transfer receipts.</p>
+            ) : !receipts.loading && !receipts.error && receipts.data ? (
+              <Empty>
+                {transferPages.length > 1
+                  ? "No transfer receipts on this page."
+                  : "No transfer receipts yet. A plan or acknowledgement is not a download."}
+              </Empty>
+            ) : null}
+            {receipts.data && (
+              <div aria-label="Transfer receipt pages">
+                <p className="muted">
+                  Receipt page {transferPages.length} · Up to 50 rows per page
+                </p>
+                <Pager
+                  busy={receipts.loading || Boolean(receipts.error) || command.busy}
+                  previous={
+                    transferPages.length > 1
+                      ? () => setTransferPages(transferPages.slice(0, -1))
+                      : undefined
+                  }
+                  next={
+                    receipts.data.transfers.length === 50
+                      ? () =>
+                          setTransferPages([
+                            ...transferPages,
+                            receipts.data?.transfers.at(-1)?.id ?? transferAfter,
+                          ])
+                      : undefined
+                  }
+                />
+              </div>
             )}
             <h2>Publication receipts</h2>
             <PublicationRecovery

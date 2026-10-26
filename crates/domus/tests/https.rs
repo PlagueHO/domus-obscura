@@ -821,6 +821,7 @@ async fn browser_sign_in_guards_commands_rotates_sessions_and_preserves_durable_
         "/api/events/cursor",
         "/api/events/stream",
         "/api/jobs/1/plans/2/transfers",
+        "/api/jobs/1/plans/2/transfers/summary",
         "/api/jobs/1/plans/2/publication",
         "/api/jobs/1/plans/2/publication/resume",
         "/api/jobs/1/plans/2/controls",
@@ -1087,6 +1088,63 @@ async fn browser_sign_in_guards_commands_rotates_sessions_and_preserves_durable_
     assert_eq!(transfers[0]["state"], "planned");
     assert_eq!(transfers[0]["peer"], "generated-peer");
     assert_eq!(transfers[0]["expected_bytes"], 10);
+    let summary_path = format!("{transfer_path}/summary");
+    let response = api_request(&router, "GET", &summary_path, Some(&cookie), None, None).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        json_body(response).await?,
+        json!({
+            "job_id": job, "plan_version": version, "expected_tracks": 1,
+            "total": 1, "planned": 1, "submitting": 0, "active": 0,
+            "received": 0, "all_received": false
+        })
+    );
+    assert_eq!(
+        api_request(
+            &router,
+            "POST",
+            &summary_path,
+            Some(&cookie),
+            Some(ORIGIN),
+            Some(json!({}))
+        )
+        .await?
+        .status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    for (path, expected) in [
+        (
+            format!("/api/jobs/{job}/plans/{}/transfers/summary", version + 1),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/api/jobs/0/plans/{version}/transfers/summary"),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        assert_eq!(
+            api_request(&router, "GET", &path, Some(&cookie), None, None)
+                .await?
+                .status(),
+            expected
+        );
+    }
+    for query in ["after=-1", "limit=0", "limit=201"] {
+        assert_eq!(
+            api_request(
+                &router,
+                "GET",
+                &format!("{transfer_path}?{query}"),
+                Some(&cookie),
+                None,
+                None
+            )
+            .await?
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
     assert_eq!(
         api_request(
             &router,

@@ -40,7 +40,7 @@ pub use queries::{JobEvent, JobSummary};
 pub use queue::QueueSelection;
 pub use sessions::{CreatedSession, SessionCredential, SessionIdentity};
 pub use source_candidates::SourceCandidate;
-pub use transfers::{SourceFile, TransferFile};
+pub use transfers::{SourceFile, TransferFile, TransferSummary};
 
 const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/001_initial.sql"),
@@ -63,11 +63,13 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/018_source_candidates.sql"),
     include_str!("../../migrations/019_queue_presentation.sql"),
     include_str!("../../migrations/020_plan_events.sql"),
+    include_str!("../../migrations/021_cache_roots.sql"),
 ];
 
 pub struct Store {
     connection: Connection,
     path: PathBuf,
+    cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
 }
 
 pub struct ScanClaim {
@@ -207,14 +209,27 @@ impl Store {
     /// Read a current-schema snapshot without creating or migrating a database.
     /// SQLite may still use its normal WAL shared-memory coordination files.
     pub fn open_read_snapshot(path: &Path) -> Result<Self> {
+        let store = Self::open_read_current(path)?;
+        store.connection.execute_batch("BEGIN DEFERRED;")?;
+        require_current_schema(&store.connection)?;
+        Ok(store)
+    }
+
+    /// Read-only current-schema connection with no long-lived transaction.
+    /// Use for shared-cache reads so file I/O does not occur in a SQL snapshot.
+    pub fn open_read_current(path: &Path) -> Result<Self> {
         super::filesystem::require_local_disk(path)?;
         let path = std::fs::canonicalize(path)?;
         super::filesystem::require_local_disk(&path)?;
         let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA query_only = ON; BEGIN DEFERRED;")?;
+        connection.execute_batch("PRAGMA query_only = ON;")?;
         require_current_schema(&connection)?;
-        Ok(Self { connection, path })
+        Ok(Self {
+            connection,
+            path,
+            cache: None,
+        })
     }
 
     fn open_with_flags(path: &Path, flags: OpenFlags, upgrade: bool) -> Result<Self> {
@@ -258,7 +273,24 @@ impl Store {
         Ok(Self {
             connection,
             path: std::fs::canonicalize(path)?,
+            cache: None,
         })
+    }
+
+    /// Use one host-selected cache without changing durable evidence or falling
+    /// back to legacy provider storage when the selected adapter fails.
+    pub fn with_cache(
+        mut self,
+        cache: std::sync::Arc<dyn crate::application::services::cache::Cache>,
+    ) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    pub(crate) fn cache(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::application::services::cache::Cache>> {
+        self.cache.clone()
     }
 
     pub fn database_path(&self) -> &Path {

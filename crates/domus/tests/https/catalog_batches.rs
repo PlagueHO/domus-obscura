@@ -1,8 +1,20 @@
 use super::*;
+use domus::application::services::cache::{Cache, CacheKey};
 use domus::domain::{EditionSelection, PlannedTrack};
+use domus::infrastructure::cache::{CacheLimits, FileCache};
 
 #[tokio::test]
 async fn catalog_batch_api_is_authenticated_atomic_cache_only_and_replay_safe() -> TestResult {
+    catalog_batch(false).await
+}
+
+#[tokio::test]
+async fn shared_cache_catalog_batch_preserves_atomicity_expiry_and_separate_approvals() -> TestResult
+{
+    catalog_batch(true).await
+}
+
+async fn catalog_batch(shared: bool) -> TestResult {
     let provider = Provider::new()?;
     let identity_material = certificates(AUTHORITY)?;
     let identity_server = FixtureServer::start(provider.router(), &identity_material, AUTHORITY)?;
@@ -50,6 +62,38 @@ async fn catalog_batch_api_is_authenticated_atomic_cache_only_and_replay_safe() 
             }
         }));
     }
+    let cache_root = private::tempdir()?;
+    let mut entries = Vec::new();
+    let cache = if shared {
+        let connection = rusqlite::Connection::open(&database)?;
+        let rows = connection
+            .prepare("SELECT source,body,fetched_at FROM catalog_cache")?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let cache = Arc::new(FileCache::open(
+            &mut store,
+            cache_root.path(),
+            CacheLimits::default(),
+        )?);
+        for (source, body, fetched) in rows {
+            let key = CacheKey::new("musicbrainz", "responses-v1", &source)?;
+            let fetched = u64::try_from(fetched)?;
+            cache.put(&key, &body, fetched, fetched + 86400)?;
+            entries.push((key, body, fetched));
+        }
+        assert_eq!(entries.len(), 2);
+        connection.execute("DELETE FROM catalog_cache", [])?;
+        store = store.with_cache(cache.clone());
+        Some(cache)
+    } else {
+        None
+    };
     let api = Api::new_with_catalog(ORIGIN, store, broker, client(&material, &metadata_server)?)?;
     let router = api.router();
     let path = "/api/discovery/plans";
@@ -119,10 +163,16 @@ async fn catalog_batch_api_is_authenticated_atomic_cache_only_and_replay_safe() 
         );
     }
     let connection = rusqlite::Connection::open(&database)?;
-    connection.execute(
-        "UPDATE catalog_cache SET fetched_at=unixepoch()-86402, expires_at=unixepoch()-1",
-        [],
-    )?;
+    if let Some(cache) = &cache {
+        for (key, body, fetched) in &entries {
+            cache.put(key, body, fetched - 86402, fetched - 2)?;
+        }
+    } else {
+        connection.execute(
+            "UPDATE catalog_cache SET fetched_at=unixepoch()-86402, expires_at=unixepoch()-1",
+            [],
+        )?;
+    }
     assert_eq!(
         api_request(
             &router,
@@ -136,10 +186,16 @@ async fn catalog_batch_api_is_authenticated_atomic_cache_only_and_replay_safe() 
         .status(),
         StatusCode::CONFLICT
     );
-    connection.execute(
-        "UPDATE catalog_cache SET fetched_at=unixepoch(), expires_at=unixepoch()+86400",
-        [],
-    )?;
+    if let Some(cache) = &cache {
+        for (key, body, fetched) in &entries {
+            cache.put(key, body, *fetched, fetched + 86400)?;
+        }
+    } else {
+        connection.execute(
+            "UPDATE catalog_cache SET fetched_at=unixepoch(), expires_at=unixepoch()+86400",
+            [],
+        )?;
+    }
     assert_eq!(
         connection.query_row("SELECT count(*) FROM job_plans", [], |row| row
             .get::<_, i64>(0))?,
@@ -207,6 +263,13 @@ async fn catalog_batch_api_is_authenticated_atomic_cache_only_and_replay_safe() 
         2
     );
     assert_eq!(catalog_fixture.count()?, 0);
+    if shared {
+        assert_eq!(
+            connection.query_row("SELECT count(*) FROM catalog_cache", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+    }
     assert_eq!(std::fs::read_dir(&media)?.count(), 0);
     metadata_server.stop().await?;
     identity_server.stop().await?;

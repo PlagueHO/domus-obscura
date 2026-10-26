@@ -876,6 +876,12 @@ table {
   width: 100%;
   text-align: left;
 }
+.transfer-receipts {
+  min-width: 540px;
+}
+.transfer-receipts th:first-child {
+  width: 60%;
+}
 th {
   color: var(--muted);
   font-size: 12px;

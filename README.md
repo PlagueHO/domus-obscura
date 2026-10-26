@@ -26,6 +26,8 @@ diagrams, current boundaries and planned changes.
 - Bounded exact-release CAA listing validation and a gated, HTTPS-only artwork transport adapter.
 - Bounded durable CAA caching and immutable exact-release cover evidence, retained with each prepared preview.
 - Immutable native root identities and ancestry checks for registered media and private staging.
+- A shared blocking cache port and bounded, private file adapter with atomic writes and integrity checks. Explicit host configuration selects it for MusicBrainz responses, CAA originals/listings and normalized JPEG variants.
+- An application-owned image retrieval service with bounded native processing, shared JPEG variants and separate exact-preview approval.
 - Isolated Entra ID-token verification and bounded, single-use, browser-bound PKCE login challenges.
 - Trusted Entra discovery, bounded HTTPS code exchange, and signing-key refresh with a one-hour validity limit.
 - Durable hashed sessions with atomic rotation, expiry, revocation, and token-free session audit records.
@@ -709,13 +711,80 @@ the complete allowed HTTPS source chain. Image keys include their listing-bound
 filename, so changed image formats cannot reuse the old entry. Missing responses
 and provider failures are not cached as successful artwork.
 
-The cache retains at most 32 entries and 64 MiB of response bodies plus source
+Without a `cache` host setting, the legacy SQLite cache retains at most 32 entries and 64 MiB of response bodies plus source
 JSON. It removes expired entries and the least recently accessed entries during
 successful writes. These are logical cache bounds, not a database-file or
 process-memory limit. Frozen cover evidence is retained separately.
 The final response, cache write and provider-budget completion commit in one
 transaction while the request still holds its OS lock. A failed commit preserves
 the uncertain request lease instead of allowing an immediate retry.
+
+The HTTPS configuration and read-service host configuration also accept this
+top-level setting:
+
+```json
+{
+  "cache": {
+    "root": "C:\\DomusDev\\cache",
+    "limits": {
+      "item_bytes": 9437184,
+      "total_bytes": 134217728,
+      "entries": 64
+    }
+  }
+}
+```
+
+This is a fragment, not a complete host configuration. Omit `limits` to use the
+values shown. The root must already exist on local disk with owner-only
+permissions. A new root must be empty. The cache adapter does not create directories,
+change permissions or migrate a database. Never select an existing library,
+staging or state directory. Keep configuration, secrets, TLS and browser assets
+outside the cache root. Reopening requires the original native root binding and
+owner marker, not a copied marker.
+
+With this setting, MusicBrainz responses, CAA responses and generated JPEG variants use the shared file
+cache. Legacy SQLite cache rows are neither read as fallback nor copied or
+deleted. Frozen artwork evidence and approved JPEG bytes stay in SQLite and
+survive complete cache eviction. Exact-release plan preparation and configured
+local source reads use this same port. Use the same
+cache setting in each host that must share these responses. Database-only CLI
+catalog/artwork/source commands still use legacy storage; use the configured
+HTTPS host for workflows that use file-cached evidence.
+
+File-cache storage cannot commit atomically with SQLite. MusicBrainz and CAA provider-budget
+completion commits first, then the validated response is stored outside the
+transaction. A failed or interrupted cache write leaves no new reusable response.
+It does not restore the permit, clear backoff or retry the request. Cache read
+errors and corrupt entries fail explicitly without network fallback. A miss or
+expired entry can use the normal budgeted fetch. File eviction uses expiry order,
+not the legacy least-recently-accessed rule. The configured limits include
+temporary replacement storage. A small item limit can reject a provider response.
+
+Preview preparation caches strict normalized JPEGs by original SHA-256, target
+size, normalization profile and explicit transparency background. A hit still
+passes strict JPEG decoding. This cache does not approve the preview. Settings
+changes cannot change saved approvals. CAA request fields, exact image IDs and
+source chains follow the [CAA API](https://musicbrainz.org/doc/Cover_Art_Archive/API);
+its provider edit approval remains distinct from user approval and permitted use.
+MusicBrainz request identity, JSON validation and pagination remain governed by
+the [MusicBrainz API](https://musicbrainz.org/doc/MusicBrainz_API) and
+[search contract](https://musicbrainz.org/doc/MusicBrainz_API/Search).
+The [one-request-per-second limit and meaningful User-Agent requirement](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)
+remain enforced by the existing durable budget, independently of cache storage.
+
+`application::services::images::ImageService` coordinates the installed artwork
+provider with the `ImageProcessor` port. `ServiceHost` registers the strict native
+processor with the same selected cache. The HTTPS cover-download command uses
+this service after plan and permitted-use checks. Decoding, color conversion,
+scaling and cache I/O run on bounded blocking workers, not async executor threads.
+Persistence rechecks the current approved plan, frozen size, processing profile
+and original digest against fresh retained CAA cache evidence. It stores the
+returned JPEG without another resize or encoding. The exact JPEG still needs
+separate user approval. Local uploads and cache-only preparation use the same
+normalizer. The read-only MCP `artwork_fetch` contract is unchanged: it retains
+an original and returns a digest/count, not a JPEG or approval. No artist-photo
+provider is installed.
 
 Use `service-call` with this request after separate approval of live provider
 access. Replace the release and image IDs with a selected exact release and an
@@ -1201,6 +1270,20 @@ When editing is enabled, a failed save keeps the draft and never retries.
 If another writer changes the saved version, use **Reload system settings** to load
 that version before saving again. Reloading a newer version replaces the draft.
 Setup read failures are reported separately from missing configuration.
+
+**Backend configuration** on the same System page shows active startup settings
+and saved JSON through the protected `GET /api/system/configuration` endpoint.
+It covers the environment, paths, listener, provider selections, cache limits,
+TLS references, Entra configured states and optional development acquisition.
+Secret-file paths and Entra identifiers are hidden. Inspection reads bounded
+JSON through no-follow handles. It does not validate or activate saved changes,
+migrate a database, open cache/staging roots or contact providers. Changed raw
+JSON has a different revision and is marked unvalidated and restart-required.
+Failed refreshes retain the last values with a stale warning, not a current-state
+claim. This is a read-only view: no backend JSON save route is installed.
+Validated atomic browser persistence and stale-edit rejection remain unfinished.
+APIs without a file-backed configuration source return an explicit unavailable
+error instead of invented values.
 
 Artwork size, accepted and preferred audio formats, quality priorities and output
 templates are administrator-controlled system policy. They apply to the shared

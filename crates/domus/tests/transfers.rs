@@ -11,6 +11,8 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 mod catalog_tests;
 #[path = "transfers/controls.rs"]
 mod control_tests;
+#[path = "transfers/progress.rs"]
+mod progress_tests;
 #[path = "transfers/sources.rs"]
 mod source_tests;
 mod support;
@@ -56,6 +58,10 @@ fn files() -> Vec<SourceFile> {
 
 impl Fixture {
     fn new() -> TestResult<Self> {
+        Self::with_edition(edition())
+    }
+
+    fn with_edition(edition: EditionSelection) -> TestResult<Self> {
         let state = tempdir()?;
         let media = tempdir()?;
         let database = state.path().join("state.db");
@@ -64,7 +70,7 @@ impl Fixture {
         scan_location(&mut store, main)?;
         store.save_settings(None, &OutputSettings::default())?;
         let job = store.enqueue(1)?;
-        let catalog = support::catalog_snapshot(&database, &edition())?;
+        let catalog = support::catalog_snapshot(&database, &edition)?;
         let plan = store.prepare_catalog_plan(
             PlanRequest {
                 job_id: job,

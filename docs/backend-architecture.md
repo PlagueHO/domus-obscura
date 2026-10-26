@@ -34,6 +34,7 @@ flowchart TB
         Host["ServiceHost<br/>Composition and installed adapters"]
         Catalog["CatalogService<br/>Discovery and metadata"]
         Art["ArtworkService<br/>Listing and original image retrieval"]
+        Retrieve["ImageService<br/>Original retrieval and variant processing"]
         Index["Location registration, scans<br/>and read-only library queries"]
         Plan["Exact-release planning<br/>System library policy and approvals"]
         Source["Source search, folder assessment<br/>and source selection"]
@@ -59,7 +60,8 @@ flowchart TB
         FS["Handle-based filesystem access<br/>Bound roots and locked staging"]
         Store["Store / ServiceStore<br/>Local SQLite"]
         Gate["Durable catalog budget<br/>OS lock and provider backoff"]
-        Caches["Current catalog and CAA caches<br/>Separate SQLite-backed implementations"]
+        Caches["MusicBrainz and legacy CAA caches<br/>SQLite-backed"]
+        FileCache["Configured MusicBrainz, CAA and JPEG variants<br/>Shared file-cache port"]
         Auth["Entra / identity / sessions<br/>Guarded TLS listener"]
     end
 
@@ -98,7 +100,10 @@ flowchart TB
     Normalize --> Images
     Normalize --> Media
     Normalize --> FS
-    API --> Images
+    API --> Retrieve
+    Host --> Retrieve
+    Retrieve --> Art
+    Retrieve --> Images
     CLI --> Images
     Publish --> Store
     Publish --> FS
@@ -107,12 +112,15 @@ flowchart TB
     CAA --> Gate
     MB --> Caches
     CAA --> Caches
+    CAA --> FileCache
+    MB --> FileCache
+    Images --> FileCache
     Gate --> Store
     Caches --> Store
     API --> Auth
 ```
 
-`ServiceHost` currently composes catalog, artwork and database access.
+`ServiceHost` currently composes catalog, artwork, image retrieval and database access.
 Acquisition has a separate provider contract and worker wiring. It is not a
 field on `ServiceHost`. Source search is still tied to worker configuration.
 Some API handlers call `Store` and concrete services directly.
@@ -121,6 +129,12 @@ These are current design limits, not the desired final separation.
 Image preparation uses the shared normalizer through guarded store operations.
 It is distinct from `ArtworkService.fetch`: retrieving an original image does
 not normalize it, grant rights or approve a preview.
+The HTTPS download flow uses `ImageService` to coordinate that original fetch
+with the application-owned `ImageProcessor` port. The native adapter bounds
+blocking decoding/cache work. Persistence rechecks the current approved plan,
+frozen target/profile and fresh exact original evidence before retaining the
+returned JPEG. It performs no second encoding. Cache-only and local preparation
+continue through the same normalizer and guarded persistence.
 
 ## Domain map
 
@@ -177,9 +191,9 @@ flowchart TB
     Clients["HTTP / CLI / private stdio / future UI"] --> UseCases["Typed application operations"]
     UseCases --> Interfaces["Application-owned provider interfaces"]
     Interfaces --> Remote["Dedicated remote API client adapters"]
-    UseCases --> Cache["Planned: shared local cache interface"]
+    UseCases --> Cache["Shared local cache interface<br/>MusicBrainz, CAA and image variants connected"]
     Remote --> Cache
-    Cache --> Files["Planned: bounded file-based cache adapter"]
+    Cache --> Files["Bounded file-based cache adapter<br/>Implemented"]
     Cache -.-> Future["Possible later cache adapter"]
     Remote --> Budget["Existing provider budgets and backoff"]
     UseCases --> Policy["Authoritative Rust domain policy"]
@@ -191,13 +205,75 @@ I/O boundary. Reuse existing provider traits instead of adding redundant wrapper
 Keep protocol, parsing and transport limits inside client adapters.
 Keep workflow policy outside clients and UI components.
 
-The shared cache is planned. It must replace duplicated storage mechanics, not
-provider-specific freshness or request budgets. Start with a file-based adapter
-behind a small replaceable contract. Album covers, artist images and provider
-responses can use it. Eviction must not remove approved evidence or recovery
-records. Current caches have not been migrated.
+The shared cache contract and file adapter are implemented in
+`application::services::cache` and `infrastructure::cache`. An explicit host
+`cache` setting opens the adapter and passes the same port through `ServiceHost`
+to catalog/CAA operations and plan-bound image preparation. Configured responses do
+not use the legacy SQLite cache or fall back to it. Local source metadata reads
+receive this same host-selected port. Provider-specific freshness, provenance checks and request budgets remain
+unchanged. Album covers, future artist images and provider responses can use the
+same port. Eviction cannot reach approved evidence or recovery records; they
+remain in their existing durable stores.
 
-The planned image retrieval service also owns scaled variants through the shared
+Configured CAA responses have a bounded, versioned envelope with original bytes
+and the complete source chain. Reads validate the chain, exact filename and
+24-hour freshness before use. Provider-budget completion commits before file
+storage, outside the SQLite transaction. A storage error cannot undo the consumed
+permit or saved backoff. There is no automatic refetch after corruption or I/O
+failure. A configured file cache does not import or delete legacy cache rows.
+Hosts without this explicit setting retain legacy behavior.
+MusicBrainz keys retain the full canonical request URL, including pagination and
+query parameters. Reads check the original response against that exact query.
+Exact-release planning still compares parsed content, original hash and fetch
+time before freezing evidence. Source metadata uses a read-only, current-schema
+autocommit connection for file-cache lookup, not a long-lived SQL snapshot.
+The ordinary snapshot API retains its transaction behavior and rejects shared
+file reads inside that transaction.
+
+`CacheKey` hashes length-delimited provider, namespace and logical identifier
+fields. Callers never select native entry paths. `FileCache::open` explicitly
+reserves an existing owner-only local directory and binds its native identity
+and ancestry to the application database. It rejects media/staging/state
+overlaps and copied owner markers. Schema 21 expands the root-kind constraints
+without changing existing bindings, IDs, timestamps or immutable triggers.
+All file operations stay on no-follow directory handles.
+
+Each complete cache operation holds an OS lock. Clones share a mutex, while
+independent API/worker adapters can open the same bound root. A competing
+operation receives an explicit busy error rather than racing another writer.
+Startup holds the same lock before discarding an interrupted temporary write.
+The marker handle stays open and is never replaced. The port is blocking I/O
+and must not run on an async executor thread.
+Each operation opens a separate lock handle rather than cloning an already
+locked handle. This follows the [Rust `File::try_lock` contract](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock).
+Dropping that operation handle releases its lock. Untrusted OS users are
+excluded by private permissions; an advisory lock alone is not a permission
+boundary.
+
+Entries have a fixed 96-byte header with key digest, payload SHA-256, storage
+time, expiry and byte length. A lookup returns a hit, miss, expired or corrupt
+result; storage and permission errors remain errors. A backward clock jump
+expires an entry rather than extending its authority. No lookup serves stale
+bytes. Payloads are bounded before allocation and checked against their digest.
+Corrupt entries can be explicitly invalidated by logical key, including after
+reopen. Unknown files are never adopted or removed.
+
+Writes sync one private temporary file, then rename it over the entry under
+the owner lock. A failed or interrupted pre-rename write leaves the old entry
+unchanged. The next open/write removes only the validated `pending.cache` file.
+Filesystem errors remain explicit. This is process-interruption recovery, not
+verified power-loss acceptance.
+
+Limits require 1 through 4,096 entries, items up to 32 MiB and total entry
+storage up to 1 GiB. Total storage includes headers and temporary replacement
+bytes, but not the small owner marker. It must have room for two maximum-size
+encoded entries. Put evicts by earliest expiry, with stable tie breakers,
+until entry and storage bounds permit an atomic write. A replacement can evict
+another entry to keep temporary storage bounded. Explicit expiry eviction
+inspects at most the configured entry bound and removes no more than its
+requested limit. No cache operation deletes a job, plan, preview or receipt.
+
+The image retrieval service creates scaled variants through the shared
 normalizer. The user selects a 200 x 200, 400 x 400 (recommended) or 800 x 800
 bounding box. Preserve aspect ratio and never enlarge. Cache the original and
 each content-bound variant through the shared cache interface. Remote clients
@@ -205,8 +281,27 @@ fetch bytes; they do not each implement resizing. New plans freeze the chosen
 target, and approval remains bound to the exact JPEG used for tags and folder
 artwork. New settings support 200/400/800-pixel targets; legacy plans retain the
 1200-pixel maximum. Target selection currently runs through plan-bound Store
-preparation. Shared file-cache variants and reusable service orchestration remain
-open.
+preparation. Configured file-cache hosts now reuse strict JPEG variants keyed by
+original digest, target, normalization profile and transparency background.
+Cache hits pass the retained JPEG validator. CAA original freshness is checked
+before preview preparation, independently of variant reuse. A different target
+creates a different cache entry, not a replacement approval. Artist-image
+installation remains open. Retrieval and processing ports are independently
+replaceable; no provider client owns resize policy. The existing read-only MCP
+original-fetch contract is unchanged.
+
+The file-backed HTTPS bootstrap attaches a separate configuration inspection
+source to the guarded API. `GET /api/system/configuration` reads it on a blocking
+worker, without a Store transaction. It returns a redacted immutable active
+snapshot and a passive, bounded no-follow read of saved JSON. Raw JSON digests
+identify changed saved state; they do not prove validation or activation.
+Secret-file paths and Entra identifiers are excluded from the browser DTO.
+Inspection cannot open a new database/cache/staging root, validate TLS, contact
+providers or change the active read-only policy. APIs without a source return an
+explicit unavailable error. Backend JSON editing is not implemented; it still
+needs effect-free authoritative validation, atomic persistence and stale-edit
+protection. Startup loading is not a safe dry-run validator because it can
+migrate the selected database and bind the selected cache.
 
 ## Known gaps for design review
 

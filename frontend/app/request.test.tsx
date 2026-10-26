@@ -2,6 +2,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { JobSummary } from "../src/generated/JobSummary";
 import type { StoredPlan } from "../src/generated/StoredPlan";
+import type { TransferFile } from "../src/generated/TransferFile";
+import type { TransferSummary } from "../src/generated/TransferSummary";
+import type { ArtworkCandidate } from "../src/generated/ArtworkCandidate";
 import { useResource } from "./hooks";
 import { RequestPage, RequestProgress } from "./Request";
 
@@ -51,12 +54,34 @@ function renderRequest({
   job = savedJob,
   plan = savedPlan,
   error,
-}: { job?: JobSummary; plan?: StoredPlan; error?: Error } = {}) {
-  for (const data of [job, plan, [], [], { publication: [], transfers: [] }, null, []]) {
+  transfers = [],
+  summary,
+  receiptError,
+  receiptLoading = false,
+  covers = [],
+}: {
+  job?: JobSummary;
+  plan?: StoredPlan;
+  error?: Error;
+  transfers?: TransferFile[];
+  summary?: TransferSummary;
+  receiptError?: Error;
+  receiptLoading?: boolean;
+  covers?: ArtworkCandidate[];
+} = {}) {
+  for (const [index, data] of [
+    job,
+    plan,
+    [],
+    covers,
+    { publication: [], transfers, summary },
+    null,
+    [],
+  ].entries()) {
     vi.mocked(useResource).mockReturnValueOnce({
       data,
-      error,
-      loading: false,
+      error: index === 4 ? (receiptError ?? error) : error,
+      loading: index === 4 && receiptLoading,
       refresh: vi.fn(),
     });
   }
@@ -73,6 +98,128 @@ function renderRequest({
 beforeEach(() => vi.mocked(useResource).mockReset());
 
 describe("request approval progress", () => {
+  const summary: TransferSummary = {
+    job_id: 3,
+    plan_version: 2,
+    expected_tracks: 137,
+    total: 137,
+    received: 137,
+    planned: 0,
+    submitting: 0,
+    active: 0,
+    all_received: true,
+  };
+  const largePlan: StoredPlan = {
+    ...savedPlan,
+    plan: {
+      ...savedPlan.plan,
+      edition: {
+        ...savedPlan.plan.edition,
+        tracks: Array.from({ length: 137 }, () => ({
+          artist: "Generated artist",
+          title: "Generated track",
+          disc: null,
+          disc_track: null,
+        })),
+      },
+    },
+  };
+  const receiptPage: TransferFile[] = Array.from({ length: 50 }, (_, index) => ({
+    id: index + 1,
+    job_id: 3,
+    plan_version: 2,
+    track_number: index + 1,
+    peer: "Generated peer",
+    remote_path: `Generated Album\\${index + 1}.mp3`,
+    expected_bytes: 10,
+    state: "received",
+    remote_token: index + 1,
+    received_bytes: 10,
+    payload_sha256: Array.from({ length: 32 }, () => 1),
+  }));
+
+  it("shows whole-album counts and bounded receipt controls without truncation claims", () => {
+    const markup = renderRequest({ plan: largePlan, summary, transfers: receiptPage });
+    expect(markup).toContain("Received inputs retained");
+    expect(markup).toContain("137 of 137 tracks received");
+    expect(markup).toContain("Receipt page 1");
+    expect(markup).toContain("Up to 50 rows per page");
+    const pager = markup.slice(markup.indexOf('aria-label="Transfer receipt pages"'));
+    expect(pager).toMatch(/<button[^>]*disabled[^>]*>Previous page/);
+    expect(pager).toMatch(/<button(?![^>]*disabled)[^>]*>Next page/);
+    expect(markup).not.toContain("first 100");
+  });
+
+  it("does not infer all inputs received from a complete prefix", () => {
+    const markup = renderRequest({
+      plan: largePlan,
+      transfers: receiptPage,
+      summary: { ...summary, received: 136, submitting: 1, all_received: false },
+    });
+    expect(markup).not.toContain("Received inputs retained");
+    expect(markup).toContain("Tracks with uncertain submission");
+    expect(markup).toMatch(/<button[^>]*disabled[^>]*>Start Download/);
+  });
+
+  it("allows approved local continuation only from the whole exact-plan summary", () => {
+    const cover: ArtworkCandidate = {
+      id: 9,
+      job_id: 3,
+      plan_version: 2,
+      source: "local:generated",
+      input_sha256: "a".repeat(64),
+      background: null,
+      profile: 1,
+      sha256: "b".repeat(64),
+      bytes: 100,
+      width: 32,
+      height: 32,
+      approved_at: 1,
+    };
+    const markup = renderRequest({
+      job: { ...savedJob, state: "downloading" },
+      plan: largePlan,
+      summary,
+      transfers: receiptPage,
+      covers: [cover],
+    });
+    expect(markup).toMatch(/<button(?![^>]*disabled)[^>]*>Continue approved local work/);
+    expect(markup).toContain("It does not download again");
+    expect(markup).not.toContain("This action connects to the configured source");
+    for (const changed of [
+      { received: 136, submitting: 1, all_received: false },
+      { received: 136, active: 1, all_received: false },
+      { job_id: 4 },
+      { plan_version: 3 },
+    ]) {
+      const blocked = renderRequest({
+        job: { ...savedJob, state: "downloading" },
+        plan: largePlan,
+        summary: { ...summary, ...changed },
+        transfers: receiptPage,
+        covers: [cover],
+      });
+      expect(blocked).not.toContain("Continue approved local work");
+      expect(blocked).toMatch(/<button[^>]*disabled[^>]*>Start Download/);
+    }
+  });
+
+  it("blocks receipt loading and failed summary reads without hiding retained rows", () => {
+    for (const state of [
+      { receiptLoading: true },
+      { receiptError: new Error("Transfer summary unavailable") },
+    ]) {
+      const markup = renderRequest({ plan: largePlan, transfers: receiptPage, summary, ...state });
+      expect(markup).not.toContain("Received inputs retained");
+      expect(markup).toMatch(/<fieldset[^>]*disabled/);
+      expect(markup).toContain("Generated Album");
+      if (state.receiptError) {
+        expect(markup).toContain("retained counts and rows are not a current response");
+      } else {
+        expect(markup).toContain("Reading saved receipts");
+      }
+    }
+  });
   it("keeps plan, source and exact cover approval separate", () => {
     const markup = renderToStaticMarkup(
       <RequestProgress

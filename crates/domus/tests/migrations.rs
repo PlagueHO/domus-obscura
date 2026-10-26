@@ -19,7 +19,7 @@ fn schema_one_upgrades_without_losing_existing_jobs() -> Result<(), Box<dyn std:
     drop(store);
     let current = rusqlite::Connection::open(&database)?;
     let version: i64 = current.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 20);
+    assert_eq!(version, 21);
     Ok(())
 }
 
@@ -34,6 +34,69 @@ fn a_newer_database_is_not_downgraded() -> Result<(), Box<dyn std::error::Error>
     let connection = rusqlite::Connection::open(&database)?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     assert_eq!(version, 99);
+    Ok(())
+}
+
+#[test]
+fn cache_root_upgrade_preserves_existing_bindings_and_reservations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let data = tempdir()?;
+    let database = data.path().join("state.db");
+    let raw = rusqlite::Connection::open(&database)?;
+    let mut migrations =
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+    migrations.sort();
+    for migration in migrations.iter().take(20) {
+        raw.execute_batch(&std::fs::read_to_string(migration)?)?;
+    }
+    raw.pragma_update(None, "user_version", 20)?;
+    raw.execute("INSERT INTO private_roots(id,root,kind,created_at) VALUES (17,'generated-staging','staging',123)", [])?;
+    raw.execute("INSERT INTO filesystem_roots(root,kind,identity,body,bound_at) VALUES ('generated-staging','staging','generated-id','{}',456)", [])?;
+    assert!(
+        raw.execute(
+            "INSERT INTO private_roots(root,kind) VALUES ('no-cache-yet','cache')",
+            []
+        )
+        .is_err()
+    );
+    drop(raw);
+    drop(Store::open(&database)?);
+    let current = rusqlite::Connection::open(&database)?;
+    let saved: (i64, String, i64) = current.query_row(
+        "SELECT id,kind,created_at FROM private_roots WHERE root='generated-staging'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(saved, (17, "staging".into(), 123));
+    let native: (String, String, i64) = current.query_row(
+        "SELECT identity,body,bound_at FROM filesystem_roots WHERE root='generated-staging'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(native, ("generated-id".into(), "{}".into(), 456));
+    assert!(current.execute("DELETE FROM private_roots", []).is_err());
+    assert!(
+        current
+            .execute("UPDATE private_roots SET root='other'", [])
+            .is_err()
+    );
+    assert!(current.execute("DELETE FROM filesystem_roots", []).is_err());
+    assert!(
+        current
+            .execute("UPDATE filesystem_roots SET identity='other'", [])
+            .is_err()
+    );
+    current.execute(
+        "INSERT INTO private_roots(root,kind) VALUES ('generated-cache','cache')",
+        [],
+    )?;
+    let id = current.last_insert_rowid();
+    assert!(
+        id > 17,
+        "upgrade must preserve the private root ID sequence"
+    );
     Ok(())
 }
 

@@ -144,6 +144,8 @@ impl Drop for ShutdownOnDrop {
     }
 }
 
+pub mod configuration;
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Environment {
@@ -161,6 +163,7 @@ struct Configuration {
     system_settings_read_only: bool,
     #[serde(default)]
     services: crate::application::services::ServiceConfiguration,
+    cache: Option<super::cache::CacheConfiguration>,
     database: PathBuf,
     listen: SocketAddr,
     origin: String,
@@ -186,6 +189,7 @@ pub struct PreparedServer {
     secret: Option<ClientSecret>,
     tls: RustlsConfig,
     hostname: String,
+    configuration_source: configuration::ConfigurationSource,
 }
 
 impl PreparedServer {
@@ -276,7 +280,7 @@ impl PreparedServer {
             }
             require_local_disk(&std::fs::canonicalize(file)?)?;
         }
-        let store = Store::open_existing(&configuration.database)?;
+        let mut store = Store::open_existing(&configuration.database)?;
         let mut protected = vec![
             path.to_owned(),
             configuration.certificate_file.clone(),
@@ -325,7 +329,17 @@ impl PreparedServer {
             })
             .transpose()?;
         let tls = load_tls(&configuration, &hostname)?;
+        if let Some(cache) = &configuration.cache {
+            let protected = protected.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+            let cache = cache.open(&mut store, &protected)?;
+            store = store.with_cache(cache);
+        }
         Ok(Self {
+            configuration_source: configuration::ConfigurationSource::new(
+                path,
+                &bytes,
+                &configuration,
+            ),
             configuration,
             store,
             secret,
@@ -341,7 +355,9 @@ impl PreparedServer {
             secret,
             tls,
             hostname,
+            configuration_source,
         } = self;
+        let cache = store.cache();
         let mut api = match configuration.environment {
             Environment::Development => Api::development_with_services(
                 &configuration.origin,
@@ -377,6 +393,7 @@ impl PreparedServer {
             }
         };
         api = api.with_system_settings_read_only(configuration.system_settings_read_only)?;
+        api = api.with_backend_configuration(configuration_source)?;
         if let Some(root) = &configuration.browser_assets {
             let root = root.clone();
             let browser =
@@ -389,7 +406,10 @@ impl PreparedServer {
             let database = configuration.database.clone();
             let services = configuration.services.clone();
             let runtime = tokio::task::spawn_blocking(move || {
-                super::local_runtime::LocalRuntime::new(database, local, services)
+                Ok::<_, Error>(
+                    super::local_runtime::LocalRuntime::new(database, local, services)?
+                        .with_cache(cache),
+                )
             })
             .await
             .map_err(|_| Error::Internal("local runtime task failed"))??;

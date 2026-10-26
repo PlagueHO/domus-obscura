@@ -360,11 +360,24 @@ async fn explicit_development_bootstrap_accepts_developer_certificate_not_missin
     std::fs::write(&key, wrong_key)?;
     assert!(PreparedServer::load(&path).is_err());
     std::fs::write(&key, &material.key)?;
+    let cache_root = private::tempdir()?;
+    let mut configured = valid.clone();
+    configured["cache"] = json!({"root":cache_root.path()});
+    std::fs::write(&path, serde_json::to_vec(&configured)?)?;
+    drop(PreparedServer::load(&path)?);
+    assert!(cache_root.path().join("owner.lock").exists());
+    for root in [state.to_path_buf(), state.join("missing-cache")] {
+        let mut rejected = valid.clone();
+        rejected["cache"] = json!({"root":root});
+        std::fs::write(&path, serde_json::to_vec(&rejected)?)?;
+        assert!(PreparedServer::load(&path).is_err());
+    }
+    assert!(!state.join("missing-cache").exists());
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let address = listener.local_addr()?;
     drop(listener);
     let origin = format!("https://localhost:{}", address.port());
-    let mut runtime = valid;
+    let mut runtime = configured;
     runtime["listen"] = json!(address.to_string());
     runtime["origin"] = json!(origin);
     std::fs::write(&path, serde_json::to_vec(&runtime)?)?;
@@ -396,6 +409,75 @@ async fn explicit_development_bootstrap_accepts_developer_certificate_not_missin
     assert_eq!(response.status(), StatusCode::OK);
     let identity: Value = serde_json::from_slice(&response.bytes().await?)?;
     assert_eq!(identity["object_id"], "_anonymous");
+    let configuration_url = format!("{origin}/api/system/configuration");
+    let inspected = client.get(&configuration_url).send().await?;
+    assert_eq!(inspected.status(), StatusCode::OK);
+    let inspected_bytes = inspected.bytes().await?;
+    let inspected: Value = serde_json::from_slice(&inspected_bytes)?;
+    assert_eq!(inspected["active"]["environment"], "development");
+    assert_eq!(inspected["active"]["origin"], origin);
+    assert_eq!(inspected["active"]["cache"]["entries"], 64);
+    assert_eq!(inspected["active"]["private_key_file_configured"], true);
+    assert_eq!(inspected["active"]["tenant_id_configured"], false);
+    assert_eq!(inspected["restart_required"], false);
+    assert!(!String::from_utf8_lossy(&inspected_bytes).contains("private-key.pem"));
+    let active_revision = inspected["active_revision"].clone();
+    let mut changed = runtime.clone();
+    changed["system_settings_read_only"] = json!(false);
+    changed["origin"] = json!("https://localhost:9443");
+    let saved_bytes = serde_json::to_vec(&changed)?;
+    std::fs::write(&path, &saved_bytes)?;
+    let inspected: Value =
+        serde_json::from_slice(&client.get(&configuration_url).send().await?.bytes().await?)?;
+    assert_eq!(inspected["active_revision"], active_revision);
+    assert_eq!(inspected["active"]["origin"], origin);
+    assert_eq!(inspected["saved"]["origin"], "https://localhost:9443");
+    assert_eq!(inspected["restart_required"], true);
+    assert_eq!(inspected["saved_requires_validation"], true);
+    let policy: Value = serde_json::from_slice(
+        &client
+            .get(format!("{origin}/api/system/settings-policy"))
+            .send()
+            .await?
+            .bytes()
+            .await?,
+    )?;
+    assert_eq!(policy["read_only"], true);
+    assert_eq!(std::fs::read(&path)?, saved_bytes);
+    for method in [reqwest::Method::PUT, reqwest::Method::POST] {
+        assert_eq!(
+            client
+                .request(method, &configuration_url)
+                .header(header::ORIGIN, &origin)
+                .header("x-domus-csrf", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(saved_bytes.clone())
+                .send()
+                .await?
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
+    assert_eq!(
+        client
+            .get(&configuration_url)
+            .header(header::ORIGIN, "https://untrusted.invalid")
+            .send()
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    std::fs::write(&path, b"{broken")?;
+    let invalid = client.get(&configuration_url).send().await?;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        client
+            .get(format!("{origin}/api/session"))
+            .send()
+            .await?
+            .status(),
+        StatusCode::OK
+    );
     task.abort();
     assert!(task.await.is_err_and(|error| error.is_cancelled()));
     Ok(())

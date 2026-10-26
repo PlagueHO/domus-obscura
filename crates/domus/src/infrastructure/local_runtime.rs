@@ -13,6 +13,7 @@ pub struct LocalRuntime {
     database: PathBuf,
     configuration: LocalAcquisition,
     services: ServiceConfiguration,
+    cache: Option<Arc<dyn crate::application::services::cache::Cache>>,
     slot: Arc<Semaphore>,
     last_error: Arc<Mutex<Option<String>>>,
     stopping: AtomicBool,
@@ -34,6 +35,7 @@ mod tests {
                 acknowledge_plaintext_login: true,
             },
             services: Default::default(),
+            cache: None,
             slot: Arc::new(Semaphore::new(1)),
             last_error: Arc::new(Mutex::new(None)),
             stopping: AtomicBool::new(false),
@@ -192,6 +194,7 @@ impl LocalRuntime {
             database,
             configuration,
             services,
+            cache: None,
             slot: Arc::new(Semaphore::new(1)),
             last_error: Arc::new(Mutex::new(None)),
             stopping: AtomicBool::new(false),
@@ -208,6 +211,14 @@ impl LocalRuntime {
                 .map_err(|_| Error::Internal("local status lock failed"))?
                 .clone(),
         })
+    }
+
+    pub(crate) fn with_cache(
+        mut self,
+        cache: Option<Arc<dyn crate::application::services::cache::Cache>>,
+    ) -> Self {
+        self.cache = cache;
+        self
     }
 
     fn permit(&self) -> Result<OwnedSemaphorePermit> {
@@ -247,6 +258,7 @@ impl LocalRuntime {
         release_id: String,
     ) -> Result<super::soulseek::search::SearchReport> {
         let permit = self.permit()?;
+        let cache = self.cache.clone();
         let (config, database, services) = (
             self.configuration.clone(),
             self.database.clone(),
@@ -254,7 +266,7 @@ impl LocalRuntime {
         );
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            config.search(&database, services, release_id)
+            config.search_with_cache(&database, services, release_id, cache)
         })
         .await
         .map_err(|_| Error::Internal("source search task failed"))?
@@ -265,6 +277,7 @@ impl LocalRuntime {
         request: SourceFolderRequest,
     ) -> Result<super::worker::SourceFolderReport> {
         let permit = self.permit()?;
+        let cache = self.cache.clone();
         let (config, database, services) = (
             self.configuration.clone(),
             self.database.clone(),
@@ -272,7 +285,7 @@ impl LocalRuntime {
         );
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            config.folder(&database, services, request)
+            config.folder_with_cache(&database, services, request, cache)
         })
         .await
         .map_err(|_| Error::Internal("source folder task failed"))?

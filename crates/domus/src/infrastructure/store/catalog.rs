@@ -146,7 +146,7 @@ impl Store {
 
     pub fn catalog_cache(&mut self, query: &CatalogQuery) -> Result<Option<CatalogCache>> {
         let cached = self.peek_catalog_cache(query)?;
-        if cached.is_some() {
+        if cached.is_some() && self.cache.is_none() {
             self.connection.execute(
                 "UPDATE catalog_cache SET accessed_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE source = ?1",
                 [query.source()],
@@ -156,6 +156,21 @@ impl Store {
     }
 
     pub(crate) fn peek_catalog_cache(&self, query: &CatalogQuery) -> Result<Option<CatalogCache>> {
+        if let Some(cache) = &self.cache {
+            if !self.connection.is_autocommit() {
+                return Err(Error::Conflict(
+                    "shared catalog cache reads must remain outside database transactions".into(),
+                ));
+            }
+            let now: i64 = self
+                .connection
+                .query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            return shared_catalog(
+                cache.as_ref(),
+                query,
+                u64::try_from(now).map_err(|_| Error::Internal("catalog clock is invalid"))?,
+            );
+        }
         let cached = self
             .connection
             .query_row(
@@ -363,10 +378,10 @@ impl Store {
             "UPDATE catalog_gate SET lease_until_ms = 0, next_request_ms = ?1, failures = ?2, delay_seconds=?3 WHERE id = 1",
             params![if cooldown == u32::MAX { i64::MAX } else { now + i64::from(cooldown) * 1000 }, failures, cooldown],
         )?;
-        if let Some((request, fetched)) = caa {
+        if let Some((request, fetched)) = caa.filter(|_| self.cache.is_none()) {
             super::caa::persist_cache(&transaction, request, fetched, now)?;
         }
-        let cached = if let Some((source, body)) = success {
+        let cached = if let Some((source, body)) = success.filter(|_| self.cache.is_none()) {
             let fetched_at = now / 1000;
             let payload_sha256 = Sha256::digest(body).to_vec();
             transaction.execute(
@@ -401,6 +416,29 @@ impl Store {
         if cooldown != u32::MAX {
             super::catalog_clock::remaining(&self.path, generation, false, cooldown)?;
         }
+        if let (Some(cache), Some((request, fetched))) = (&self.cache, caa) {
+            super::caa::persist_shared(cache.as_ref(), request, fetched, now / 1000)?;
+        }
+        let cached = if let (Some(cache), Some((source, body))) = (&self.cache, success) {
+            let fetched_at = now / 1000;
+            let stored = u64::try_from(fetched_at)
+                .map_err(|_| Error::Internal("catalog clock is invalid"))?;
+            cache.put(
+                &catalog_key(source)?,
+                body,
+                stored,
+                stored
+                    .checked_add(86400)
+                    .ok_or(Error::Internal("catalog expiry exceeds its range"))?,
+            )?;
+            Some(CatalogCache {
+                body: body.to_vec(),
+                fetched_at,
+                payload_sha256: Sha256::digest(body).to_vec(),
+            })
+        } else {
+            cached
+        };
         Ok(CatalogCompletion {
             cache: cached,
             retry_after_seconds: cooldown,
@@ -409,9 +447,51 @@ impl Store {
     }
 }
 
+fn catalog_key(source: &str) -> Result<crate::application::services::cache::CacheKey> {
+    crate::application::services::cache::CacheKey::new("musicbrainz", "responses-v1", source)
+}
+
+fn shared_catalog(
+    cache: &dyn crate::application::services::cache::Cache,
+    query: &CatalogQuery,
+    now: u64,
+) -> Result<Option<CatalogCache>> {
+    use crate::application::services::cache::CacheLookup;
+    let hit = match cache.lookup(&catalog_key(query.source())?, now)? {
+        CacheLookup::Miss | CacheLookup::Expired => return Ok(None),
+        CacheLookup::Corrupt => {
+            return Err(Error::Conflict("catalog cache checksum failed".into()));
+        }
+        CacheLookup::Hit(hit) => hit,
+    };
+    if hit.bytes.is_empty()
+        || hit.bytes.len() > MAX_CATALOG_BODY
+        || hit.stored_at > now
+        || hit.expires_at <= now
+        || hit.expires_at
+            != hit
+                .stored_at
+                .checked_add(86400)
+                .ok_or(Error::Internal("catalog expiry exceeds its range"))?
+    {
+        return Err(Error::Conflict(
+            "catalog cache bounds or freshness are invalid".into(),
+        ));
+    }
+    query.validate_response(&hit.bytes)?;
+    Ok(Some(CatalogCache {
+        body: hit.bytes,
+        fetched_at: i64::try_from(hit.stored_at)
+            .map_err(|_| Error::Internal("catalog timestamp exceeds its range"))?,
+        payload_sha256: hit.sha256.to_vec(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::services::cache::{Cache, testing::MemoryCache};
+    use std::sync::{Arc, atomic::Ordering};
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -428,6 +508,129 @@ mod tests {
 
     fn body() -> Vec<u8> {
         br#"{"offset":0,"count":0,"artists":[]}"#.to_vec()
+    }
+
+    #[test]
+    fn shared_cache_catalog_preserves_exact_scope_freshness_and_read_only_access() -> TestResult {
+        let state = tempfile::tempdir()?;
+        let path = state.path().join("state.db");
+        let shared = Arc::new(MemoryCache::default());
+        let mut store = Store::open(&path)?.with_cache(shared.clone());
+        let query = CatalogQuery::artists("generated", 0, 1)?;
+        let request = permit(&mut store)?;
+        let completed = store.complete_catalog_request(request, 7, Some((&query, &body())))?;
+        let saved = completed.cache.ok_or("missing returned cache")?;
+        assert_eq!(saved.body, body());
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM catalog_cache", [], |row| row
+                    .get::<_, i64>(0))?,
+            0
+        );
+        assert_eq!(
+            store
+                .catalog_cache(&query)?
+                .ok_or("missing shared cache")?
+                .payload_sha256,
+            saved.payload_sha256
+        );
+        let mut read = Store::open_read_current(&path)?.with_cache(shared.clone());
+        assert_eq!(
+            read.catalog_cache(&query)?
+                .ok_or("missing read-only cache")?
+                .body,
+            body()
+        );
+        assert!(
+            read.catalog_cache(&CatalogQuery::artists("different", 0, 1)?)?
+                .is_none()
+        );
+        assert!(
+            read.catalog_cache(&CatalogQuery::artists("generated", 1, 1)?)?
+                .is_none()
+        );
+        let now = u64::try_from(saved.fetched_at)?;
+        assert!(shared_catalog(shared.as_ref(), &query, now + 86399)?.is_some());
+        assert!(shared_catalog(shared.as_ref(), &query, now + 86400)?.is_none());
+        assert!(shared_catalog(shared.as_ref(), &query, now - 1)?.is_none());
+        assert!(
+            Store::open_read_snapshot(&path)?
+                .with_cache(shared.clone())
+                .catalog_cache(&query)
+                .is_err()
+        );
+        assert!(shared.invalidate(&catalog_key(query.source())?)?);
+        assert!(store.catalog_cache(&query)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn shared_cache_catalog_errors_do_not_fall_back_or_reset_the_consumed_budget() -> TestResult {
+        let state = tempfile::tempdir()?;
+        let path = state.path().join("state.db");
+        let mut store = Store::open(&path)?;
+        let query = CatalogQuery::artists("generated", 0, 1)?;
+        let first = permit(&mut store)?;
+        store.complete_catalog_request(first, 1, Some((&query, &body())))?;
+        let shared = Arc::new(MemoryCache::default());
+        let mut store = store.with_cache(shared.clone());
+        assert!(store.catalog_cache(&query)?.is_none());
+        shared.fail_put.store(true, Ordering::SeqCst);
+        let next = permit(&mut store)?;
+        assert!(
+            store
+                .complete_catalog_request(next, 60, Some((&query, &body())))
+                .is_err()
+        );
+        let (lease, delay): (i64, u32) = store.connection.query_row(
+            "SELECT lease_until_ms,delay_seconds FROM catalog_gate WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(lease, 0);
+        assert_eq!(delay, 60);
+        assert!(store.claim_catalog_request().is_err());
+        assert!(store.catalog_cache(&query)?.is_none());
+        shared.fail_put.store(false, Ordering::SeqCst);
+        let next = permit(&mut store)?;
+        store.complete_catalog_request(next, 1, Some((&query, &body())))?;
+        let key = catalog_key(query.source())?;
+        {
+            let mut entries = shared.entries.lock().map_err(|_| "cache lock")?;
+            let hit = entries.get_mut(key.digest()).ok_or("cache entry missing")?;
+            hit.bytes[0] ^= 1;
+        }
+        assert!(store.catalog_cache(&query).is_err());
+        let puts = shared.puts.load(Ordering::SeqCst);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM catalog_cache", [], |row| row
+                    .get::<_, i64>(0))?,
+            1
+        );
+        assert_eq!(shared.puts.load(Ordering::SeqCst), puts);
+        Ok(())
+    }
+
+    #[test]
+    fn shared_cache_catalog_rejects_wrong_response_or_extended_expiry() -> TestResult {
+        let state = tempfile::tempdir()?;
+        let shared = Arc::new(MemoryCache::default());
+        let mut store = Store::open(&state.path().join("state.db"))?.with_cache(shared.clone());
+        let query = CatalogQuery::artists("generated", 0, 1)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let key = catalog_key(query.source())?;
+        shared.put(&key, b"{}", now, now + 86400)?;
+        assert!(store.catalog_cache(&query).is_err());
+        shared.put(&key, &body(), now, now + 86401)?;
+        assert!(store.catalog_cache(&query).is_err());
+        shared.put(&key, &body(), now, now + 86400)?;
+        assert!(store.catalog_cache(&query)?.is_some());
+        Ok(())
     }
 
     #[test]

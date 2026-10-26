@@ -22,6 +22,18 @@ pub struct ArtworkCandidate {
     pub approved_at: Option<i64>,
 }
 
+struct ArtworkPreview<'a> {
+    image_id: &'a str,
+    input: &'a [u8],
+    background: Option<[u8; 3]>,
+    evidence: Option<&'a super::caa::PreparedCaa>,
+    jpeg: CoverJpeg,
+}
+
+#[cfg(test)]
+#[path = "artwork/retrieval_tests.rs"]
+mod retrieval_tests;
+
 fn conflict() -> Error {
     Error::Conflict("artwork needs an exact current plan and explicit cover approval".into())
 }
@@ -158,11 +170,71 @@ impl Store {
     /// Bind browser provider work to a current approved, writable plan before
     /// network I/O. Call again after I/O; this does not grant cover approval.
     pub fn artwork_provider_release(&self, job: i64, version: i64) -> Result<String> {
+        Ok(self.artwork_provider_options(job, version)?.0)
+    }
+
+    pub(crate) fn artwork_provider_options(
+        &self,
+        job: i64,
+        version: i64,
+    ) -> Result<(String, Option<crate::domain::ArtworkSize>)> {
         let plan = writable_plan(&self.connection, job, version)?;
         if plan.approved_at.is_none() {
             return Err(conflict());
         }
-        Ok(plan.plan.edition.release_id)
+        Ok((
+            plan.plan.edition.release_id,
+            plan.plan.settings.artwork_size,
+        ))
+    }
+
+    /// Save only a result bound to the fresh cached original and frozen target.
+    /// Processing failures use the existing typed, plan-bound question flow.
+    pub(crate) fn prepare_retrieved_caa_artwork_or_ask(
+        &mut self,
+        job: i64,
+        version: i64,
+        retrieved: Result<crate::application::services::images::RetrievedImage>,
+    ) -> Result<ArtworkCandidate> {
+        let result = retrieved.and_then(|retrieved| {
+            let (release, size) = self.artwork_provider_options(job, version)?;
+            let image = retrieved.request.image_id.as_deref().ok_or_else(conflict)?;
+            let target = size.map_or(1200, crate::domain::ArtworkSize::target_side);
+            if retrieved.request.provider != "cover-art-archive"
+                || retrieved.request.release.provider != "musicbrainz"
+                || retrieved.request.release.id != release
+                || retrieved.options.size != size
+                || retrieved.image.profile != COVER_PROFILE
+                || retrieved.image.width > target
+                || retrieved.image.height > target
+            {
+                return Err(conflict());
+            }
+            let evidence = self.cached_caa_cover(&release, image)?;
+            let original: [u8; 32] = Sha256::digest(&evidence.bytes).into();
+            if original != retrieved.original_sha256 {
+                return Err(Error::Conflict(
+                    "retrieved image differs from fresh CAA evidence".into(),
+                ));
+            }
+            let jpeg = CoverJpeg::restore(
+                retrieved.image.jpeg,
+                retrieved.image.sha256,
+                (retrieved.image.width, retrieved.image.height),
+            )?;
+            self.persist_artwork_input(
+                job,
+                version,
+                ArtworkPreview {
+                    image_id: image,
+                    input: &evidence.bytes,
+                    background: retrieved.options.background,
+                    evidence: Some(&evidence),
+                    jpeg,
+                },
+            )
+        });
+        self.artwork_preparation_result(job, version, result)
     }
 
     pub fn prepare_local_artwork_or_ask(
@@ -311,7 +383,52 @@ impl Store {
         evidence: Option<&super::caa::PreparedCaa>,
     ) -> Result<ArtworkCandidate> {
         let current = writable_plan(&self.connection, job, version)?;
-        let jpeg = normalize_cover_for_size(input, background, current.plan.settings.artwork_size)?;
+        let jpeg = if let Some(cache) = &self.cache {
+            if !self.connection.is_autocommit() {
+                return Err(Error::Conflict(
+                    "shared image cache work must remain outside database transactions".into(),
+                ));
+            }
+            let now: i64 = self
+                .connection
+                .query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            let now = u64::try_from(now).map_err(|_| conflict())?;
+            crate::infrastructure::artwork::normalize_cover_cached(
+                cache.as_ref(),
+                input,
+                background,
+                current.plan.settings.artwork_size,
+                now,
+            )?
+        } else {
+            normalize_cover_for_size(input, background, current.plan.settings.artwork_size)?
+        };
+        self.persist_artwork_input(
+            job,
+            version,
+            ArtworkPreview {
+                image_id,
+                input,
+                background,
+                evidence,
+                jpeg,
+            },
+        )
+    }
+
+    fn persist_artwork_input(
+        &mut self,
+        job: i64,
+        version: i64,
+        preview: ArtworkPreview<'_>,
+    ) -> Result<ArtworkCandidate> {
+        let ArtworkPreview {
+            image_id,
+            input,
+            background,
+            evidence,
+            jpeg,
+        } = preview;
         let input_hash: [u8; 32] = Sha256::digest(input).into();
         let background = serde_json::to_string(&background)?;
         let transaction = self

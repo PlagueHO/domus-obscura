@@ -261,13 +261,14 @@ impl SearchConfiguration {
     ) -> Result<(Self, crate::domain::CatalogRelease, Credentials)> {
         let config: Self = serde_json::from_slice(&read_local(path, 16384, false)?)
             .map_err(|_| Error::InvalidInput("invalid source-read configuration".into()))?;
-        Self::validate(config, &[path], folder_query)
+        Self::validate(config, &[path], folder_query, None)
     }
 
     fn validate(
         config: Self,
         protected: &[&Path],
         folder_query: bool,
+        cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
     ) -> Result<(Self, crate::domain::CatalogRelease, Credentials)> {
         config.services.validate_builtins()?;
         config
@@ -291,9 +292,17 @@ impl SearchConfiguration {
         let mut files = protected.to_vec();
         files.push(&config.credentials_file);
         protect_files(&store, &files)?;
-        let cache = store.peek_catalog_cache(&query)?.ok_or_else(|| {
+        let cached = if let Some(cache) = cache {
+            drop(store);
+            Store::open_read_current(&config.database)?
+                .with_cache(cache)
+                .peek_catalog_cache(&query)?
+        } else {
+            store.peek_catalog_cache(&query)?
+        };
+        let cache = cached.ok_or_else(|| {
             Error::Conflict(
-                "load the exact MusicBrainz release with catalog-release before source reads"
+                "load the exact MusicBrainz release through the selected catalog cache before source reads"
                     .into(),
             )
         })?;
@@ -306,6 +315,117 @@ impl SearchConfiguration {
 fn metadata_session(credentials: Credentials, server: SocketAddrV4) -> Result<SoulseekSession> {
     let socket = TcpStream::connect_timeout(&server.into(), Duration::from_secs(10))?;
     SoulseekSession::login(socket, &credentials.username, &credentials.password)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::application::services::cache::{Cache, CacheKey, testing::MemoryCache};
+    use std::sync::Arc;
+
+    #[test]
+    fn shared_cache_source_metadata_uses_the_host_cache_without_sqlite_fallback_or_network()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let state = crate::infrastructure::permissions::private_test_directory()?;
+        let database = state.path().join("state.db");
+        let store = Store::open(&database)?;
+        let credentials = state.path().join("credentials.json");
+        std::fs::write(
+            &credentials,
+            br#"{"username":"generated-fixture","password":"generated-only"}"#,
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let release = "20000000-0000-4000-8000-000000000001";
+        let artist = "10000000-0000-4000-8000-000000000001";
+        let body = serde_json::to_vec(&serde_json::json!({
+            "id":release,"title":"Generated album",
+            "artist-credit":[{"name":"Generated artist","artist":{"id":artist,"name":"Generated artist"}}],
+            "release-group":{"id":"30000000-0000-4000-8000-000000000001"},
+            "media":[{"position":1,"track-count":1,"tracks":[{
+                "id":"40000000-0000-4000-8000-000000000001","position":1,"number":"1","title":"Generated track",
+                "artist-credit":[{"name":"Generated artist","artist":{"id":artist,"name":"Generated artist"}}],
+                "recording":{"id":"50000000-0000-4000-8000-000000000001","video":false}
+            }]}]
+        }))?;
+        let shared = Arc::new(MemoryCache::default());
+        let query = CatalogQuery::release(release)?;
+        let key = CacheKey::new("musicbrainz", "responses-v1", query.source())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        shared.put(&key, &body, now, now + 86400)?;
+        let configuration = LocalAcquisition {
+            staging_root: state.path().join("unused-staging"),
+            credentials_file: credentials.clone(),
+            server: "8.8.8.8:2242".parse()?,
+            acknowledge_plaintext_login: true,
+        };
+        let (_, exact, _) = configuration.metadata(
+            &database,
+            Default::default(),
+            release.into(),
+            None,
+            Some(shared.clone()),
+        )?;
+        assert_eq!(exact.summary.id, release);
+        assert_eq!(exact.summary.title, "Generated album");
+        assert_eq!(exact.media[0].tracks.len(), 1);
+        assert!(
+            configuration
+                .metadata(&database, Default::default(), release.into(), None, None)
+                .is_err()
+        );
+        assert!(shared.invalidate(&key)?);
+        assert!(
+            configuration
+                .metadata(
+                    &database,
+                    Default::default(),
+                    release.into(),
+                    None,
+                    Some(shared.clone())
+                )
+                .is_err()
+        );
+        assert_eq!(store.catalog_status()?.failures, 0);
+        assert_eq!(
+            std::fs::read(&credentials)?,
+            br#"{"username":"generated-fixture","password":"generated-only"}"#
+        );
+        std::fs::write(&credentials, b"invalid generated credentials")?;
+        assert!(matches!(
+            configuration.metadata(
+                &database, Default::default(), release.into(), None, Some(shared.clone())
+            ),
+            Err(Error::Conflict(message)) if message.contains("selected catalog cache")
+        ));
+        shared.put(&key, &body, now, now + 86400)?;
+        shared
+            .entries
+            .lock()
+            .map_err(|_| "test cache lock")?
+            .get_mut(key.digest())
+            .ok_or("missing generated cache entry")?
+            .bytes[0] ^= 1;
+        assert!(matches!(
+            configuration.metadata(
+                &database, Default::default(), release.into(), None, Some(shared.clone())
+            ),
+            Err(Error::Conflict(message)) if message.contains("checksum")
+        ));
+        let mut disabled = ServiceConfiguration::default();
+        disabled.acquisition.clear();
+        assert!(
+            configuration
+                .metadata(&database, disabled, release.into(), None, Some(shared))
+                .is_err()
+        );
+        Ok(())
+    }
 }
 
 fn source_token() -> Result<u32> {
@@ -744,6 +864,7 @@ impl LocalAcquisition {
         services: ServiceConfiguration,
         release_id: String,
         folder: Option<FolderSelection>,
+        cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
     ) -> Result<(
         SearchConfiguration,
         crate::domain::CatalogRelease,
@@ -762,6 +883,7 @@ impl LocalAcquisition {
             },
             &[],
             is_folder,
+            cache,
         )
     }
 
@@ -771,7 +893,18 @@ impl LocalAcquisition {
         services: ServiceConfiguration,
         release_id: String,
     ) -> Result<super::soulseek::search::SearchReport> {
-        let (config, release, credentials) = self.metadata(database, services, release_id, None)?;
+        self.search_with_cache(database, services, release_id, None)
+    }
+
+    pub(crate) fn search_with_cache(
+        &self,
+        database: &Path,
+        services: ServiceConfiguration,
+        release_id: String,
+        cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
+    ) -> Result<super::soulseek::search::SearchReport> {
+        let (config, release, credentials) =
+            self.metadata(database, services, release_id, None, cache)?;
         let query = format!("{} {}", release.summary.artist, release.summary.title);
         if query.len() > 256 || query.chars().any(char::is_control) {
             return Err(Error::InvalidInput(
@@ -792,6 +925,16 @@ impl LocalAcquisition {
         services: ServiceConfiguration,
         request: SourceFolderRequest,
     ) -> Result<SourceFolderReport> {
+        self.folder_with_cache(database, services, request, None)
+    }
+
+    pub(crate) fn folder_with_cache(
+        &self,
+        database: &Path,
+        services: ServiceConfiguration,
+        request: SourceFolderRequest,
+        cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
+    ) -> Result<SourceFolderReport> {
         let (config, release, credentials) = self.metadata(
             database,
             services,
@@ -801,6 +944,7 @@ impl LocalAcquisition {
                 remote_folder: request.remote_folder,
                 format: request.format,
             }),
+            cache,
         )?;
         PreparedFolder {
             credentials,

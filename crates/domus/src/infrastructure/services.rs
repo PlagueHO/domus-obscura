@@ -252,6 +252,7 @@ pub struct CaaArtworkService {
     database: std::path::PathBuf,
     client: super::caa::CaaHttpClient,
     slots: Arc<Semaphore>,
+    cache: Option<Arc<dyn crate::application::services::cache::Cache>>,
 }
 
 impl CaaArtworkService {
@@ -260,7 +261,16 @@ impl CaaArtworkService {
             database: database.into(),
             client,
             slots: Arc::new(Semaphore::new(4)),
+            cache: None,
         }
+    }
+
+    pub fn with_cache(
+        mut self,
+        cache: Arc<dyn crate::application::services::cache::Cache>,
+    ) -> Self {
+        self.cache = Some(cache);
+        self
     }
 }
 
@@ -292,11 +302,15 @@ impl ArtworkProvider for CaaArtworkService {
                 .map_err(|_| Error::Busy("artwork service is busy; retry later"))?;
             let path = self.database.clone();
             let client = self.client.clone();
+            let cache = self.cache.clone();
             // CAA's existing redirect/budget orchestration includes SQLite.
             // Keep that work on a blocking thread with an independent connection.
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let mut store = Store::open_existing(&path)?;
+                let mut store = Store::open_current_existing(&path)?;
+                if let Some(cache) = cache {
+                    store = store.with_cache(cache);
+                }
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?;
@@ -373,7 +387,8 @@ impl ArtworkProvider for CaaArtworkService {
 /// paths, provider credentials, arbitrary URLs or filesystem destinations.
 pub struct ServiceHost {
     pub catalog: CatalogService,
-    pub artwork: ArtworkService,
+    pub artwork: Arc<ArtworkService>,
+    pub images: crate::application::services::images::ImageService,
     pub musicbrainz: Arc<MusicBrainzService>,
     pub(crate) database: ServiceStore,
 }
@@ -397,19 +412,26 @@ impl ServiceHost {
         client: MusicBrainzClient,
     ) -> Result<Self> {
         configuration.validate_builtins()?;
-        let artwork = Arc::new(CaaArtworkService::new(
-            store.database_path(),
-            super::caa::CaaHttpClient::new()?,
-        ));
+        let processor = Arc::new(super::artwork::NativeImageProcessor::new(store.cache()));
+        let mut artwork =
+            CaaArtworkService::new(store.database_path(), super::caa::CaaHttpClient::new()?);
+        if let Some(cache) = store.cache() {
+            artwork = artwork.with_cache(cache);
+        }
+        let artwork = Arc::new(artwork);
         let database = ServiceStore::new(store);
         let musicbrainz = Arc::new(MusicBrainzService::new(
             database.clone(),
             client,
             configuration.clone(),
         ));
+        let artwork = Arc::new(ArtworkService::new(configuration.clone(), vec![artwork])?);
+        let images =
+            crate::application::services::images::ImageService::new(artwork.clone(), processor);
         Ok(Self {
             catalog: CatalogService::new(configuration.clone(), vec![musicbrainz.clone()])?,
-            artwork: ArtworkService::new(configuration, vec![artwork])?,
+            artwork,
+            images,
             musicbrainz,
             database,
         })
@@ -422,6 +444,7 @@ struct HostConfiguration {
     database: std::path::PathBuf,
     #[serde(default)]
     services: ServiceConfiguration,
+    cache: Option<super::cache::CacheConfiguration>,
 }
 
 /// CLI host configuration is local operator input, not part of tool arguments.
@@ -442,7 +465,12 @@ fn open_host(host: HostConfiguration, files: &[&std::path::Path]) -> Result<Serv
     let store = Store::open_read_snapshot(&host.database)?;
     super::local_file::protect_files(&store, files)?;
     drop(store);
-    ServiceHost::new(Store::open_current_existing(&host.database)?, host.services)
+    let mut store = Store::open_current_existing(&host.database)?;
+    if let Some(configuration) = host.cache {
+        let cache = configuration.open(&mut store, files)?;
+        store = store.with_cache(cache);
+    }
+    ServiceHost::new(store, host.services)
 }
 
 /// Open current operator-owned state without creating a database or migrating it.

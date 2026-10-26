@@ -18,6 +18,71 @@ const MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 const OUTPUT_SIDE: u32 = 1200;
 pub(crate) const COVER_PROFILE: u8 = 1;
 
+/// One bounded native processor for remote images and reusable image services.
+pub struct NativeImageProcessor {
+    cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+impl NativeImageProcessor {
+    pub fn new(
+        cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
+    ) -> Self {
+        Self {
+            cache,
+            slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+        }
+    }
+}
+
+impl crate::application::services::images::ImageProcessor for NativeImageProcessor {
+    fn process(
+        &self,
+        original: Vec<u8>,
+        options: crate::application::services::images::ImageOptions,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<crate::application::services::images::ProcessedImage>,
+    > {
+        Box::pin(async move {
+            let permit = self
+                .slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Error::Busy("image processor is busy; retry later"))?;
+            let cache = self.cache.clone();
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let jpeg = if let Some(cache) = cache {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_| Error::Internal("image cache clock is invalid"))?
+                        .as_secs();
+                    normalize_cover_cached(
+                        cache.as_ref(),
+                        &original,
+                        options.background,
+                        options.size,
+                        now,
+                    )?
+                } else {
+                    normalize_cover_for_size(&original, options.background, options.size)?
+                };
+                let (width, height) = jpeg.dimensions();
+                Ok(crate::application::services::images::ProcessedImage {
+                    sha256: *jpeg.sha256(),
+                    width,
+                    height,
+                    profile: COVER_PROFILE,
+                    jpeg: jpeg.into_bytes(),
+                })
+            })
+            .await
+            .map_err(|_| Error::Internal("image processor task failed"))?
+        })
+    }
+}
+
 /// One immutable encoding for both embedded covers and folder.jpg. Callers
 /// must not independently resize or re-encode this payload for each track.
 pub struct CoverJpeg {
@@ -80,6 +145,65 @@ impl CoverJpeg {
 /// background return errors instead of substituting content.
 pub fn normalize_cover(input: &[u8], background: Option<[u8; 3]>) -> Result<CoverJpeg> {
     normalize_cover_for_size(input, background, None)
+}
+
+/// Reuse only a strictly validated JPEG for the exact original and processing
+/// choices. This evictable copy is never an approval or retained preview.
+pub(crate) fn normalize_cover_cached(
+    cache: &dyn crate::application::services::cache::Cache,
+    input: &[u8],
+    background: Option<[u8; 3]>,
+    size: Option<crate::domain::ArtworkSize>,
+    now: u64,
+) -> Result<CoverJpeg> {
+    use crate::application::services::cache::{CacheKey, CacheLookup};
+    if input.is_empty() || input.len() > MAX_COMPRESSED_BYTES {
+        return Err(invalid("cover must be nonempty and no larger than 8 MiB"));
+    }
+    let target = size.map_or(OUTPUT_SIDE, crate::domain::ArtworkSize::target_side);
+    let key = CacheKey::new(
+        "domus-image",
+        "jpeg-variants-v1",
+        &format!(
+            "{:x}:{target}:{COVER_PROFILE}:{}",
+            Sha256::digest(input),
+            serde_json::to_string(&background)?
+        ),
+    )?;
+    match cache.lookup(&key, now)? {
+        CacheLookup::Corrupt => return Err(invalid("cached cover variant is corrupt")),
+        CacheLookup::Hit(hit) => {
+            if hit.bytes.len() <= 16 || &hit.bytes[..8] != b"DOMIMG1\n" {
+                return Err(invalid("cached cover variant header is invalid"));
+            }
+            let dimension = |offset| -> Result<u32> {
+                Ok(u32::from_le_bytes(
+                    hit.bytes[offset..offset + 4]
+                        .try_into()
+                        .map_err(|_| invalid("cached cover variant dimensions are invalid"))?,
+                ))
+            };
+            let dimensions = (dimension(8)?, dimension(12)?);
+            if dimensions.0 > target || dimensions.1 > target {
+                return Err(invalid("cached cover variant exceeds its target"));
+            }
+            let bytes = hit.bytes[16..].to_vec();
+            let sha256 = Sha256::digest(&bytes).into();
+            return CoverJpeg::restore(bytes, sha256, dimensions);
+        }
+        CacheLookup::Miss | CacheLookup::Expired => {}
+    }
+    let jpeg = normalize_cover_for_size(input, background, size)?;
+    let mut bytes = Vec::with_capacity(16 + jpeg.bytes().len());
+    bytes.extend_from_slice(b"DOMIMG1\n");
+    bytes.extend_from_slice(&jpeg.dimensions().0.to_le_bytes());
+    bytes.extend_from_slice(&jpeg.dimensions().1.to_le_bytes());
+    bytes.extend_from_slice(jpeg.bytes());
+    let expires = now
+        .checked_add(86400)
+        .ok_or_else(|| invalid("cached cover variant expiry exceeds its range"))?;
+    cache.put(&key, &bytes, now, expires)?;
+    Ok(jpeg)
 }
 
 pub fn normalize_cover_for_size(
@@ -416,6 +540,135 @@ impl Write for BoundedImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::services::cache::{Cache, testing::MemoryCache};
+    use crate::domain::ArtworkSize;
+    use std::sync::atomic::Ordering;
+
+    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    fn png(width: u32, height: u32) -> TestResult<Vec<u8>> {
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(width, height).write_to(&mut bytes, ImageFormat::Png)?;
+        Ok(bytes.into_inner())
+    }
+
+    #[test]
+    fn shared_cache_variants_preserve_all_targets_aspect_ratio_and_no_enlargement() -> TestResult {
+        let cache = MemoryCache::default();
+        for (width, height) in [(1000, 1000), (1000, 500), (100, 50)] {
+            let original = png(width, height)?;
+            for size in [
+                ArtworkSize::Small,
+                ArtworkSize::Recommended,
+                ArtworkSize::Large,
+            ] {
+                let normalized = normalize_cover_cached(&cache, &original, None, Some(size), 10)?;
+                let bound = size.target_side();
+                let scale = width.min(bound);
+                assert_eq!(normalized.dimensions(), (scale, height * scale / width));
+                let direct = normalize_cover_for_size(&original, None, Some(size))?;
+                assert_eq!(normalized.bytes(), direct.bytes());
+                let puts = cache.puts.load(Ordering::SeqCst);
+                let reused = normalize_cover_cached(&cache, &original, None, Some(size), 11)?;
+                assert_eq!(reused.bytes(), normalized.bytes());
+                assert_eq!(cache.puts.load(Ordering::SeqCst), puts);
+            }
+        }
+        assert_eq!(cache.puts.load(Ordering::SeqCst), 9);
+        Ok(())
+    }
+
+    #[test]
+    fn shared_cache_variants_separate_background_and_input_without_hiding_errors() -> TestResult {
+        let cache = MemoryCache::default();
+        let mut original = Cursor::new(Vec::new());
+        DynamicImage::new_rgba8(32, 16).write_to(&mut original, ImageFormat::Png)?;
+        let original = original.into_inner();
+        assert!(
+            normalize_cover_cached(&cache, &original, None, Some(ArtworkSize::Small), 1).is_err()
+        );
+        let dark = normalize_cover_cached(
+            &cache,
+            &original,
+            Some([0, 0, 0]),
+            Some(ArtworkSize::Small),
+            1,
+        )?;
+        let light = normalize_cover_cached(
+            &cache,
+            &original,
+            Some([255, 255, 255]),
+            Some(ArtworkSize::Small),
+            1,
+        )?;
+        assert_ne!(dark.sha256(), light.sha256());
+        assert_eq!(cache.puts.load(Ordering::SeqCst), 2);
+        let opaque = png(32, 16)?;
+        normalize_cover_cached(&cache, &opaque, None, None, 1)?;
+        assert_eq!(cache.puts.load(Ordering::SeqCst), 3);
+        assert_eq!(cache.evict_expired(86401, 10)?, 3);
+        normalize_cover_cached(&cache, &opaque, None, None, 86401)?;
+        assert_eq!(cache.puts.load(Ordering::SeqCst), 4);
+        {
+            let mut entries = cache.entries.lock().map_err(|_| "cache lock")?;
+            let hit = entries.values_mut().next().ok_or("variant missing")?;
+            hit.bytes[0] ^= 1;
+        }
+        assert!(normalize_cover_cached(&cache, &opaque, None, None, 86402).is_err());
+        assert_eq!(cache.puts.load(Ordering::SeqCst), 4);
+        cache.entries.lock().map_err(|_| "cache lock")?.clear();
+        cache.fail_put.store(true, Ordering::SeqCst);
+        assert!(normalize_cover_cached(&cache, &opaque, None, None, 86402).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn shared_cache_variants_validate_headers_dimensions_jpeg_and_profile_separation() -> TestResult
+    {
+        use crate::application::services::cache::{CacheKey, CacheLookup};
+        let cache = MemoryCache::default();
+        let input = png(32, 16)?;
+        normalize_cover_cached(&cache, &input, None, Some(ArtworkSize::Small), 1)?;
+        let next_profile = CacheKey::new(
+            "domus-image",
+            "jpeg-variants-v1",
+            &format!(
+                "{:x}:200:{}:null",
+                Sha256::digest(&input),
+                COVER_PROFILE + 1
+            ),
+        )?;
+        assert!(matches!(cache.lookup(&next_profile, 2)?, CacheLookup::Miss));
+        let saved = cache
+            .entries
+            .lock()
+            .map_err(|_| "cache lock")?
+            .values()
+            .next()
+            .ok_or("variant missing")?
+            .clone();
+        for mutation in 0..5 {
+            {
+                let mut entries = cache.entries.lock().map_err(|_| "cache lock")?;
+                let entry = entries.values_mut().next().ok_or("variant missing")?;
+                *entry = saved.clone();
+                match mutation {
+                    0 => entry.bytes.truncate(8),
+                    1 => entry.bytes[0] ^= 1,
+                    2 => entry.bytes[8..12].copy_from_slice(&201u32.to_le_bytes()),
+                    3 => entry.bytes[8..12].copy_from_slice(&31u32.to_le_bytes()),
+                    _ => entry.bytes[16] = 0,
+                }
+                entry.sha256 = Sha256::digest(&entry.bytes).into();
+            }
+            assert!(
+                normalize_cover_cached(&cache, &input, None, Some(ArtworkSize::Small), 2).is_err(),
+                "mutation {mutation}"
+            );
+            assert_eq!(cache.puts.load(Ordering::SeqCst), 1);
+        }
+        Ok(())
+    }
 
     #[test]
     fn artwork_encoder_buffer_enforces_exact_limit() -> std::io::Result<()> {

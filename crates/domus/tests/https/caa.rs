@@ -22,6 +22,176 @@ fn listing() -> Value {
 }
 
 #[tokio::test]
+async fn shared_cache_caa_service_reopens_file_responses_without_sqlite_bodies_or_new_requests()
+-> TestResult {
+    use domus::application::services::cache::{Cache, CacheKey};
+    use domus::application::services::images::{ImageOptions, ImageService};
+    use domus::application::services::{
+        ArtworkContent, ArtworkProvider, ArtworkRequest, EntityRef,
+    };
+    use domus::application::services::{ArtworkService, ServiceConfiguration};
+    use domus::domain::ArtworkSize;
+    use domus::infrastructure::artwork::NativeImageProcessor;
+    use domus::infrastructure::cache::{CacheLimits, FileCache};
+    use domus::infrastructure::services::CaaArtworkService;
+    let material = certificates(CAA)?;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(1000, 500).write_to(&mut png, image::ImageFormat::Png)?;
+    let png = png.into_inner();
+    let router = Router::new()
+        .route(
+            &format!("/release/{RELEASE}/"),
+            get({
+                let hits = hits.clone();
+                move || {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    async { Json(listing()) }
+                }
+            }),
+        )
+        .route(
+            &format!("/release/{RELEASE}/{IMAGE}"),
+            get({
+                let hits = hits.clone();
+                let png = png.clone();
+                move || {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let png = png.clone();
+                    async { ([(header::CONTENT_TYPE, "image/png")], png) }
+                }
+            }),
+        );
+    let server = FixtureServer::start(router, &material, CAA)?;
+    let client = CaaHttpClient::from_builder(
+        reqwest::Client::builder()
+            .tls_certs_only([reqwest::Certificate::from_pem(material.ca.as_bytes())?])
+            .resolve(CAA, server.address),
+    )?;
+    let state = private::tempdir()?;
+    let cache_root = private::tempdir()?;
+    let database = state.path().join("state.db");
+    let mut store = Store::open(&database)?;
+    let cache = Arc::new(FileCache::open(
+        &mut store,
+        cache_root.path(),
+        CacheLimits::default(),
+    )?);
+    let service = CaaArtworkService::new(&database, client.clone()).with_cache(cache.clone());
+    let request = ArtworkRequest {
+        provider: "cover-art-archive".into(),
+        release: EntityRef {
+            provider: "musicbrainz".into(),
+            id: RELEASE.into(),
+        },
+        image_id: Some(IMAGE.into()),
+    };
+    let first = service.fetch(request.clone()).await?;
+    let ArtworkContent::Image { bytes, sha256 } = first.content else {
+        return Err("missing original".into());
+    };
+    assert_eq!(bytes, png);
+    assert_eq!(sha256, format!("{:x}", Sha256::digest(&png)));
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    let raw = rusqlite::Connection::open(&database)?;
+    assert_eq!(
+        raw.query_row("SELECT count(*) FROM caa_cache", [], |row| row
+            .get::<_, i64>(0))?,
+        0
+    );
+    let generation: i64 = raw.query_row(
+        "SELECT generation FROM catalog_gate WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(generation, 2);
+    drop(service);
+    let reopened_cache = Arc::new(FileCache::open(
+        &mut store,
+        cache_root.path(),
+        CacheLimits::default(),
+    )?);
+    let service =
+        Arc::new(CaaArtworkService::new(&database, client).with_cache(reopened_cache.clone()));
+    assert!(matches!(
+        service.fetch(request.clone()).await?.content,
+        ArtworkContent::Image { .. }
+    ));
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        raw.query_row(
+            "SELECT generation FROM catalog_gate WHERE id=1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        generation
+    );
+    let artwork = Arc::new(ArtworkService::new(
+        ServiceConfiguration::default(),
+        vec![service.clone()],
+    )?);
+    let images = ImageService::new(
+        artwork,
+        Arc::new(NativeImageProcessor::new(Some(reopened_cache))),
+    );
+    for size in [
+        ArtworkSize::Small,
+        ArtworkSize::Recommended,
+        ArtworkSize::Large,
+    ] {
+        let options = ImageOptions {
+            size: Some(size),
+            background: None,
+        };
+        let prepared = images
+            .retrieve(request.clone(), options)
+            .await?
+            .ok_or("missing image")?;
+        assert_eq!(
+            prepared.original_sha256,
+            <[u8; 32]>::from(Sha256::digest(&png))
+        );
+        assert_eq!(
+            (prepared.image.width, prepared.image.height),
+            (size.target_side(), size.target_side() / 2)
+        );
+        let decoded =
+            image::load_from_memory_with_format(&prepared.image.jpeg, image::ImageFormat::Jpeg)?;
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (prepared.image.width, prepared.image.height)
+        );
+        let reused = images
+            .retrieve(request.clone(), options)
+            .await?
+            .ok_or("missing reused image")?;
+        assert_eq!(reused.image.jpeg, prepared.image.jpeg);
+        assert_eq!(reused.image.sha256, prepared.image.sha256);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+    let key = CacheKey::new(
+        "cover-art-archive",
+        "responses-v1",
+        &format!("https://{CAA}/release/{RELEASE}/"),
+    )?;
+    let name: String = key
+        .digest()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let entry = cache_root.path().join(format!("{name}.entry"));
+    let mut corrupt = std::fs::read(&entry)?;
+    let last = corrupt.last_mut().ok_or("empty cache entry")?;
+    *last ^= 1;
+    std::fs::write(entry, corrupt)?;
+    assert!(service.fetch(request).await.is_err());
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert!(cache.invalidate(&key)?);
+    server.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn caa_https_fetches_exact_listing_and_original_image_through_budgeted_redirects()
 -> TestResult {
     let caa_material = certificates(CAA)?;

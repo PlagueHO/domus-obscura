@@ -141,7 +141,7 @@ impl Store {
         let (_, directory) = LibraryDirectory::canonical(parent)?;
         if directory.native_root().ancestors.contains(&native.identity) {
             return Err(Error::InvalidInput(
-                "media or staging root contains the application database through an alias".into(),
+                "media or private root contains the application database through an alias".into(),
             ));
         }
         Ok(())

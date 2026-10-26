@@ -8,6 +8,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 pub mod acquisition;
+pub mod cache;
+pub mod images;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,7 +40,7 @@ fn provider_name(value: &str) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServiceConfiguration {
     pub discovery: Vec<String>,

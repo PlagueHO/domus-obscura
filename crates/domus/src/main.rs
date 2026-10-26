@@ -109,6 +109,26 @@ fn run(args: &[String]) -> Result<()> {
             let config = ts_rs::Config::default().with_large_int("number");
             let contracts = [
                 (
+                    "ServiceConfiguration.ts",
+                    domus::application::services::ServiceConfiguration::export_to_string(&config),
+                ),
+                (
+                    "BackendConfigurationState.ts",
+                    domus::infrastructure::server::configuration::BackendConfigurationState::export_to_string(&config),
+                ),
+                (
+                    "BackendConfiguration.ts",
+                    domus::infrastructure::server::configuration::BackendConfiguration::export_to_string(&config),
+                ),
+                (
+                    "BackendCacheConfiguration.ts",
+                    domus::infrastructure::server::configuration::BackendCacheConfiguration::export_to_string(&config),
+                ),
+                (
+                    "BackendLocalAcquisition.ts",
+                    domus::infrastructure::server::configuration::BackendLocalAcquisition::export_to_string(&config),
+                ),
+                (
                     "LocalStatus.ts",
                     domus::infrastructure::local_runtime::LocalStatus::export_to_string(&config),
                 ),
@@ -353,6 +373,10 @@ fn run(args: &[String]) -> Result<()> {
                 ("CreatedJob.ts", CreatedJob::export_to_string(&config)),
                 ("Answer.ts", Answer::export_to_string(&config)),
                 ("TransferFile.ts", TransferFile::export_to_string(&config)),
+                (
+                    "TransferSummary.ts",
+                    domus::infrastructure::store::TransferSummary::export_to_string(&config),
+                ),
                 ("EventCursor.ts", EventCursor::export_to_string(&config)),
                 (
                     "SystemSettingsPolicy.ts",
