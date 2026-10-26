@@ -11,6 +11,32 @@ pub(crate) struct FilePermissions {
 }
 
 impl FilePermissions {
+    pub(crate) fn copy(&self, source: &File, target: &mut File) -> Result<()> {
+        self.check(source, false)?;
+        #[cfg(unix)]
+        target.set_permissions(source.metadata()?.permissions())?;
+        #[cfg(windows)]
+        {
+            use windows_permissions::constants::{SeObjectType, SecurityInformation};
+            use windows_permissions::wrappers::{GetSecurityInfo, SetSecurityInfo};
+            let descriptor = GetSecurityInfo(
+                source,
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Dacl,
+            )?;
+            SetSecurityInfo(
+                target,
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+                None,
+                None,
+                descriptor.dacl(),
+                None,
+            )?;
+        }
+        self.check(target, false)
+    }
+
     pub(crate) fn current() -> Result<Self> {
         #[cfg(windows)]
         {

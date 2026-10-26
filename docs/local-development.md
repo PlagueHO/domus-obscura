@@ -34,9 +34,21 @@ the running read-only policy. Secret-file paths and Entra identifiers remain
 hidden. Malformed, missing and oversized files return errors. A failed refresh
 retains the last values with a stale warning. Inspection creates no database,
 cache root or staging directory and starts no provider work.
-This view cannot save backend JSON. `system_settings_read_only: false` enables
-the existing library-policy and root/index commands, not backend-file editing.
-Full validated atomic persistence and stale-edit protection remain open.
+Set `system_settings_read_only: false` outside the UI to enable editing.
+Both the running configuration and saved file must permit a backend JSON save.
+Use **Edit backend configuration**, then **Validate backend configuration** or
+**Save backend configuration**. These commands retain the draft after failure.
+A stale revision requires reload and review; the form never overwrites it.
+Secret-file references and Entra identifiers have write-only replacement controls.
+Blank replacements keep the existing values. Optional removals are explicit.
+
+Validation reads existing local inputs and checks TLS without provider requests,
+SQLite migration, root creation/binding, or activation. Cache and staging roots
+must already be set up. A successful save is passively validated and
+restart-required, not active. Restart is a separate operator action.
+Startup checks all inputs again. Do not use `PreparedServer::load` as a dry run.
+Stop the API before manual JSON edits, or follow the
+[shared writer lock protocol](agent-operations.md#backend-configuration-writers).
 
 The saved design target is `docs/ui-poc/structure.html`, not the temporary
 functional forms. The connected app now uses the approved Orbit header and

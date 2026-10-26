@@ -1294,10 +1294,39 @@ JSON through no-follow handles. It does not validate or activate saved changes,
 migrate a database, open cache/staging roots or contact providers. Changed raw
 JSON has a different revision and is marked unvalidated and restart-required.
 Failed refreshes retain the last values with a stale warning, not a current-state
-claim. This is a read-only view: no backend JSON save route is installed.
-Validated atomic browser persistence and stale-edit rejection remain unfinished.
-APIs without a file-backed configuration source return an explicit unavailable
+claim. APIs without a file-backed Configuration service return an explicit unavailable
 error instead of invented values.
+
+When both active and saved configuration permit editing, select **Edit backend
+configuration**. The form covers all supported host and provider fields,
+including optional cache, browser assets, and development acquisition.
+Entra identifiers and secret-file references use write-only replacement controls.
+**Keep saved value** and a blank replacement preserve the current value.
+Removing an optional hidden value requires **Remove saved value**.
+Disabling an optional group removes its configuration, not its files.
+The form never accepts credential contents or edits `system_settings_read_only`.
+
+**Validate backend configuration** runs passive checks through
+`POST /api/system/configuration/validate`. **Save backend configuration** repeats
+those checks and uses `POST /api/system/configuration/save`. Both use the existing
+authentication, loopback, exact Origin, and CSRF guards. Validation reads local
+inputs and checks TLS without contacting providers. It uses a current-schema
+read-only database connection; it cannot migrate SQLite, create or bind roots,
+activate TLS, or start work. New cache/staging roots need separate operator setup.
+
+All backend JSON edits are restart-only. Successful saves distinguish the
+passively validated saved revision from the active startup snapshot.
+Startup must recheck the files; passive validation is not activation.
+The Configuration service owns every backend JSON read and write, including
+startup loading, redaction, revision checks, secret merging, and atomic saves.
+
+Saves reject stale revisions and use a shared native file lock. Failed commands
+retain the draft and never retry. After a conflict or uncertain result, reload
+the saved values and review them before discarding the draft and editing again.
+An error before replacement preserves the old file. An error after replacement
+reports that the saved result needs review, rather than claiming rollback.
+For manual editing and the required writer protocol, see
+[configuration operations](docs/agent-operations.md#backend-configuration-writers).
 
 Artwork size, accepted and preferred audio formats, quality priorities and output
 templates are administrator-controlled system policy. They apply to the shared

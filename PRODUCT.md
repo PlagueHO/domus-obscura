@@ -61,10 +61,10 @@ changes stay locked while paused. Generic questions without a supported browser
 recovery action remain operator-controlled. Publication recovery, supervised
 production services and complete Windows/Linux acceptance remain open.
 
-## Planned System Configuration Form
+## System Configuration Form
 
-The user requires a System configuration form to view and update backend JSON
-settings through the UI. The full JSON configuration editor is not implemented.
+The System configuration form views and updates supported backend JSON settings
+through typed controls.
 Artwork size, accepted audio formats, preferred formats, quality priorities,
 output templates and future tag rules are system-wide library policy, not
 per-user preferences. All users share the same library. Only the system
@@ -90,9 +90,8 @@ the backend on every configuration write; disabled UI controls alone are not
 protection. Do not allow the UI to change this control setting or bypass it through
 another endpoint. The operator must change it outside the UI. The exact setting
 name is `system_settings_read_only`. It defaults to `true`. The operator must
-change it in the server JSON file. The first UI editing surface is limited to
-versioned shared-library output policy stored in SQLite. It does not edit startup JSON,
-provider configuration, credentials, TLS or database paths.
+change it in the server JSON file. Versioned shared-library output policy remains
+stored in SQLite. Backend JSON has a separate revision-bound save operation.
 System settings is a route inside the main application, with its normal header
 and navigation. It also supports explicit registration of existing server-side
 main/backup library folders and separate read-only index scans. Both commands
@@ -101,20 +100,36 @@ uses normal native root identity, ancestry and overlap checks. It cannot create
 folders, move media, replace existing roots or rebind legacy roots.
 
 The system output-settings API uses the existing immutable version history and rejects
-stale versions. Existing plans keep their saved settings. Other JSON configuration
-fields remain read-only until their validation, activation and recovery rules are
-implemented.
+stale versions. Existing plans keep their saved settings. Backend JSON changes
+require a process restart; no browser command activates them.
 
-The System page now includes a read-only backend configuration view through
-`GET /api/system/configuration`. The file-backed HTTPS host returns its active
-startup snapshot and a bounded, no-follow read of saved JSON. Secret-file paths
-and Entra identifiers appear only as configured states. Both raw JSON revisions
-are hashed. Changed saved JSON is labelled inactive, unvalidated and
-restart-required. Inspection does not migrate a database, open provider/cache
-roots, validate TLS, contact providers or activate settings. Normal authentication
-and development loopback/origin guards apply. A host without a configuration
-source returns an explicit unavailable error. No backend JSON write route exists.
-This view is not the completed editable configuration form.
+`ConfigurationService` owns backend JSON loading, inspection, validation, secret
+merging, revisions, and persistence. Startup and API handlers use that service.
+`GET /api/system/configuration` returns its immutable active startup snapshot and
+a bounded, no-follow read of saved JSON. Secret-file paths and Entra identifiers
+appear only as configured states. Both raw JSON revisions are hashed.
+
+The typed editor covers the host, provider selections, optional cache and browser
+assets, Entra references, TLS references, and optional development acquisition.
+`POST /api/system/configuration/validate` checks a draft without saving it.
+`POST /api/system/configuration/save` repeats validation and atomically saves it.
+Normal authentication and development loopback/origin guards apply. Commands
+require the exact Origin and CSRF header. A host without a configuration service
+returns an explicit unavailable error.
+
+Saved JSON remains inactive until restart. Changed external JSON is unvalidated.
+An exact revision saved through the service is passively validated, but startup
+checks remain required. Validation can read local files, verify TLS, and query a
+current-schema database. It does not migrate SQLite, create or bind roots, contact
+providers, activate TLS, or start work. Referenced inputs can change after a check.
+New cache or staging roots need separate operator setup before browser saves.
+
+Saves use a stable configuration lock and reject stale revisions. All operator
+writers must use the same lock protocol, or stop the API before editing.
+Unrestricted editors that ignore the lock are outside this guarantee.
+Failed saves retain the browser draft. Pre-replacement failures preserve the
+previous file. An error after replacement explicitly requires reloading and
+reviewing the saved file; it does not claim a rollback.
 
 Do not return saved passwords, tokens, private keys or other secret values to the
 browser. Show only their configured state. Where secret updates are supported,

@@ -19,7 +19,7 @@ const PENDING: &str = "pending.cache";
 
 /// Includes entry headers and temporary replacement bytes, excluding owner.lock.
 /// Reserve room for two maximum-size entries so replacement stays atomic.
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CacheLimits {
     pub item_bytes: u32,
@@ -39,7 +39,7 @@ impl Default for CacheLimits {
 
 /// Explicit operator configuration. Opening never creates the root or migrates
 /// a database. Omission preserves the legacy provider-cache configuration.
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheConfiguration {
     pub root: std::path::PathBuf,
@@ -48,26 +48,77 @@ pub struct CacheConfiguration {
 }
 
 impl CacheConfiguration {
-    pub(crate) fn open(&self, store: &mut Store, protected: &[&Path]) -> Result<Arc<dyn Cache>> {
-        if !self.root.is_absolute() {
-            return Err(Error::InvalidInput("cache root must be absolute".into()));
-        }
-        let root = std::fs::canonicalize(&self.root)?;
+    pub(crate) fn inspect(
+        &self,
+        store: &Store,
+        protected: &[std::path::PathBuf],
+        bound: bool,
+    ) -> Result<()> {
+        self.limits.validate()?;
+        require_local_disk(&self.root)?;
+        let (root, opened) = LibraryDirectory::canonical(&self.root)?;
+        let permissions = FilePermissions::current()?;
+        let native = opened.native_root().clone();
         for path in protected {
+            let parent = LibraryDirectory::open(
+                path.parent()
+                    .ok_or(Error::Internal("protected path parent is missing"))?,
+            )?;
             let path = std::fs::canonicalize(path)?;
-            if path.starts_with(&root) || root.starts_with(&path) {
+            if path.starts_with(&root)
+                || root.starts_with(&path)
+                || parent.native_root().ancestors.contains(&native.identity)
+            {
                 return Err(Error::InvalidInput(
                     "cache root must not overlap configuration, secrets, TLS or browser assets"
                         .into(),
                 ));
             }
         }
+        let directory = opened.into_directory();
+        permissions.check(&directory.try_clone()?.into_std_file(), true)?;
+        if bound {
+            store.check_native_root(
+                root.to_str()
+                    .ok_or_else(|| Error::InvalidInput("cache root must be Unicode".into()))?,
+                "cache",
+                &native,
+            )?;
+            let file = directory
+                .open_with("owner.lock", &options(false, false, false))?
+                .into_std();
+            check_file(&file, &permissions)?;
+            let mut bytes = Vec::new();
+            file.take(256).read_to_end(&mut bytes)?;
+            let expected = format!(
+                "domus-cache-v1\n{}\n{}\n",
+                store.application_identity()?,
+                native.identity
+            );
+            if bytes != expected.as_bytes() {
+                return Err(Error::Conflict(
+                    "cache owner marker does not match its database and native root".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn open(&self, store: &mut Store, protected: &[&Path]) -> Result<Arc<dyn Cache>> {
+        self.inspect(
+            store,
+            &protected
+                .iter()
+                .map(|path| path.to_path_buf())
+                .collect::<Vec<_>>(),
+            false,
+        )?;
         Ok(Arc::new(FileCache::open(store, &self.root, self.limits)?))
     }
 }
 
 impl CacheLimits {
-    fn validate(self) -> Result<Self> {
+    pub(crate) fn validate(self) -> Result<Self> {
         if self.item_bytes == 0
             || self.item_bytes > 32 * 1024 * 1024
             || !(1..=4096).contains(&self.entries)

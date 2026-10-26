@@ -113,6 +113,30 @@ fn run(args: &[String]) -> Result<()> {
                     domus::application::services::ServiceConfiguration::export_to_string(&config),
                 ),
                 (
+                    "ConfigurationReplacement.ts",
+                    domus::infrastructure::server::configuration::ConfigurationReplacement::export_to_string(&config),
+                ),
+                (
+                    "BackendLocalAcquisitionDraft.ts",
+                    domus::infrastructure::server::configuration::BackendLocalAcquisitionDraft::export_to_string(&config),
+                ),
+                (
+                    "BackendConfigurationDraft.ts",
+                    domus::infrastructure::server::configuration::BackendConfigurationDraft::export_to_string(&config),
+                ),
+                (
+                    "BackendConfigurationCommand.ts",
+                    domus::infrastructure::server::configuration::BackendConfigurationCommand::export_to_string(&config),
+                ),
+                (
+                    "BackendConfigurationIssue.ts",
+                    domus::infrastructure::server::configuration::BackendConfigurationIssue::export_to_string(&config),
+                ),
+                (
+                    "BackendConfigurationResult.ts",
+                    domus::infrastructure::server::configuration::BackendConfigurationResult::export_to_string(&config),
+                ),
+                (
                     "BackendConfigurationState.ts",
                     domus::infrastructure::server::configuration::BackendConfigurationState::export_to_string(&config),
                 ),
