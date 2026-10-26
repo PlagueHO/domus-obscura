@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 mod identity;
 pub(crate) use identity::NativeRoot;
+pub(crate) use identity::file_id as native_file_identity;
 
 /// Read the native identity from the actual no-follow directory handle.
 /// This is an identity comparison value, not proof against ID reuse or cloning.

@@ -4,7 +4,6 @@ import type { BackendLocalAcquisition } from "./BackendLocalAcquisition";
 import type { ServiceConfiguration } from "./ServiceConfiguration";
 
 /**
- * Secret values and secret-file paths are never part of this browser contract.
- * Entra identifiers are represented only by their configured state.
+ * Hidden fields never become browser-readable, including after replacement.
  */
 export type BackendConfiguration = { environment: string, system_settings_read_only: boolean, services: ServiceConfiguration, cache: BackendCacheConfiguration | null, database: string, listen: string, origin: string, tenant_id_configured: boolean, object_id_configured: boolean, client_id_configured: boolean, client_secret_file_configured: boolean, certificate_file: string, private_key_file_configured: boolean, browser_assets: string | null, local_acquisition: BackendLocalAcquisition | null, };

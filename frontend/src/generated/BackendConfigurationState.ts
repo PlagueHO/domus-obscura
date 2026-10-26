@@ -3,6 +3,6 @@ import type { BackendConfiguration } from "./BackendConfiguration";
 
 export type BackendConfigurationState = { active: BackendConfiguration, saved: BackendConfiguration, active_revision: string, saved_revision: string, restart_required: boolean, 
 /**
- * A changed file still needs complete startup validation before activation.
+ * False means this exact revision passed passive validation, not activation.
  */
 saved_requires_validation: boolean, };

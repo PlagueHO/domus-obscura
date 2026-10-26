@@ -298,18 +298,37 @@ installation remains open. Retrieval and processing ports are independently
 replaceable; no provider client owns resize policy. The existing read-only MCP
 original-fetch contract is unchanged.
 
-The file-backed HTTPS bootstrap attaches a separate configuration inspection
-source to the guarded API. `GET /api/system/configuration` reads it on a blocking
+The file-backed HTTPS bootstrap and guarded API share `ConfigurationService`.
+This is the sole backend JSON access boundary. It owns parsing, normalization,
+startup loading, active/saved inspection, redaction, revisions, hidden-field
+merging, validation, and atomic persistence. Runtime startup still owns migrations,
+cache activation, authentication setup, and listeners; passive service operations
+cannot invoke those effects. Native persistence helpers stay private.
+
+`GET /api/system/configuration` reads the service on a blocking
 worker, without a Store transaction. It returns a redacted immutable active
 snapshot and a passive, bounded no-follow read of saved JSON. Raw JSON digests
 identify changed saved state; they do not prove validation or activation.
 Secret-file paths and Entra identifiers are excluded from the browser DTO.
 Inspection cannot open a new database/cache/staging root, validate TLS, contact
-providers or change the active read-only policy. APIs without a source return an
-explicit unavailable error. Backend JSON editing is not implemented; it still
-needs effect-free authoritative validation, atomic persistence and stale-edit
-protection. Startup loading is not a safe dry-run validator because it can
-migrate the selected database and bind the selected cache.
+providers or change the active read-only policy. APIs without a service return an
+explicit unavailable error.
+
+The typed validation/save routes call the same service and authoritative startup
+rules on blocking workers. Passive validation can read protected local files and
+TLS material and query current-schema database records. No file or network I/O
+runs inside a database transaction. The service enforces active and saved
+read-only restrictions independently of the transport guard. Browser DTOs cannot
+change the operator switch.
+
+Saves hold the cooperating-writer OS lock through revision checks, secret merging,
+validation, synced temporary output, native handle-relative replacement, and
+result verification. Parent and target identities are checked. Pre-commit errors
+preserve the old file; post-replacement errors identify uncertainty explicitly.
+Successful saves retain only revision-bound validation evidence in memory.
+Changed external bytes invalidate it. All backend JSON changes require restart.
+Startup loading is still not a safe dry-run validator: the runtime can migrate
+the database and bind the selected cache after service loading.
 
 ## Known gaps for design review
 

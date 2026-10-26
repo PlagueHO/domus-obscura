@@ -144,6 +144,14 @@ small {
   font-weight: 400;
   overflow-wrap: anywhere;
 }
+.configuration-field-error {
+  display: block;
+  color: var(--coral);
+  margin-top: 6px;
+}
+.configuration-secret {
+  margin-block: 18px;
+}
 svg {
   display: block;
   width: 22px;

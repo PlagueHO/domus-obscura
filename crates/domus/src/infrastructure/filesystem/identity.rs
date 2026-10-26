@@ -40,7 +40,7 @@ fn directory_id(directory: &Dir) -> Result<String> {
     file_id(&directory.try_clone()?.into_std_file())
 }
 
-fn file_id(file: &File) -> Result<String> {
+pub(crate) fn file_id(file: &File) -> Result<String> {
     #[cfg(windows)]
     {
         match file_id::get_high_res_file_id_from_file(file)? {

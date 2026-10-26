@@ -819,9 +819,10 @@ impl PreparedWorker {
     }
 }
 
-/// Operator-selected local acquisition settings. Browser input cannot select a
-/// database, credential file, server address or native destination.
-#[derive(Clone, Deserialize)]
+/// Operator-selected local acquisition settings. Runtime operation requests
+/// cannot choose native destinations or credentials. Backend configuration
+/// replacements are validated separately and require a restart.
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalAcquisition {
     pub staging_root: PathBuf,
@@ -855,6 +856,9 @@ impl LocalAcquisition {
             "staging",
             root.native_root(),
         )?;
+        super::permissions::FilePermissions::current()?
+            .check(&root.into_directory().into_std_file(), true)?;
+        read_credentials(&self.credentials_file)?;
         Ok(())
     }
 

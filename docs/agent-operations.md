@@ -4,6 +4,47 @@ This guide preserves the detailed operational rules from the original root
 AGENTS.md. Read the relevant command and service boundaries before changing them.
 The root AGENTS.md provides the short command and repository guide.
 
+## Backend configuration writers
+
+`ConfigurationService` is the sole access boundary for HTTPS backend JSON.
+Keep startup, inspection, validation, and save callers on its typed operations.
+Never add direct file reads, parsing, secret merging, or writes in API handlers.
+Keep runtime activation separate. Do not use `PreparedServer::load` to validate a
+draft; startup can migrate SQLite and bind a cache.
+
+The safest manual editing procedure is to stop the API, edit its JSON file, and
+start it again. Preserve private file permissions. Only this operator procedure
+can change `system_settings_read_only`; browser requests cannot change it.
+Do not restart a service or edit a live external configuration without approval.
+
+If an operator tool edits configuration while the API runs, it must follow the
+same writer protocol. For `service.local.json`, the stable sibling lock file is
+`.service.local.json.lock`. Open it without following links and hold an exclusive
+OS file lock through reading, checking the expected raw-byte SHA-256 revision,
+validation, synced sibling-file replacement, directory sync where supported, and
+verification. Never unlink or replace this lock file. Keep every file operation
+relative to checked native directory handles. Use Rust `File::try_lock`, or an
+equivalent native lock: `flock` on Linux and `LockFileEx` on Windows.
+The API creates the lock on its first save and retains its identity.
+Manual editors that do not implement this protocol must run with the API stopped.
+Linux locks are advisory; atomic rename alone does not exclude another writer.
+See [Linux flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html),
+[Rust File locking](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock),
+and [cap-std directory operations](https://docs.rs/cap-std/4.0.3/cap_std/fs/struct.Dir.html).
+
+Backend JSON saves are restart-only. They do not approve media work, change
+immutable plans, create or bind roots, or activate TLS. Validation requires a
+current-schema local database and existing valid file/root references. Set up new
+cache or staging roots separately. Full startup and operation-time checks remain.
+Do not report passive validation as proof that later startup will succeed.
+
+After a stale revision or failed save, retain the draft and review the saved
+file. A pre-replacement error leaves the previous file intact. A post-replacement
+sync or verification error reports an uncertain saved result, not rollback.
+Reload before retrying. An interrupted save can leave an owned `.pending` file;
+inspect and remove only that exact temporary file while the API is stopped.
+Never delete the configuration or lock file as automatic recovery.
+
 ## Commands
 
 Use the pinned tools from rust-toolchain.toml, .node-version, and package.json.

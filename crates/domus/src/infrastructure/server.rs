@@ -1,18 +1,14 @@
 use super::api::Api;
 use super::entra::EntraBroker;
-use super::filesystem::require_local_disk;
 use super::http::EntraHttpClient;
-use super::local_file::read_local;
 use super::store::Store;
 use super::tls;
-use crate::domain::Page;
 use crate::{Error, Result};
 use axum::Router;
 use axum_server::accept::Accept;
 use axum_server::tls_rustls::RustlsConfig;
 use hyper_util::rt::TokioTimer;
 use openidconnect::{ClientSecret, RedirectUrl};
-use serde::Deserialize;
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, TcpListener};
@@ -145,41 +141,7 @@ impl Drop for ShutdownOnDrop {
 }
 
 pub mod configuration;
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Environment {
-    #[default]
-    Production,
-    Development,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Configuration {
-    #[serde(default)]
-    environment: Environment,
-    #[serde(default = "system_settings_read_only_by_default")]
-    system_settings_read_only: bool,
-    #[serde(default)]
-    services: crate::application::services::ServiceConfiguration,
-    cache: Option<super::cache::CacheConfiguration>,
-    database: PathBuf,
-    listen: SocketAddr,
-    origin: String,
-    tenant_id: Option<String>,
-    object_id: Option<String>,
-    client_id: Option<String>,
-    client_secret_file: Option<PathBuf>,
-    certificate_file: PathBuf,
-    private_key_file: PathBuf,
-    browser_assets: Option<PathBuf>,
-    local_acquisition: Option<super::worker::LocalAcquisition>,
-}
-
-fn system_settings_read_only_by_default() -> bool {
-    true
-}
+use configuration::{Configuration, Environment};
 
 /// Plaintext credentials exist only in memory after bounded, local-file reads.
 /// Configuration contains file references, not secret values.
@@ -189,157 +151,23 @@ pub struct PreparedServer {
     secret: Option<ClientSecret>,
     tls: RustlsConfig,
     hostname: String,
-    configuration_source: configuration::ConfigurationSource,
+    configuration_source: configuration::ConfigurationService,
 }
 
 impl PreparedServer {
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = read_local(path, 16384, false)?;
-        let mut configuration: Configuration = serde_json::from_slice(&bytes)
-            .map_err(|_| Error::InvalidInput("service configuration JSON is invalid".into()))?;
-        configuration.services.validate_builtins()?;
-        match configuration.environment {
-            Environment::Production => {
-                if configuration.local_acquisition.is_some() {
-                    return Err(Error::InvalidInput(
-                        "local acquisition is development-only".into(),
-                    ));
-                }
-                if ![
-                    &configuration.tenant_id,
-                    &configuration.object_id,
-                    &configuration.client_id,
-                ]
-                .into_iter()
-                .all(|value| {
-                    value
-                        .as_deref()
-                        .is_some_and(crate::domain::identifiers::is_canonical_uuid)
-                }) || configuration.client_secret_file.is_none()
-                {
-                    return Err(Error::InvalidInput(
-                        "production requires canonical Entra IDs and a client secret file".into(),
-                    ));
-                }
-            }
-
-            Environment::Development => {
-                if configuration.tenant_id.is_some()
-                    || configuration.object_id.is_some()
-                    || configuration.client_id.is_some()
-                    || configuration.client_secret_file.is_some()
-                {
-                    return Err(Error::InvalidInput(
-                        "development mode must not contain Entra configuration".into(),
-                    ));
-                }
-            }
-        }
-        if !configuration.listen.ip().is_loopback() || configuration.listen.port() == 0 {
-            return Err(Error::InvalidInput("API preview requires a loopback address and an explicit nonzero port; public operation is not enabled".into()));
-        }
-        let origin = reqwest::Url::parse(&configuration.origin)
-            .map_err(|_| Error::InvalidInput("service origin is invalid".into()))?;
-        if origin.scheme() != "https"
-            || origin.host_str().is_none()
-            || !origin.username().is_empty()
-            || origin.password().is_some()
-            || origin.path() != "/"
-            || origin.query().is_some()
-            || origin.fragment().is_some()
-            || origin.port_or_known_default() != Some(configuration.listen.port())
-        {
-            return Err(Error::InvalidInput("service origin must be HTTPS with the listener port and no path, credentials or query".into()));
-        }
-        configuration.origin = origin.origin().ascii_serialization();
-        if matches!(configuration.environment, Environment::Development)
-            && !Api::development_origin(&origin)
-        {
-            return Err(Error::InvalidInput(
-                "development origin must use localhost or a literal loopback IP address".into(),
-            ));
-        }
-        let hostname = origin
-            .host_str()
-            .ok_or_else(|| Error::InvalidInput("service hostname is missing".into()))?
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_owned();
-        for file in [
-            &configuration.database,
-            &configuration.certificate_file,
-            &configuration.private_key_file,
-        ]
-        .into_iter()
-        .chain(configuration.client_secret_file.iter())
-        {
-            if !file.is_absolute() {
-                return Err(Error::InvalidInput(
-                    "service file references must be absolute".into(),
-                ));
-            }
-            require_local_disk(&std::fs::canonicalize(file)?)?;
-        }
+        let (configuration_source, configuration, hostname) =
+            configuration::ConfigurationService::load(path)?;
         let mut store = Store::open_existing(&configuration.database)?;
-        let mut protected = vec![
-            path.to_owned(),
-            configuration.certificate_file.clone(),
-            configuration.private_key_file.clone(),
-        ];
-        protected.extend(configuration.client_secret_file.iter().cloned());
-        protected.extend(configuration.browser_assets.iter().cloned());
-        if let Some(local) = &configuration.local_acquisition {
-            local.validate(&store, &configuration.services)?;
-            protected.push(local.credentials_file.clone());
-        }
-        let protected = protected
-            .iter()
-            .map(std::fs::canonicalize)
-            .collect::<io::Result<Vec<_>>>()?;
-        let mut after = 0;
-        loop {
-            let locations = store.locations(Page::new(after, 200)?)?;
-            if locations.is_empty() {
-                break;
-            }
-            for location in locations {
-                after = location.id;
-                if protected
-                    .iter()
-                    .any(|file| file.starts_with(&location.root))
-                {
-                    return Err(Error::InvalidInput("service configuration, secrets and TLS files must remain outside all media roots".into()));
-                }
-            }
-        }
-        let secret = configuration
-            .client_secret_file
-            .as_ref()
-            .map(|path| -> Result<ClientSecret> {
-                let secret = read_local(path, 4096, true)?;
-                let secret = String::from_utf8(secret)
-                    .map_err(|_| Error::InvalidInput("client secret file is not UTF-8".into()))?;
-                let secret = secret.trim_end_matches(['\r', '\n']);
-                if secret.trim().is_empty() || secret.chars().any(char::is_control) {
-                    return Err(Error::InvalidInput(
-                        "client secret file must contain one nonempty line".into(),
-                    ));
-                }
-                Ok(ClientSecret::new(secret.into()))
-            })
-            .transpose()?;
-        let tls = load_tls(&configuration, &hostname)?;
+        let protected = configuration_source.protected(&configuration);
+        let (secret, tls) = configuration_source.startup_material(&store, &hostname)?;
         if let Some(cache) = &configuration.cache {
             let protected = protected.iter().map(PathBuf::as_path).collect::<Vec<_>>();
             let cache = cache.open(&mut store, &protected)?;
             store = store.with_cache(cache);
         }
         Ok(Self {
-            configuration_source: configuration::ConfigurationSource::new(
-                path,
-                &bytes,
-                &configuration,
-            ),
+            configuration_source,
             configuration,
             store,
             secret,
@@ -469,10 +297,7 @@ fn load_tls(configuration: &Configuration, hostname: &str) -> Result<RustlsConfi
 }
 
 fn tls_material(configuration: &Configuration) -> Result<(Vec<u8>, Vec<u8>)> {
-    Ok((
-        read_local(&configuration.certificate_file, 262144, false)?,
-        read_local(&configuration.private_key_file, 16384, true)?,
-    ))
+    configuration::ConfigurationService::tls_material(configuration)
 }
 
 async fn watch_tls(configuration: Configuration, hostname: String, active: RustlsConfig) {

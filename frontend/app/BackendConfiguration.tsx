@@ -1,8 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
-import { request } from "./api";
-import { useResource } from "./hooks";
+import type { BackendConfigurationResult } from "../src/generated/BackendConfigurationResult";
+import { ApiError, request } from "./api";
+import { useCommand, useResource } from "./hooks";
 import { Alert, Badge, Button, Card } from "./components/ui";
+import { BackendConfigurationForm } from "./BackendConfigurationForm";
+import {
+  beginConfigurationEdit,
+  changeConfigurationDraft,
+  configurationErrors,
+  type ConfigurationEditor,
+} from "./backend-configuration-state";
 
 const configured = (value: boolean) => (value ? "Configured · value hidden" : "Not configured");
 
@@ -12,19 +20,92 @@ export function BackendConfiguration() {
     "backend-configuration",
   );
   const [selected, setSelected] = useState<"active" | "saved">("active");
-  const state = resource.data;
+  const [editor, setEditor] = useState<ConfigurationEditor>();
+  const [confirmed, setConfirmed] = useState<BackendConfigurationState>();
+  const [notice, setNotice] = useState("");
+  const command = useCommand();
+  useEffect(() => setConfirmed(undefined), [resource.data]);
+  const state = confirmed ?? resource.data;
   const configuration = state?.[selected];
+  const fresh = !resource.error && !resource.loading;
+  const readOnly =
+    !state || state.active.system_settings_read_only || state.saved.system_settings_read_only;
+  async function submit(action: "validate" | "save") {
+    if (!editor || editor.conflict || !fresh || readOnly) return;
+    await command.run(async () => {
+      setNotice("");
+      try {
+        const result = await request<BackendConfigurationResult>(
+          `/api/system/configuration/${action}`,
+          { body: { expected_revision: editor.expectedRevision, draft: editor.draft } },
+        );
+        if (result.errors.length) {
+          setEditor(configurationErrors(editor, result.errors));
+        } else if (action === "validate") {
+          setEditor(configurationErrors(editor, []));
+        } else if (result.state) {
+          setConfirmed(result.state);
+          setEditor(undefined);
+          setNotice(
+            "Backend configuration saved and passively validated. It is not activated. Restart the API to apply it.",
+          );
+          resource.refresh();
+        } else {
+          throw new Error(
+            "The save response has no saved state. Reload and review before retrying.",
+          );
+        }
+      } catch (error) {
+        if (action === "save" || (error instanceof ApiError && error.status === 409)) {
+          setEditor({ ...editor, validated: false, conflict: true });
+        }
+        throw error;
+      }
+    });
+  }
 
   return (
     <Card title="Backend configuration">
       <p>
         This view covers the server JSON settings. Secret-file paths and Entra identifiers stay
-        hidden. This build does not save backend JSON from the browser.
+        hidden. Backend JSON changes require an API restart. Saving does not activate them.
       </p>
       <Alert error={resource.error} />
-      <Button variant="secondary" disabled={resource.loading} onClick={resource.refresh}>
+      <Alert error={command.error} />
+      {notice && <p role="status">{notice}</p>}
+      <Button
+        variant="secondary"
+        disabled={resource.loading || command.busy}
+        onClick={resource.refresh}
+      >
         {resource.loading ? "Loading backend configuration…" : "Reload backend configuration"}
       </Button>
+      {state && (
+        <p>
+          {readOnly
+            ? "Backend configuration is read-only. The operator must enable editing outside the UI."
+            : "The configured administrator can edit backend configuration. System settings access cannot be changed here."}
+        </p>
+      )}
+      {!editor && !readOnly && (
+        <Button
+          disabled={!fresh || command.busy}
+          onClick={() => state && setEditor(beginConfigurationEdit(state))}
+        >
+          Edit backend configuration
+        </Button>
+      )}
+      {editor && (
+        <BackendConfigurationForm
+          editor={editor}
+          disabled={command.busy || !fresh || readOnly}
+          busy={command.busy}
+          onChange={(draft) => setEditor(changeConfigurationDraft(editor, draft))}
+          onValidate={() => void submit("validate")}
+          onSave={() => void submit("save")}
+          onDiscard={() => setEditor(undefined)}
+        />
+      )}
       {Boolean(resource.error) && state && (
         <p role="status">Last loaded configuration. The current saved file could not be checked.</p>
       )}
@@ -56,6 +137,13 @@ export function BackendConfiguration() {
             <Badge>{selected === "active" ? "Active configuration" : "Saved configuration"}</Badge>
             {selected === "saved" && state.saved_requires_validation && (
               <> Saved values have not passed startup validation.</>
+            )}
+            {selected === "saved" && !state.saved_requires_validation && state.restart_required && (
+              <>
+                {" "}
+                Saved values passed passive validation. They are not active. Startup checks remain
+                required.
+              </>
             )}
           </p>
           <dl className="properties">

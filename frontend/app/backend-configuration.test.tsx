@@ -3,6 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
 import { BackendConfiguration } from "./BackendConfiguration";
 import { useResource } from "./hooks";
+import { BackendConfigurationForm } from "./BackendConfigurationForm";
+import {
+  beginConfigurationEdit,
+  changeConfigurationDraft,
+  configurationErrors,
+} from "./backend-configuration-state";
 
 vi.mock("./hooks", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./hooks")>()),
@@ -54,7 +60,7 @@ function render(data: BackendConfigurationState | undefined, error?: Error, load
 beforeEach(() => vi.mocked(useResource).mockReset());
 
 describe("backend configuration inspection", () => {
-  it("shows all configured groups without write controls or secret values", () => {
+  it("shows all configured groups and offers explicit editing without secret values", () => {
     const markup = render(state);
     expect(markup).toContain("Saved JSON matches the active configuration.");
     expect(markup).toContain("generated-database");
@@ -66,10 +72,26 @@ describe("backend configuration inspection", () => {
     expect(markup).toContain("TLS private-key file");
     expect(markup).toContain("Configured · value hidden");
     expect(markup).toContain("Library policy can be edited");
-    expect(markup).toContain("does not save backend JSON");
+    expect(markup).toContain("Saving does not activate them.");
+    expect(markup).toContain("Edit backend configuration");
     expect(markup).not.toContain("<form");
     expect(markup).not.toContain("<input");
     expect(markup).not.toContain("Save backend");
+  });
+
+  it("never offers editing for active or saved read-only policy or stale reads", () => {
+    const restricted = { ...configuration, system_settings_read_only: true };
+    for (const value of [
+      { ...state, active: restricted },
+      { ...state, saved: restricted },
+    ]) {
+      const markup = render(value);
+      expect(markup).not.toContain("Edit backend configuration");
+      expect(markup).toContain("operator must enable editing");
+    }
+    expect(render(state, new Error("Refresh failed"))).toMatch(
+      /<button[^>]*disabled[^>]*>Edit backend configuration/,
+    );
   });
 
   it("does not present changed saved JSON as active or validated", () => {
@@ -85,6 +107,83 @@ describe("backend configuration inspection", () => {
     expect(markup).toContain("https://localhost:8443");
     expect(markup).not.toContain("https://localhost:9443");
     expect(markup).not.toContain("matches the active");
+  });
+
+  describe("backend configuration draft", () => {
+    it("copies every public field but never copies a hidden value or the operator switch", () => {
+      const editor = beginConfigurationEdit(state);
+      expect(editor.expectedRevision).toBe(state.saved_revision);
+      expect(editor.draft).not.toHaveProperty("system_settings_read_only");
+      expect(editor.draft.private_key_file).toEqual({ action: "keep" });
+      expect(editor.draft.local_acquisition?.credentials_file).toEqual({ action: "keep" });
+      editor.draft.services.discovery.length = 0;
+      expect(state.saved.services.discovery).toEqual(["musicbrainz"]);
+    });
+
+    it("retains the full draft on errors and invalidates validation after an edit", () => {
+      const editor = beginConfigurationEdit(state);
+      const changed = changeConfigurationDraft(editor, {
+        ...editor.draft,
+        private_key_file: { action: "replace", value: "generated-replacement" },
+      });
+      const failed = configurationErrors(changed, [{ field: "origin", message: "Invalid origin" }]);
+      expect(failed.draft).toBe(changed.draft);
+      expect(failed.validated).toBe(false);
+      expect(failed.expectedRevision).toBe(editor.expectedRevision);
+      const validated = configurationErrors(changed, []);
+      expect(validated.validated).toBe(true);
+      const editedAgain = changeConfigurationDraft(validated, {
+        ...validated.draft,
+        origin: "https://localhost:9443",
+      });
+      expect(editedAgain.validated).toBe(false);
+      expect(editedAgain.draft.private_key_file).toEqual({
+        action: "replace",
+        value: "generated-replacement",
+      });
+    });
+
+    it("renders all typed control groups, validation errors, and restart-only actions", () => {
+      const editor = configurationErrors(beginConfigurationEdit(state), [
+        { field: "origin", message: "Use HTTPS." },
+      ]);
+      const markup = renderToStaticMarkup(
+        <BackendConfigurationForm
+          editor={editor}
+          disabled={false}
+          busy={false}
+          onChange={vi.fn()}
+          onValidate={vi.fn()}
+          onSave={vi.fn()}
+          onDiscard={vi.fn()}
+        />,
+      );
+      for (const label of [
+        "Environment",
+        "Local database",
+        "Listen address",
+        "Browser origin",
+        "Browser assets",
+        "Providers",
+        "Cache root",
+        "Maximum cache entries",
+        "Entra identity",
+        "TLS certificate file",
+        "TLS private-key file",
+        "Private staging root",
+        "Soulseek credential file",
+        "Soulseek server",
+        "Validate backend configuration",
+        "Save backend configuration",
+        "Discard backend draft",
+      ])
+        expect(markup).toContain(label);
+      expect(markup).toContain("Use HTTPS.");
+      expect(markup).toContain('aria-invalid="true"');
+      expect(markup).toContain("All changes require an API restart");
+      expect(markup).not.toContain('name="system_settings_read_only"');
+      expect(markup).not.toContain('type="password"');
+    });
   });
 
   it("keeps failures and stale reads distinct from disabled configuration", () => {

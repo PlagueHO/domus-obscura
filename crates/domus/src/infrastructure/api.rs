@@ -39,7 +39,7 @@ struct Shared {
     local: Option<super::local_runtime::LocalRuntime>,
     services: super::services::ServiceHost,
     system_settings_read_only: bool,
-    backend_configuration: Option<Arc<super::server::configuration::ConfigurationSource>>,
+    backend_configuration: Option<Arc<super::server::configuration::ConfigurationService>>,
     request_slots: Semaphore,
     event_slots: Arc<Semaphore>,
     broker: Option<RwLock<Arc<EntraBroker>>>,
@@ -298,6 +298,14 @@ impl Api {
             )
             .route("/api/system/settings-policy", get(settings_policy))
             .route("/api/system/configuration", get(backend_configuration))
+            .route(
+                "/api/system/configuration/validate",
+                post(validate_backend_configuration).layer(DefaultBodyLimit::max(16384)),
+            )
+            .route(
+                "/api/system/configuration/save",
+                post(save_backend_configuration).layer(DefaultBodyLimit::max(16384)),
+            )
             .route("/api/jobs", get(jobs).post(create_job))
             .route("/api/queue", get(queue))
             .route(
@@ -426,7 +434,7 @@ impl Api {
 
     pub(crate) fn with_backend_configuration(
         mut self,
-        configuration: super::server::configuration::ConfigurationSource,
+        configuration: super::server::configuration::ConfigurationService,
     ) -> Result<Self> {
         Arc::get_mut(&mut self.0)
             .ok_or(Error::Internal(
@@ -1404,6 +1412,53 @@ async fn backend_configuration(
         .await
         .map_err(|_| Error::Internal("backend configuration read task failed"))??;
     Ok(Json(state))
+}
+
+async fn validate_backend_configuration(
+    State(api): State<Api>,
+    request: std::result::Result<
+        Json<super::server::configuration::BackendConfigurationCommand>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> ApiResult<Json<super::server::configuration::BackendConfigurationResult>> {
+    let Json(request) = request.map_err(|error| {
+        ApiError::new(error.status(), "backend configuration request is invalid")
+    })?;
+    let source = api.0.backend_configuration.clone().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend configuration is not attached to this host",
+        )
+    })?;
+    Ok(Json(
+        tokio::task::spawn_blocking(move || source.validate(request))
+            .await
+            .map_err(|_| Error::Internal("configuration validation task failed"))??,
+    ))
+}
+
+async fn save_backend_configuration(
+    State(api): State<Api>,
+    request: std::result::Result<
+        Json<super::server::configuration::BackendConfigurationCommand>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> ApiResult<Json<super::server::configuration::BackendConfigurationResult>> {
+    api.require_settings_write()?;
+    let Json(request) = request.map_err(|error| {
+        ApiError::new(error.status(), "backend configuration request is invalid")
+    })?;
+    let source = api.0.backend_configuration.clone().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend configuration is not attached to this host",
+        )
+    })?;
+    Ok(Json(
+        tokio::task::spawn_blocking(move || source.save(request))
+            .await
+            .map_err(|_| Error::Internal("configuration save task failed"))??,
+    ))
 }
 
 #[derive(Deserialize, ts_rs::TS)]
