@@ -62,6 +62,20 @@ impl Fixture {
     fn open(&mut self) -> TestResult<FileCache> {
         Ok(FileCache::open(&mut self.store, &self.root, limits())?)
     }
+
+    fn write_pending(&self, bytes: &[u8]) -> TestResult {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(self.root.join("pending.cache"))?
+            .write_all(bytes)?;
+        Ok(())
+    }
 }
 
 #[test]
@@ -399,7 +413,7 @@ fn shared_cache_refuses_media_roots_and_recovers_only_its_pending_file() -> Test
     let key = key("retained complete item")?;
     cache.put(&key, b"old complete bytes", 10, 30)?;
     drop(cache);
-    std::fs::write(fixture.root.join("pending.cache"), b"interrupted write")?;
+    fixture.write_pending(b"interrupted write")?;
     let cache = fixture.open()?;
     assert!(!fixture.root.join("pending.cache").exists());
     let CacheLookup::Hit(hit) = cache.lookup(&key, 20)? else {
@@ -497,7 +511,7 @@ fn shared_cache_coordinates_processes_without_discarding_a_live_pending_write() 
         .write(true)
         .open(fixture.root.join("owner.lock"))?;
     owner.try_lock()?;
-    std::fs::write(fixture.root.join("pending.cache"), b"live pending bytes")?;
+    fixture.write_pending(b"live pending bytes")?;
     let run = |busy: bool| -> TestResult {
         let mut command = std::process::Command::new(std::env::current_exe()?);
         command
@@ -530,6 +544,30 @@ fn shared_cache_coordinates_processes_without_discarding_a_live_pending_write() 
         return Err("parent cannot read child write".into());
     };
     assert_eq!(hit.bytes, b"child complete bytes");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_cache_preserves_pending_files_with_untrusted_permissions() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new()?;
+    drop(fixture.open()?);
+    fixture.write_pending(b"interrupted private write")?;
+    let pending = fixture.root.join("pending.cache");
+    assert_eq!(
+        std::fs::metadata(&pending)?.permissions().mode() & 0o777,
+        0o600
+    );
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o644))?;
+    assert!(matches!(
+        FileCache::open(&mut fixture.store, &fixture.root, limits()),
+        Err(domus::Error::InvalidInput(_))
+    ));
+    assert_eq!(std::fs::read(&pending)?, b"interrupted private write");
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o600))?;
+    drop(fixture.open()?);
+    assert!(!pending.exists());
     Ok(())
 }
 
