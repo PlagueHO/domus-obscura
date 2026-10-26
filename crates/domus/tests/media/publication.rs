@@ -13,6 +13,115 @@ fn normalized(fixture: &mut Fixture) -> Result<i64, Box<dyn std::error::Error>> 
     )?)
 }
 
+#[test]
+fn browser_publication_recovery_requires_exact_retained_journal_and_never_rewrites_partial_files()
+-> TestResult {
+    use domus::infrastructure::worker::{ResumePublication, resume_publication};
+    for partial in [false, true] {
+        let mut fixture = Fixture::build(AudioFormat::Flac, true)?;
+        let run = normalized(&mut fixture)?;
+        let resume = |run, acknowledge| {
+            resume_publication(
+                &fixture.database,
+                fixture.scratch.path(),
+                fixture.job,
+                fixture.version,
+                ResumePublication {
+                    normalization_run: run,
+                    acknowledge_new_only_publication: acknowledge,
+                },
+            )
+        };
+        assert!(resume(run, false).is_err());
+        assert!(
+            resume(run, true).is_err(),
+            "no journal is not recovery authority"
+        );
+        let raw = Connection::open(&fixture.database)?;
+        raw.execute_batch("CREATE TRIGGER fail_recovery_receipt BEFORE UPDATE OF verified_at ON publication_files BEGIN SELECT RAISE(ABORT,'injected'); END;")?;
+        assert!(
+            publish_new_album(
+                &mut fixture.store,
+                &fixture.claim,
+                fixture.staging.as_ref().ok_or("staging")?,
+                run
+            )
+            .is_err()
+        );
+        raw.execute_batch("DROP TRIGGER fail_recovery_receipt; UPDATE jobs SET lease_until=0;")?;
+        let image = album(&fixture, fixture._library.path())?.join("folder.jpg");
+        if partial {
+            std::fs::write(&image, b"retain partial image")?;
+        }
+        let before = std::fs::read(&image)?;
+        drop(fixture.staging.take());
+        let snapshot = serde_json::to_value(fixture.store.transfers(
+            fixture.job,
+            fixture.version,
+            Page::new(0, 200)?,
+        )?)?;
+        let generation: i64 = raw.query_row(
+            "SELECT claim_generation FROM jobs WHERE id=?1",
+            [fixture.job],
+            |row| row.get(0),
+        )?;
+        let result = resume_publication(
+            &fixture.database,
+            fixture.scratch.path(),
+            fixture.job,
+            fixture.version,
+            ResumePublication {
+                normalization_run: run + 1,
+                acknowledge_new_only_publication: true,
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            raw.query_row(
+                "SELECT claim_generation FROM jobs WHERE id=?1",
+                [fixture.job],
+                |row| row.get::<_, i64>(0)
+            )?,
+            generation
+        );
+        let result = resume_publication(
+            &fixture.database,
+            fixture.scratch.path(),
+            fixture.job,
+            fixture.version,
+            ResumePublication {
+                normalization_run: run,
+                acknowledge_new_only_publication: true,
+            },
+        );
+        if partial {
+            assert!(result.is_err());
+            assert_eq!(
+                fixture.store.job_state(fixture.job)?.as_deref(),
+                Some("publishing")
+            );
+        } else {
+            assert_eq!(result?.state, "complete");
+            verify_album(&fixture, run, fixture._library.path())?;
+        }
+        assert_eq!(std::fs::read(&image)?, before);
+        assert_eq!(
+            serde_json::to_value(fixture.store.transfers(
+                fixture.job,
+                fixture.version,
+                Page::new(0, 200)?
+            )?)?,
+            snapshot
+        );
+        assert_eq!(
+            raw.query_row("SELECT count(*) FROM normalization_runs", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+    }
+    Ok(())
+}
+
 fn album(fixture: &Fixture, root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let plan = fixture.store.plan(fixture.job, fixture.version)?;
     Ok(root.join(
@@ -677,11 +786,11 @@ fn schema_fifteen_upgrade_preserves_completed_normalization_and_approval() -> Te
         [run],
         |row| row.get(0),
     )?;
-    raw.execute_batch("DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; PRAGMA user_version=15; UPDATE jobs SET lease_until=0;")?;
+    raw.execute_batch("DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; PRAGMA user_version=15; UPDATE jobs SET lease_until=0;")?;
     fixture.store = Store::open(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        18
+        20
     );
     assert_eq!(
         raw.query_row(

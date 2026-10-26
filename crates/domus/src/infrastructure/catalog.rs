@@ -29,6 +29,9 @@ pub struct CatalogQuery {
 
 #[derive(Clone)]
 enum QueryKind {
+    Artist {
+        id: String,
+    },
     Artists {
         offset: u32,
         limit: u16,
@@ -43,6 +46,12 @@ enum QueryKind {
         offset: u32,
         limit: u16,
         artist: Option<String>,
+        filters: CatalogReleaseFilters,
+    },
+    GroupReleases {
+        offset: u32,
+        limit: u16,
+        group: String,
         filters: CatalogReleaseFilters,
     },
     Release {
@@ -69,6 +78,17 @@ impl CatalogQuery {
             // MusicBrainz's default artist fields include aliases and sort names.
             .append_pair("query", &format!("\"{literal}\""));
         Ok(query)
+    }
+
+    pub fn artist(id: &str) -> Result<Self> {
+        input_id(id)?;
+        let mut url = reqwest::Url::parse(&format!("https://musicbrainz.org/ws/2/artist/{id}"))
+            .map_err(|_| Error::Internal("catalog URL construction failed"))?;
+        url.query_pairs_mut().append_pair("fmt", "json");
+        Ok(Self {
+            url,
+            kind: QueryKind::Artist { id: id.into() },
+        })
     }
 
     pub fn releases(artist: &str, offset: u32, limit: u16) -> Result<Self> {
@@ -159,6 +179,38 @@ impl CatalogQuery {
         Ok(query)
     }
 
+    pub fn group_releases(
+        group: &str,
+        offset: u32,
+        limit: u16,
+        filters: CatalogReleaseFilters,
+    ) -> Result<Self> {
+        input_id(group)?;
+        let mut query = Self::page(
+            "release",
+            offset,
+            limit,
+            QueryKind::GroupReleases {
+                offset,
+                limit,
+                group: group.into(),
+                filters,
+            },
+        )?;
+        query
+            .url
+            .query_pairs_mut()
+            .append_pair("release-group", group)
+            .append_pair("inc", "artist-credits release-groups media");
+        if !filters.include_unofficial {
+            query
+                .url
+                .query_pairs_mut()
+                .append_pair("status", "official");
+        }
+        Ok(query)
+    }
+
     pub fn release(id: &str) -> Result<Self> {
         input_id(id)?;
         let mut url = reqwest::Url::parse(&format!("https://musicbrainz.org/ws/2/release/{id}"))
@@ -193,12 +245,26 @@ impl CatalogQuery {
 
     pub fn validate_response(&self, body: &[u8]) -> Result<()> {
         match self.kind {
+            QueryKind::Artist { .. } => self.parse_artist(body).map(|_| ()),
             QueryKind::Artists { .. } => self.parse_artists(body).map(|_| ()),
-            QueryKind::Releases { .. } | QueryKind::Albums { .. } => {
-                self.parse_releases(body).map(|_| ())
-            }
+            QueryKind::Releases { .. }
+            | QueryKind::Albums { .. }
+            | QueryKind::GroupReleases { .. } => self.parse_releases(body).map(|_| ()),
             QueryKind::Release { .. } => self.parse_release(body).map(|_| ()),
         }
+    }
+
+    pub fn parse_artist(&self, body: &[u8]) -> Result<CatalogArtist> {
+        let QueryKind::Artist { ref id } = self.kind else {
+            return Err(Error::Internal("catalog query does not request an artist"));
+        };
+        let artist: Artist = json(body)?;
+        if &artist.id != id {
+            return Err(bad(
+                "MusicBrainz artist differs from the requested identity",
+            ));
+        }
+        artist.into_catalog()
     }
 
     pub fn parse_artists(&self, body: &[u8]) -> Result<CatalogPage<CatalogArtist>> {
@@ -214,15 +280,7 @@ impl CatalogQuery {
             if !ids.insert(artist.id.clone()) {
                 return Err(bad("MusicBrainz artist page has duplicate IDs"));
             }
-            text(&artist.name)?;
-            items.push(CatalogArtist {
-                id: artist.id,
-                name: artist.name,
-                sort_name: optional_text(artist.sort_name)?,
-                disambiguation: optional_text(artist.disambiguation)?,
-                country: optional_text(artist.country)?,
-                kind: optional_text(artist.kind)?,
-            });
+            items.push(artist.into_catalog()?);
         }
         Ok(CatalogPage {
             offset,
@@ -232,19 +290,32 @@ impl CatalogQuery {
     }
 
     pub fn parse_releases(&self, body: &[u8]) -> Result<CatalogReleasePage> {
-        let (offset, limit, filters, artist, search) = match &self.kind {
+        let (offset, limit, filters, artist, group, search) = match &self.kind {
             QueryKind::Releases {
                 offset,
                 limit,
                 filters,
                 artist,
-            } => (*offset, *limit, *filters, Some(artist.as_str()), false),
+            } => (
+                *offset,
+                *limit,
+                *filters,
+                Some(artist.as_str()),
+                None,
+                false,
+            ),
             QueryKind::Albums {
                 offset,
                 limit,
                 filters,
                 artist,
-            } => (*offset, *limit, *filters, artist.as_deref(), true),
+            } => (*offset, *limit, *filters, artist.as_deref(), None, true),
+            QueryKind::GroupReleases {
+                offset,
+                limit,
+                filters,
+                group,
+            } => (*offset, *limit, *filters, None, Some(group.as_str()), false),
             _ => return Err(Error::Internal("catalog query does not request releases")),
         };
         let page: ReleasePage = if search {
@@ -275,6 +346,12 @@ impl CatalogQuery {
                 return Err(bad("MusicBrainz returned a release by a different artist"));
             }
             let summary = summary(release)?;
+            if group.is_some_and(|group| summary.group.as_ref().is_none_or(|item| item.id != group))
+            {
+                return Err(bad(
+                    "MusicBrainz returned a release from a different release group",
+                ));
+            }
             if !ids.insert(summary.id.clone()) {
                 return Err(bad("MusicBrainz release page has duplicate IDs"));
             }
@@ -753,6 +830,20 @@ struct Artist {
     country: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+}
+impl Artist {
+    fn into_catalog(self) -> Result<CatalogArtist> {
+        provider_id(&self.id)?;
+        text(&self.name)?;
+        Ok(CatalogArtist {
+            id: self.id,
+            name: self.name,
+            sort_name: optional_text(self.sort_name)?,
+            disambiguation: optional_text(self.disambiguation)?,
+            country: optional_text(self.country)?,
+            kind: optional_text(self.kind)?,
+        })
+    }
 }
 #[derive(Deserialize)]
 struct ReleasePage {

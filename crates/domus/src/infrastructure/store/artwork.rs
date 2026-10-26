@@ -1,6 +1,6 @@
 use super::{Store, planning};
 use crate::domain::Page;
-use crate::infrastructure::artwork::{COVER_PROFILE, CoverJpeg, normalize_cover};
+use crate::infrastructure::artwork::{COVER_PROFILE, CoverJpeg, normalize_cover_for_size};
 use crate::{Error, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
@@ -310,8 +310,8 @@ impl Store {
         background: Option<[u8; 3]>,
         evidence: Option<&super::caa::PreparedCaa>,
     ) -> Result<ArtworkCandidate> {
-        writable_plan(&self.connection, job, version)?;
-        let jpeg = normalize_cover(input, background)?;
+        let current = writable_plan(&self.connection, job, version)?;
+        let jpeg = normalize_cover_for_size(input, background, current.plan.settings.artwork_size)?;
         let input_hash: [u8; 32] = Sha256::digest(input).into();
         let background = serde_json::to_string(&background)?;
         let transaction = self

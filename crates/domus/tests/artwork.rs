@@ -1,5 +1,6 @@
 use domus::Error;
-use domus::infrastructure::artwork::normalize_cover;
+use domus::domain::ArtworkSize;
+use domus::infrastructure::artwork::{normalize_cover, normalize_cover_for_size};
 use image::{DynamicImage, ImageBuffer, ImageEncoder, ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
@@ -66,6 +67,45 @@ fn artwork_dimensions_ratio_no_enlargement_and_one_payload() -> TestResult {
     let (width, height) = cover.dimensions();
     assert_eq!(width, 1200);
     assert!((f64::from(height) - f64::from(width) * 901.0 / 1601.0).abs() <= 1.0);
+    Ok(())
+}
+
+#[test]
+fn configured_artwork_sizes_preserve_ratio_and_never_enlarge() -> TestResult {
+    let cases = [
+        (ArtworkSize::Small, 200),
+        (ArtworkSize::Recommended, 400),
+        (ArtworkSize::Large, 800),
+    ];
+    for (size, maximum) in cases {
+        for (width, height) in [(1600, 800), (800, 1600), (1200, 1200), (300, 150), (50, 80)] {
+            let image =
+                DynamicImage::ImageRgb8(RgbImage::from_pixel(width, height, Rgb([10, 80, 140])));
+            let input = encode(&image, ImageFormat::Png)?;
+            let cover = normalize_cover_for_size(&input, None, Some(size))?;
+            let (actual_width, actual_height) = cover.dimensions();
+            assert!(actual_width <= maximum && actual_height <= maximum);
+            assert!(actual_width <= width && actual_height <= height);
+            assert!(
+                (f64::from(actual_width) / f64::from(actual_height)
+                    - f64::from(width) / f64::from(height))
+                .abs()
+                    < 0.02
+            );
+        }
+    }
+    assert_eq!(
+        normalize_cover_for_size(
+            &encode(
+                &DynamicImage::ImageRgb8(RgbImage::new(900, 600)),
+                ImageFormat::Png
+            )?,
+            None,
+            Some(ArtworkSize::Recommended)
+        )?
+        .dimensions(),
+        (400, 267)
+    );
     Ok(())
 }
 

@@ -100,7 +100,8 @@ async fn development_https_uses_anonymous_without_sessions_or_entra() -> TestRes
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let address = listener.local_addr()?;
     let origin = format!("https://localhost:{}", address.port());
-    let api = Api::development(&origin, Store::open(&database)?)?;
+    let api =
+        Api::development(&origin, Store::open(&database)?)?.with_system_settings_read_only(true)?;
     let config = tls::configuration(
         "localhost",
         material.chain.as_bytes(),
@@ -171,6 +172,26 @@ async fn development_https_uses_anonymous_without_sessions_or_entra() -> TestRes
             .status(),
         StatusCode::OK
     );
+    let policy: Value = serde_json::from_slice(
+        &client
+            .get(format!("{origin}/api/system/settings-policy"))
+            .send()
+            .await?
+            .bytes()
+            .await?,
+    )?;
+    assert_eq!(policy["read_only"], true);
+    let blocked_save = client
+        .put(format!("{origin}/api/settings"))
+        .header(header::ORIGIN, &origin)
+        .header("x-domus-csrf", "1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(serde_json::to_vec(
+            &json!({"expected_version": null, "settings": domus::domain::OutputSettings::default()}),
+        )?)
+        .send()
+        .await?;
+    assert_eq!(blocked_save.status(), StatusCode::FORBIDDEN);
     assert_eq!(
         client
             .post(format!("{origin}/api/jobs"))

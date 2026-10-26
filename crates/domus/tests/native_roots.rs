@@ -1,4 +1,4 @@
-use domus::application::{add_location, scan_location};
+use domus::application::{add_location, check_location_availability, scan_location};
 use domus::domain::{LibraryPath, Page};
 use domus::infrastructure::filesystem::native_root_identity;
 use domus::infrastructure::staging::StagingRoot;
@@ -8,6 +8,58 @@ mod private;
 use private::tempdir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[test]
+fn root_availability_checks_preserve_cached_coverage_when_missing_or_replaced() -> TestResult {
+    let state = tempdir()?;
+    let scratch = tempdir()?;
+    let root = scratch.path().join("root");
+    let retained = scratch.path().join("retained");
+    std::fs::create_dir(&root)?;
+    std::fs::write(root.join("original.mp3"), b"generated sentinel")?;
+    let database = state.path().join("state.db");
+    let mut store = Store::open(&database)?;
+    let id = add_location(&store, &root, "main")?;
+    scan_location(&mut store, id)?;
+    let location = serde_json::to_value(store.location(id)?)?;
+    let entries =
+        serde_json::to_value(store.browse(id, &LibraryPath::parse("")?, Page::new(0, 50)?)?)?;
+    let raw = rusqlite::Connection::open(&database)?;
+    let changes =
+        || -> rusqlite::Result<i64> { raw.query_row("PRAGMA data_version", [], |row| row.get(0)) };
+    let before = changes()?;
+    check_location_availability(&store, id)?;
+    assert!(check_location_availability(&store, i64::MAX).is_err());
+    std::fs::rename(&root, &retained)?;
+    assert!(matches!(
+        check_location_availability(&store, id),
+        Err(domus::Error::Io(_))
+    ));
+    std::fs::create_dir(&root)?;
+    assert!(matches!(
+        check_location_availability(&store, id),
+        Err(domus::Error::Conflict(_))
+    ));
+    assert_eq!(std::fs::read_dir(&root)?.count(), 0);
+    std::fs::remove_dir(&root)?;
+    std::fs::rename(&retained, &root)?;
+    check_location_availability(&store, id)?;
+    assert_eq!(
+        changes()?,
+        before,
+        "availability must not write the database"
+    );
+    assert_eq!(serde_json::to_value(store.location(id)?)?, location);
+    assert_eq!(
+        serde_json::to_value(store.browse(id, &LibraryPath::parse("")?, Page::new(0, 50)?)?)?,
+        entries,
+    );
+    assert_eq!(
+        std::fs::read(root.join("original.mp3"))?,
+        b"generated sentinel"
+    );
+    Ok(())
+}
 
 #[test]
 fn native_identity_is_stable_across_reopen_and_rename_but_not_a_different_directory() -> TestResult
@@ -96,9 +148,15 @@ fn schema_twelve_upgrade_requires_explicit_native_binding_without_losing_observa
     scan_location(&mut store, location)?;
     drop(store);
     let raw = rusqlite::Connection::open(&database)?;
-    raw.execute_batch("DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; PRAGMA user_version = 12;")?;
+    raw.execute_batch("DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; PRAGMA user_version = 12;")?;
     let mut store = Store::open_existing(&database)?;
     assert!(store.location(location)?.native_identity.is_none());
+    let before_check = serde_json::to_value(store.location(location)?)?;
+    assert!(check_location_availability(&store, location).is_err());
+    assert_eq!(
+        serde_json::to_value(store.location(location)?)?,
+        before_check
+    );
     assert!(scan_location(&mut store, location).is_err());
     assert!(add_location(&store, another.path(), "backup").is_err());
     assert!(
@@ -177,7 +235,7 @@ fn legacy_staging_binding_checks_exact_identity_before_any_marker_change() -> Te
     let marker = std::fs::read(scratch.path().join("owner.lock"))?;
     drop(store);
     let raw = rusqlite::Connection::open(&database)?;
-    raw.execute_batch("DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; PRAGMA user_version = 12;")?;
+    raw.execute_batch("DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; PRAGMA user_version = 12;")?;
     let mut store = Store::open_existing(&database)?;
     assert!(StagingRoot::open(&mut store, scratch.path()).is_err());
     assert!(store.bind_staging_root(scratch.path(), "wrong").is_err());

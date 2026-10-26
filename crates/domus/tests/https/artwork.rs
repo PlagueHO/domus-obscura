@@ -162,6 +162,21 @@ pub(super) async fn check_artwork(
             .await?;
     assert_eq!(saved["paused_state"], "queued");
     assert!(saved["candidate_id"].is_null());
+    let details = json_body(
+        api_request(
+            router,
+            "GET",
+            &format!("/api/questions/{question_id}"),
+            Some(cookie),
+            None,
+            None,
+        )
+        .await?,
+    )
+    .await?;
+    assert_eq!(details["current"], true);
+    assert_eq!(details["recovery"]["kind"], "artwork");
+    assert_eq!(details["recovery"]["decision"], saved);
     let answer_path = format!("/api/questions/{question_id}/answer");
     let use_cover = json!({"plan_version":2,"choice":"Use approved cover"});
     assert_eq!(

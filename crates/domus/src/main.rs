@@ -29,6 +29,7 @@ const USAGE: &str = "Usage:
   domus staging-init <local-database> <absolute-root>
   domus settings-save <local-database> <expected-version-or-0> <settings-json>
   domus job-create <local-database>
+  domus job-history <local-database> <job-id> <plan-version> <after-id> <limit>
   domus job-control <local-database> <job-id> <plan-version> <pause|cancel>
   domus job-control-status <local-database> <control-id>
   domus job-control-continue <local-database> <control-id> <plan-version>
@@ -82,24 +83,26 @@ fn run(args: &[String]) -> Result<()> {
         }
         [command, directory] if matches!(command.as_str(), "contracts" | "contracts-check") => {
             use domus::domain::{
-                ArtworkIssue, AudioFormat, CatalogArtist, CatalogCredit, CatalogMedium,
-                CatalogPage, CatalogRelease, CatalogReleaseFilters, CatalogReleaseGroup,
-                CatalogReleasePage, CatalogReleaseSummary, CatalogTrack, EditionSelection,
-                JobState, OutputPreview, OutputSettings, OutputTemplate, PlannedTrack,
+                ArtworkIssue, ArtworkSize, AudioFormat, CatalogArtist, CatalogCredit,
+                CatalogMedium, CatalogPage, CatalogRelease, CatalogReleaseFilters,
+                CatalogReleaseGroup, CatalogReleasePage, CatalogReleaseSummary, CatalogTrack,
+                EditionSelection, JobState, OutputPreview, OutputSettings, OutputTemplate,
+                PlannedTrack,
             };
             use domus::infrastructure::api::{
                 Answer, ApiMessage, ApproveArtwork, ArtistSearch, BrowseQuery, CaaCoverOption,
                 CaaCoverSearch, CatalogBatchPlanRequest, CatalogPageQuery, CatalogPlanRequest,
                 CatalogPlanSelection, CatalogResumeRequest, CreateJob, CreatedJob, EventCursor,
-                PageQuery, PrepareCaaArtwork, ResumeArtwork, SaveSettings,
+                PageQuery, PrepareCaaArtwork, RegisterLocation, ResumeArtwork, SaveSettings,
+                ScanLocation, SystemSettingsPolicy,
             };
             use domus::infrastructure::caa::{CaaImage, CaaListing};
             use domus::infrastructure::catalog::CatalogResult;
             use domus::infrastructure::store::{
                 ArtworkCandidate, ArtworkDecision, CaaArtworkEvidence, CatalogProviderState,
                 CatalogStatus, Entry, JobEvent, JobSummary, Location, PlanDestination,
-                PreparedPlan, SessionIdentity, SettingsVersion, StoredPlan, StoredQuestion,
-                TransferFile,
+                PreparedPlan, QuestionDetails, QuestionRecovery, SessionIdentity, SettingsVersion,
+                StoredPlan, StoredQuestion, TransferFile,
             };
             use ts_rs::TS;
             // serde_json emits integer JSON numbers, not JavaScript bigint values.
@@ -120,6 +123,10 @@ fn run(args: &[String]) -> Result<()> {
                 (
                     "StartLocalDownload.ts",
                     domus::infrastructure::worker::StartLocalDownload::export_to_string(&config),
+                ),
+                (
+                    "ResumePublication.ts",
+                    domus::infrastructure::worker::ResumePublication::export_to_string(&config),
                 ),
                 (
                     "SearchReport.ts",
@@ -274,6 +281,7 @@ fn run(args: &[String]) -> Result<()> {
                     CatalogPlanRequest::export_to_string(&config),
                 ),
                 ("AudioFormat.ts", AudioFormat::export_to_string(&config)),
+                ("ArtworkSize.ts", ArtworkSize::export_to_string(&config)),
                 ("JobState.ts", JobState::export_to_string(&config)),
                 ("OutputPreview.ts", OutputPreview::export_to_string(&config)),
                 (
@@ -306,7 +314,19 @@ fn run(args: &[String]) -> Result<()> {
                     "StoredQuestion.ts",
                     StoredQuestion::export_to_string(&config),
                 ),
+                (
+                    "QuestionDetails.ts",
+                    QuestionDetails::export_to_string(&config),
+                ),
+                (
+                    "QuestionRecovery.ts",
+                    QuestionRecovery::export_to_string(&config),
+                ),
                 ("JobSummary.ts", JobSummary::export_to_string(&config)),
+                (
+                    "QueueSelection.ts",
+                    domus::infrastructure::store::QueueSelection::export_to_string(&config),
+                ),
                 ("JobEvent.ts", JobEvent::export_to_string(&config)),
                 (
                     "SessionIdentity.ts",
@@ -324,11 +344,20 @@ fn run(args: &[String]) -> Result<()> {
                 ("PageQuery.ts", PageQuery::export_to_string(&config)),
                 ("BrowseQuery.ts", BrowseQuery::export_to_string(&config)),
                 ("SaveSettings.ts", SaveSettings::export_to_string(&config)),
+                (
+                    "RegisterLocation.ts",
+                    RegisterLocation::export_to_string(&config),
+                ),
+                ("ScanLocation.ts", ScanLocation::export_to_string(&config)),
                 ("CreateJob.ts", CreateJob::export_to_string(&config)),
                 ("CreatedJob.ts", CreatedJob::export_to_string(&config)),
                 ("Answer.ts", Answer::export_to_string(&config)),
                 ("TransferFile.ts", TransferFile::export_to_string(&config)),
                 ("EventCursor.ts", EventCursor::export_to_string(&config)),
+                (
+                    "SystemSettingsPolicy.ts",
+                    SystemSettingsPolicy::export_to_string(&config),
+                ),
             ];
             if command == "contracts" {
                 std::fs::create_dir_all(directory)?;
@@ -548,6 +577,16 @@ fn run(args: &[String]) -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&store.job_control(number(id)?)?)?
+            );
+        }
+        [command, database, job, version, after, limit] if command == "job-history" => {
+            let job = number(job)?;
+            let version = number(version)?;
+            let page = Page::new(number(after)?, number(limit)?)?;
+            let store = Store::open_read_snapshot(Path::new(database))?;
+            println!(
+                "{}",
+                serde_json::to_string(&store.plan_events(job, version, page)?)?
             );
         }
         [command, database, id, version] if command == "job-control-continue" => {

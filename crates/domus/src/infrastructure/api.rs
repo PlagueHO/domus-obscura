@@ -3,8 +3,8 @@ use super::entra::EntraBroker;
 use super::identity::LoginChallenges;
 use super::store::{
     ArtworkCandidate, ArtworkDecision, CatalogStatus, Entry, JobControl, JobControlAction,
-    JobEvent, JobSummary, Location, PlanRequest, SettingsVersion, Store, StoredPlan,
-    StoredQuestion, TransferFile,
+    JobEvent, JobSummary, Location, PlanRequest, QuestionDetails, SettingsVersion, Store,
+    StoredPlan, StoredQuestion, TransferFile,
 };
 pub use crate::application::catalog::CatalogPlanRequest;
 use crate::domain::{
@@ -38,6 +38,7 @@ struct Shared {
     browser: Option<super::browser::BrowserAssets>,
     local: Option<super::local_runtime::LocalRuntime>,
     services: super::services::ServiceHost,
+    system_settings_read_only: bool,
     request_slots: Semaphore,
     event_slots: Arc<Semaphore>,
     broker: Option<RwLock<Arc<EntraBroker>>>,
@@ -60,6 +61,11 @@ pub struct ApiMessage {
 #[derive(Serialize, ts_rs::TS)]
 pub struct EventCursor {
     pub after: i64,
+}
+
+#[derive(Serialize, ts_rs::TS)]
+pub struct SystemSettingsPolicy {
+    pub read_only: bool,
 }
 
 impl ApiError {
@@ -232,6 +238,7 @@ impl Api {
             browser: None,
             local: None,
             services: super::services::ServiceHost::with_catalog(store, configuration, catalog)?,
+            system_settings_read_only: false,
             request_slots: Semaphore::new(32),
             event_slots: Arc::new(Semaphore::new(4)),
             broker: broker.map(|broker| RwLock::new(Arc::new(broker))),
@@ -260,19 +267,40 @@ impl Api {
                 post(local_run).layer(DefaultBodyLimit::max(512)),
             )
             .route(
+                "/api/jobs/{id}/plans/{version}/publication/resume",
+                post(local_publication_resume).layer(DefaultBodyLimit::max(512)),
+            )
+            .route(
                 "/api/jobs/{id}/plans/{version}/artwork/local",
                 post(upload_artwork).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
             )
             .route("/api/session", get(session))
             .route("/auth/logout", post(logout))
-            .route("/api/locations", get(locations))
+            .route(
+                "/api/locations",
+                get(locations).merge(post(register_location).layer(DefaultBodyLimit::max(16384))),
+            )
             .route("/api/locations/{id}", get(location))
+            .route(
+                "/api/locations/{id}/availability",
+                get(location_availability),
+            )
+            .route(
+                "/api/locations/{id}/scan",
+                post(scan_location).layer(DefaultBodyLimit::max(1024)),
+            )
             .route("/api/locations/{id}/entries", get(entries))
             .route(
                 "/api/settings",
                 get(settings).merge(put(save_settings).layer(DefaultBodyLimit::max(16384))),
             )
+            .route("/api/system/settings-policy", get(settings_policy))
             .route("/api/jobs", get(jobs).post(create_job))
+            .route("/api/queue", get(queue))
+            .route(
+                "/api/queue/dismiss",
+                post(dismiss_finished).layer(DefaultBodyLimit::max(8192)),
+            )
             .route("/api/plans", post(prepare_plan))
             .route("/api/jobs/{id}/plans/{version}", get(plan))
             .route("/api/jobs/{id}/plans/{version}/transfers", get(transfers))
@@ -328,6 +356,9 @@ impl Api {
                 post(approve_artwork).layer(DefaultBodyLimit::max(512)),
             )
             .route("/api/questions", get(questions))
+            .route("/api/inbox", get(inbox))
+            .route("/api/questions/{id}", get(question_details))
+            .route("/api/jobs/{id}/plans/{version}/decision", get(job_decision))
             .route(
                 "/api/jobs/{id}/plans/{version}/publication",
                 get(publication_status),
@@ -343,14 +374,20 @@ impl Api {
             )
             .route("/api/questions/{id}/answer", post(answer))
             .route("/api/events", get(events))
+            .route("/api/jobs/{id}/plans/{version}/events", get(plan_events))
             .route("/api/events/cursor", get(event_cursor))
             .route("/api/events/stream", get(event_stream))
             .route("/api/discovery/artists", get(search_artists))
+            .route("/api/discovery/artists/{id}", get(artist_details))
             .route("/api/discovery/releases", get(search_albums))
             .route("/api/discovery/plans", post(prepare_catalog_plans))
             .route("/api/discovery/status", get(catalog_status))
             .route("/api/discovery/resume", post(resume_catalog))
             .route("/api/discovery/artists/{id}/releases", get(artist_releases))
+            .route(
+                "/api/discovery/release-groups/{id}/releases",
+                get(group_releases),
+            )
             .route("/api/discovery/releases/{id}", get(release_details))
             .route(
                 "/api/discovery/releases/{id}/plans",
@@ -373,6 +410,13 @@ impl Api {
         Ok(self)
     }
 
+    pub fn with_system_settings_read_only(mut self, read_only: bool) -> Result<Self> {
+        Arc::get_mut(&mut self.0)
+            .ok_or(Error::Internal("API already shared"))?
+            .system_settings_read_only = read_only;
+        Ok(self)
+    }
+
     /// Only explicit anonymous development composition can enable native local
     /// acquisition. Missing production credentials never activate these commands.
     pub fn with_local_runtime(mut self, local: super::local_runtime::LocalRuntime) -> Result<Self> {
@@ -385,6 +429,19 @@ impl Api {
             .ok_or(Error::Internal("API already shared"))?
             .local = Some(local);
         Ok(self)
+    }
+
+    pub(crate) fn stop_local_operations(&self) {
+        if let Some(local) = &self.0.local {
+            local.stop_accepting();
+        }
+    }
+
+    pub(crate) async fn drain_local_operations(&self) -> Result<()> {
+        if let Some(local) = &self.0.local {
+            local.drain().await?;
+        }
+        Ok(())
     }
 
     fn local(&self) -> ApiResult<&super::local_runtime::LocalRuntime> {
@@ -600,6 +657,36 @@ async fn artist_releases(
     };
     Ok(Json(
         api.catalog(query, CatalogQuery::parse_releases).await?,
+    ))
+}
+
+async fn artist_details(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<CatalogResult<CatalogArtist>>> {
+    Ok(Json(
+        api.catalog(CatalogQuery::artist(&id)?, CatalogQuery::parse_artist)
+            .await?,
+    ))
+}
+
+async fn group_releases(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(page): Query<CatalogPageQuery>,
+) -> ApiResult<Json<CatalogResult<CatalogReleasePage>>> {
+    if !page.query.is_empty() || page.artist_id.is_some() {
+        return Err(Error::InvalidInput(
+            "edition browsing accepts a release group, not search text or an artist filter".into(),
+        )
+        .into());
+    }
+    Ok(Json(
+        api.catalog(
+            CatalogQuery::group_releases(&id, page.offset, page.limit, page.filters())?,
+            CatalogQuery::parse_releases,
+        )
+        .await?,
     ))
 }
 
@@ -1107,6 +1194,15 @@ async fn local_run(
     Ok(StatusCode::ACCEPTED)
 }
 
+async fn local_publication_resume(
+    State(api): State<Api>,
+    Path((job, version)): Path<(i64, i64)>,
+    Json(request): Json<super::worker::ResumePublication>,
+) -> ApiResult<StatusCode> {
+    api.local()?.resume_publication(job, version, request)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UploadArtworkQuery {
@@ -1179,6 +1275,65 @@ async fn locations(
 async fn location(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult<Json<Location>> {
     Ok(Json(api.database(move |store| store.location(id)).await?))
 }
+
+async fn location_availability(
+    State(api): State<Api>,
+    Path(id): Path<i64>,
+) -> ApiResult<StatusCode> {
+    api.database(move |store| crate::application::check_location_availability(store, id))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterLocation {
+    root: String,
+    kind: String,
+}
+
+async fn register_location(
+    State(api): State<Api>,
+    Json(request): Json<RegisterLocation>,
+) -> ApiResult<Json<Location>> {
+    api.require_settings_write()?;
+    if request.root.len() > 4096 || !std::path::Path::new(&request.root).is_absolute() {
+        return Err(Error::InvalidInput(
+            "library root must be an absolute server path of at most 4096 bytes".into(),
+        )
+        .into());
+    }
+    Ok(Json(
+        api.database(move |store| {
+            let id = crate::application::add_location(
+                store,
+                std::path::Path::new(&request.root),
+                &request.kind,
+            )?;
+            store.location(id)
+        })
+        .await?,
+    ))
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct ScanLocation {}
+
+async fn scan_location(
+    State(api): State<Api>,
+    Path(id): Path<i64>,
+    Json(_request): Json<ScanLocation>,
+) -> ApiResult<Json<Location>> {
+    api.require_settings_write()?;
+    Ok(Json(
+        api.database(move |store| {
+            crate::application::scan_location(store, id)?;
+            store.location(id)
+        })
+        .await?,
+    ))
+}
 #[derive(Deserialize, ts_rs::TS)]
 #[serde(default, deny_unknown_fields)]
 pub struct BrowseQuery {
@@ -1210,6 +1365,13 @@ async fn entries(
 async fn settings(State(api): State<Api>) -> ApiResult<Json<Option<SettingsVersion>>> {
     Ok(Json(api.database(|store| store.settings()).await?))
 }
+
+async fn settings_policy(State(api): State<Api>) -> Json<SystemSettingsPolicy> {
+    Json(SystemSettingsPolicy {
+        read_only: api.0.system_settings_read_only,
+    })
+}
+
 #[derive(Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct SaveSettings {
@@ -1220,10 +1382,23 @@ async fn save_settings(
     State(api): State<Api>,
     Json(request): Json<SaveSettings>,
 ) -> ApiResult<Json<i64>> {
+    api.require_settings_write()?;
     Ok(Json(
         api.database(move |store| store.save_settings(request.expected_version, &request.settings))
             .await?,
     ))
+}
+
+impl Api {
+    fn require_settings_write(&self) -> ApiResult<()> {
+        if self.0.system_settings_read_only {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "system settings are read-only in server configuration",
+            ));
+        }
+        Ok(())
+    }
 }
 async fn jobs(
     State(api): State<Api>,
@@ -1231,6 +1406,23 @@ async fn jobs(
 ) -> ApiResult<Json<Vec<JobSummary>>> {
     let page = query.page()?;
     Ok(Json(api.database(move |store| store.jobs(page)).await?))
+}
+
+async fn queue(
+    State(api): State<Api>,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Vec<JobSummary>>> {
+    let page = query.page()?;
+    Ok(Json(api.database(move |store| store.queue(page)).await?))
+}
+
+async fn dismiss_finished(
+    State(api): State<Api>,
+    Json(selection): Json<Vec<super::store::QueueSelection>>,
+) -> ApiResult<StatusCode> {
+    api.database(move |store| store.dismiss_finished(&selection))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 #[derive(Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
@@ -1491,6 +1683,34 @@ async fn questions(
     ))
 }
 
+async fn inbox(
+    State(api): State<Api>,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Vec<StoredQuestion>>> {
+    let page = query.page()?;
+    Ok(Json(api.database(move |store| store.inbox(page)).await?))
+}
+
+async fn question_details(
+    State(api): State<Api>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<QuestionDetails>> {
+    Ok(Json(
+        api.database(move |store| store.question_details(id))
+            .await?,
+    ))
+}
+
+async fn job_decision(
+    State(api): State<Api>,
+    Path((job, version)): Path<(i64, i64)>,
+) -> ApiResult<Json<Option<QuestionDetails>>> {
+    Ok(Json(
+        api.database(move |store| store.job_decision(job, version))
+            .await?,
+    ))
+}
+
 async fn publication_status(
     State(api): State<Api>,
     Path((id, version)): Path<(i64, i64)>,
@@ -1674,6 +1894,18 @@ async fn events(
 ) -> ApiResult<Json<Vec<JobEvent>>> {
     let page = query.page()?;
     Ok(Json(api.database(move |store| store.events(page)).await?))
+}
+
+async fn plan_events(
+    State(api): State<Api>,
+    Path((job, version)): Path<(i64, i64)>,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Vec<JobEvent>>> {
+    let page = query.page()?;
+    Ok(Json(
+        api.database(move |store| store.plan_events(job, version, page))
+            .await?,
+    ))
 }
 
 async fn event_cursor(State(api): State<Api>) -> ApiResult<Json<EventCursor>> {

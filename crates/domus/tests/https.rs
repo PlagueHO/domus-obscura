@@ -808,13 +808,21 @@ async fn browser_sign_in_guards_commands_rotates_sessions_and_preserves_durable_
         "/api/session",
         "/api/jobs",
         "/api/locations",
+        "/api/locations/1/availability",
+        "/api/locations/1/scan",
         "/api/settings",
+        "/api/system/settings-policy",
         "/api/questions",
+        "/api/inbox",
+        "/api/questions/1",
+        "/api/jobs/1/plans/2/decision",
+        "/api/jobs/1/plans/2/events",
         "/api/events",
         "/api/events/cursor",
         "/api/events/stream",
         "/api/jobs/1/plans/2/transfers",
         "/api/jobs/1/plans/2/publication",
+        "/api/jobs/1/plans/2/publication/resume",
         "/api/jobs/1/plans/2/controls",
         "/api/job-controls/1",
         "/api/jobs/1/plans/2/source-candidates",
@@ -927,6 +935,59 @@ async fn browser_sign_in_guards_commands_rotates_sessions_and_preserves_durable_
         api_request(&router, "GET", &publication_path, Some(&cookie), None, None).await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(json_body(response).await?, json!([]));
+    let history_path = format!("/api/jobs/{job}/plans/{version}/events");
+    let history = json_body(
+        api_request(
+            &router,
+            "GET",
+            &format!("{history_path}?limit=1"),
+            Some(&cookie),
+            None,
+            None,
+        )
+        .await?,
+    )
+    .await?;
+    let row = history
+        .as_array()
+        .and_then(|rows| rows.first())
+        .ok_or("plan history")?;
+    assert_eq!(row["job_id"], job);
+    assert_eq!(row["plan_version"], version);
+    let cursor = row["id"].as_i64().ok_or("history cursor")?;
+    let next = json_body(
+        api_request(
+            &router,
+            "GET",
+            &format!("{history_path}?after={cursor}"),
+            Some(&cookie),
+            None,
+            None,
+        )
+        .await?,
+    )
+    .await?;
+    assert!(
+        next.as_array()
+            .ok_or("next history")?
+            .iter()
+            .all(|row| row["job_id"] == job
+                && row["plan_version"] == version
+                && row["id"].as_i64().is_some_and(|id| id > cursor))
+    );
+    assert_eq!(
+        api_request(
+            &router,
+            "POST",
+            &history_path,
+            Some(&cookie),
+            Some(ORIGIN),
+            None,
+        )
+        .await?
+        .status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
     assert_eq!(
         api_request(
             &router,
@@ -944,6 +1005,8 @@ async fn browser_sign_in_guards_commands_rotates_sessions_and_preserves_durable_
         "/api/jobs?limit=201",
         "/api/events?after=-1",
         "/api/locations?limit=0",
+        &format!("{history_path}?limit=201"),
+        &format!("{history_path}?after=-1"),
     ] {
         assert_eq!(
             api_request(&router, "GET", path, Some(&cookie), None, None)
@@ -964,6 +1027,32 @@ async fn browser_sign_in_guards_commands_rotates_sessions_and_preserves_durable_
         .await?
         .status(),
         StatusCode::BAD_REQUEST
+    );
+    let availability = format!("/api/locations/{location}/availability");
+    let before = Store::open_read_snapshot(&database)?.location(location)?;
+    let response = api_request(&router, "GET", &availability, Some(&cookie), None, None).await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        serde_json::to_value(Store::open_read_snapshot(&database)?.location(location)?)?,
+        serde_json::to_value(before)?,
+    );
+    assert_eq!(
+        api_request(
+            &router,
+            "POST",
+            &availability,
+            Some(&cookie),
+            Some(ORIGIN),
+            Some(json!({}))
+        )
+        .await?
+        .status(),
+        StatusCode::METHOD_NOT_ALLOWED,
     );
     let response = api_request(&router, "GET", "/api/events", Some(&cookie), None, None).await?;
     assert!(

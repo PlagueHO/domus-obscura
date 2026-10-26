@@ -1,6 +1,7 @@
 use domus::application::{add_location, scan_location};
 use domus::domain::{
-    AudioFormat, EditionSelection, JobState, LibraryPath, OutputSettings, PlannedTrack, Question,
+    ArtworkSize, AudioFormat, EditionSelection, JobState, LibraryPath, OutputSettings,
+    PlannedTrack, Question,
 };
 use domus::infrastructure::store::{Observation, PlanRequest, Store};
 use std::path::PathBuf;
@@ -74,7 +75,201 @@ fn edition() -> EditionSelection {
 }
 
 #[test]
+fn plan_events_are_bounded_durable_and_do_not_mix_jobs_or_versions() -> TestResult {
+    use domus::domain::Page;
+    let mut fixture = Fixture::new()?;
+    scan_location(&mut fixture.store, fixture.main)?;
+    let request = fixture.request()?;
+    let job = request.job_id;
+    let saved = fixture.store.prepare_plan(request)?;
+    let version = saved.version;
+    let other = fixture.store.enqueue(1)?;
+    let raw = rusqlite::Connection::open(&fixture.database)?;
+    for (event_job, event_version, name) in [
+        (job, Some(version), "generated_first"),
+        (other, Some(version), "different_job"),
+        (job, Some(1), "different_plan"),
+        (job, None, "unversioned_legacy"),
+        (job, Some(version), "generated_last"),
+    ] {
+        raw.execute(
+            "INSERT INTO events(job_id,plan_version,event_type) VALUES (?1,?2,?3)",
+            rusqlite::params![event_job, event_version, name],
+        )?;
+    }
+    let before: i64 = raw.query_row("SELECT count(*) FROM events", [], |row| row.get(0))?;
+    let first = fixture.store.plan_events(job, version, Page::new(0, 1)?)?;
+    assert_eq!(first.len(), 1);
+    let rest = fixture
+        .store
+        .plan_events(job, version, Page::new(first[0].id, 50)?)?;
+    assert!(
+        rest.iter()
+            .all(|event| event.job_id == job && event.plan_version == Some(version))
+    );
+    assert_eq!(
+        rest.last().ok_or("last event")?.event_type,
+        "generated_last"
+    );
+    assert!(
+        rest.iter()
+            .any(|event| event.event_type == "generated_first")
+    );
+    assert!(rest.iter().all(|event| {
+        !["different_job", "different_plan", "unversioned_legacy"]
+            .contains(&event.event_type.as_str())
+    }));
+    assert!(
+        fixture
+            .store
+            .plan_events(job, 99, Page::new(0, 10)?)
+            .is_err()
+    );
+    assert!(
+        fixture
+            .store
+            .plan_events(-1, version, Page::new(0, 10)?)
+            .is_err()
+    );
+    let reopened = Store::open_read_snapshot(&fixture.database)?;
+    assert_eq!(
+        reopened.plan_events(job, version, Page::new(0, 50)?)?.len(),
+        rest.len() + 1
+    );
+    let after: i64 = raw.query_row("SELECT count(*) FROM events", [], |row| row.get(0))?;
+    assert_eq!(before, after);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_domus"))
+        .args([
+            "job-history",
+            fixture.database.to_str().ok_or("database path")?,
+            &job.to_string(),
+            &version.to_string(),
+            &first[0].id.to_string(),
+            "50",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)?,
+        serde_json::to_value(&rest)?
+    );
+    let explanation: String = raw.query_row(
+        "EXPLAIN QUERY PLAN SELECT id FROM events
+         WHERE job_id=?1 AND plan_version=?2 AND id>?3 ORDER BY id LIMIT ?4",
+        rusqlite::params![job, version, 0, 50],
+        |row| row.get(3),
+    )?;
+    assert!(explanation.contains("plan_events"));
+    Ok(())
+}
+
+#[test]
+fn queue_summaries_use_only_the_current_frozen_plan() -> TestResult {
+    use domus::domain::Page;
+    let mut fixture = Fixture::new()?;
+    scan_location(&mut fixture.store, fixture.main)?;
+    let request = fixture.request()?;
+    let job = request.job_id;
+    let initial = fixture.store.jobs(Page::new(0, 10)?)?;
+    assert_eq!(initial.len(), 1);
+    assert!(initial[0].album.is_none());
+    assert!(initial[0].album_artist.is_none());
+    assert!(initial[0].approved_at.is_none());
+    assert!(initial[0].artwork_candidate_id.is_none());
+
+    let saved = fixture.store.prepare_plan(request)?;
+    let summary = fixture.store.jobs(Page::new(0, 1)?)?.remove(0);
+    assert_eq!(summary.id, job);
+    assert_eq!(summary.plan_version, saved.version);
+    assert_eq!(summary.album.as_deref(), Some("Two Discs"));
+    assert_eq!(summary.album_artist.as_deref(), Some("The Example"));
+    assert!(summary.approved_at.is_none());
+    assert!(summary.artwork_candidate_id.is_none());
+    fixture.store.approve_plan(job, saved.version)?;
+    assert!(
+        fixture.store.jobs(Page::new(0, 1)?)?[0]
+            .approved_at
+            .is_some()
+    );
+
+    let mut revision = fixture.request()?;
+    revision.job_id = job;
+    revision.expected_version = saved.version;
+    revision.edition.album = "New frozen edition".into();
+    let updated = fixture.store.prepare_plan(revision)?;
+    let summary = fixture.store.jobs(Page::new(0, 1)?)?.remove(0);
+    assert_eq!(summary.plan_version, updated.version);
+    assert_eq!(summary.album.as_deref(), Some("New frozen edition"));
+    assert!(summary.approved_at.is_none());
+    assert!(summary.artwork_candidate_id.is_none());
+    assert_eq!(fixture.store.jobs(Page::new(job, 10)?)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn accepted_audio_policy_requires_a_preferred_member_and_preserves_frozen_plans() -> TestResult {
+    let mut fixture = Fixture::new()?;
+    scan_location(&mut fixture.store, fixture.main)?;
+    let request = fixture.request()?;
+    let frozen = fixture.store.prepare_plan(request)?;
+    for accepted in [
+        vec![],
+        vec![AudioFormat::Flac],
+        vec![AudioFormat::Mp3, AudioFormat::Mp3],
+    ] {
+        let invalid = OutputSettings {
+            accepted_formats: Some(accepted),
+            ..OutputSettings::default()
+        };
+        assert!(fixture.store.save_settings(Some(1), &invalid).is_err());
+        assert_eq!(fixture.store.settings()?.ok_or("settings")?.version, 1);
+    }
+    let policy = OutputSettings {
+        format: AudioFormat::Flac,
+        accepted_formats: Some(vec![AudioFormat::Flac]),
+        ..OutputSettings::default()
+    };
+    fixture.store.save_settings(Some(1), &policy)?;
+    let mut request = fixture.request()?;
+    request.settings_version = 2;
+    request.format = Some(AudioFormat::Mp3);
+    assert!(fixture.store.prepare_plan(request).is_err());
+    let mut request = fixture.request()?;
+    request.settings_version = 2;
+    let preferred = fixture.store.prepare_plan(request)?;
+    assert_eq!(preferred.plan.format, AudioFormat::Flac);
+    assert_eq!(
+        preferred.plan.settings.accepted_formats,
+        policy.accepted_formats
+    );
+    assert_eq!(
+        fixture.store.plan(frozen.job_id, frozen.version)?.plan,
+        frozen.plan
+    );
+    let mut legacy = policy.clone();
+    legacy.accepted_formats = None;
+    assert!(legacy.accepts(AudioFormat::Mp3));
+    assert!(legacy.accepts(AudioFormat::Flac));
+    Ok(())
+}
+
+#[test]
 fn settings_are_versioned_without_changing_a_frozen_plan() -> TestResult {
+    assert_eq!(
+        OutputSettings::default().artwork_size,
+        Some(ArtworkSize::Recommended)
+    );
+    let legacy: OutputSettings = serde_json::from_str(
+        r#"{"format":"mp3","template":{"folder":"<LETTER>\\<ALBUM ARTIST>\\<ALBUM>","filename":"<Track Artist> - <Album> - <Track:00> - <Title>.<ext>"} }"#,
+    )?;
+    assert_eq!(legacy.artwork_size, None);
+    assert_eq!(legacy.accepted_formats, None);
+
     let mut fixture = Fixture::new()?;
     scan_location(&mut fixture.store, fixture.main)?;
     let request = fixture.request()?;
@@ -82,6 +277,7 @@ fn settings_are_versioned_without_changing_a_frozen_plan() -> TestResult {
     fixture.store.approve_plan(plan.job_id, plan.version)?;
     let flac = OutputSettings {
         format: AudioFormat::Flac,
+        artwork_size: Some(ArtworkSize::Large),
         ..OutputSettings::default()
     };
     assert!(fixture.store.save_settings(None, &flac).is_err());
@@ -97,10 +293,15 @@ fn settings_are_versioned_without_changing_a_frozen_plan() -> TestResult {
     let current = fixture.store.settings()?.ok_or("missing settings")?;
     assert_eq!(current.version, 2);
     assert_eq!(current.settings.format, AudioFormat::Flac);
+    assert_eq!(current.settings.artwork_size, Some(ArtworkSize::Large));
     let frozen = fixture.store.plan(plan.job_id, plan.version)?;
     assert_eq!(frozen.plan, plan.plan);
     assert_eq!(frozen.settings_version, 1);
     assert_eq!(frozen.plan.settings.format, AudioFormat::Mp3);
+    assert_eq!(
+        frozen.plan.settings.artwork_size,
+        Some(ArtworkSize::Recommended)
+    );
     assert!(frozen.approved_at.is_some());
     let database = rusqlite::Connection::open(&fixture.database)?;
     assert!(

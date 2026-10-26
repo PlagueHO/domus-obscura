@@ -38,6 +38,15 @@ pub fn scan_location(store: &mut Store, location_id: i64) -> Result<i64> {
     Ok(claim.id)
 }
 
+/// Open only the configured root and verify its saved native binding. This is
+/// a point-in-time availability check, not a scan or authority for later I/O.
+/// Keep cached coverage and entries unchanged when the root is unavailable.
+pub fn check_location_availability(store: &Store, location_id: i64) -> Result<()> {
+    let location = store.location(location_id)?;
+    let opened = LibraryDirectory::open(Path::new(&location.root))?;
+    store.check_native_root(&location.root, "media", opened.native_root())
+}
+
 struct OwnedObservation {
     path: LibraryPath,
     kind: &'static str,

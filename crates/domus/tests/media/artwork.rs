@@ -254,6 +254,11 @@ fn artwork_requires_explicit_exact_preview_approval_before_any_normalization_eff
         &other_cover()?,
         None,
     )?;
+    assert!(
+        fixture.store.jobs(Page::new(0, 10)?)?[0]
+            .artwork_candidate_id
+            .is_none()
+    );
     assert_eq!(
         first.source,
         format!("https://coverartarchive.org/release/{}/123", super::RELEASE)
@@ -291,6 +296,10 @@ fn artwork_requires_explicit_exact_preview_approval_before_any_normalization_eff
     fixture
         .store
         .approve_artwork(fixture.job, fixture.version, first.id, &first.sha256)?;
+    assert_eq!(
+        fixture.store.jobs(Page::new(0, 10)?)?[0].artwork_candidate_id,
+        Some(first.id)
+    );
     fixture
         .store
         .approve_artwork(fixture.job, fixture.version, first.id, &first.sha256)?;
@@ -499,6 +508,10 @@ fn artwork_approval_never_carries_over_to_a_revised_plan() -> TestResult {
         .store
         .artwork_candidates(fixture.job, fixture.version, Page::new(0, 1)?)?
         .remove(0);
+    assert_eq!(
+        fixture.store.jobs(Page::new(0, 10)?)?[0].artwork_candidate_id,
+        Some(selected.id)
+    );
     let raw = Connection::open(&fixture.database)?;
     raw.execute(
         "UPDATE jobs SET state = 'awaiting_input', owner = NULL, lease_until = NULL WHERE id = ?1",
@@ -517,6 +530,11 @@ fn artwork_approval_never_carries_over_to_a_revised_plan() -> TestResult {
         },
         old.plan.catalog.ok_or("missing catalog")?,
     )?;
+    assert!(
+        fixture.store.jobs(Page::new(0, 10)?)?[0]
+            .artwork_candidate_id
+            .is_none()
+    );
     assert!(
         fixture
             .store
@@ -680,7 +698,7 @@ fn schema_eleven_upgrade_retains_receipts_but_requires_approval_of_the_exact_old
     drop(fixture.store);
     let raw = Connection::open(&fixture.database)?;
     raw.execute_batch(
-        "DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; DROP TABLE artwork_approvals; DROP TABLE artwork_candidates; PRAGMA user_version = 11;",
+        "DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; DROP TABLE artwork_approvals; DROP TABLE artwork_candidates; PRAGMA user_version = 11;",
     )?;
     fixture.store = super::Store::open_existing(&fixture.database)?;
     fixture.bind_roots()?;

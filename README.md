@@ -37,7 +37,17 @@ diagrams, current boundaries and planned changes.
 - Rust-generated TypeScript contracts and a neutral React output-preview component.
 - One shared task interface, editor tasks, and configured Windows/Linux CI.
 
-An experimental one-shot acquisition worker can process an already-selected, approved source through private normalization and a separate playback-test export. A separate explicit command can copy verified staging into new primary/backup album folders. Atomic album publication, replacement, automated source selection, long-running worker supervision, sharing, recovery UI, native services and production packages remain incomplete. The frontend currently builds a component library, not an application shell. The API preview can complete sign-in and serve protected JSON, but it does not provide the browser application. The final theme and shadcn/ui components remain deferred.
+An experimental one-shot acquisition worker can process an already-selected,
+approved source through private normalization and new-only publication. The
+connected React application in `frontend/app` uses the guarded HTTPS API for
+discovery, approvals, local acquisition and saved decisions. It is a partial
+implementation of the approved [UI study](docs/ui-poc/README.md), not a replacement
+design. Its Orbit navigation, Home queue, shared status pills, fixed-size media
+cards, download preparation drawer and safe-cancellation confirmation now use
+shared components. Browser answers and safe recovery remain separate actions.
+Atomic album publication, replacement/restore management, automated source
+selection, long-running worker supervision, sharing, the remaining UI port,
+native services and production packages remain incomplete.
 
 ## Try the local test harness
 
@@ -1096,12 +1106,19 @@ Save output settings from a JSON file:
 ```json
 {
   "format": "mp3",
+  "artwork_size": "recommended",
   "template": {
     "folder": "<LETTER>\\<ALBUM ARTIST>\\<ALBUM>",
     "filename": "<Track Artist> - <Album> - <Track:00> - <Title>.<ext>"
   }
 }
 ```
+
+`artwork_size` accepts `"small"` (200 pixels), `"recommended"` (400 pixels) or
+`"large"` (800 pixels). Each value is a bounding box. The image keeps its aspect
+ratio and is never enlarged. Older settings without this field keep the previous
+1200-pixel maximum; new settings default to `"recommended"`. The artwork review
+shows the actual JPEG dimensions.
 
 The first settings save expects version `0`. Later saves must supply the current version. Old plans keep their saved settings. Settings input is limited to 16 KiB.
 
@@ -1168,9 +1185,49 @@ Example development configuration:
   "listen": "127.0.0.1:8443",
   "origin": "https://localhost:8443",
   "certificate_file": "C:\\DomusDev\\localhost.pem",
-  "private_key_file": "C:\\DomusDev\\localhost-key.pem"
+  "private_key_file": "C:\\DomusDev\\localhost-key.pem",
+  "system_settings_read_only": true
 }
 ```
+
+`system_settings_read_only` defaults to `true`. Set it to `false` only when the
+administrator wants the browser to update versioned shared-library output settings. The API also
+enforces this setting on every save. This does not enable editing of startup
+paths, credentials, TLS or providers.
+`GET /api/system/settings-policy` reports this policy. A `PUT /api/settings`
+request returns `403 Forbidden` while read-only mode is active.
+The System settings page still shows saved shared-library settings in read-only mode.
+When editing is enabled, a failed save keeps the draft and never retries.
+If another writer changes the saved version, use **Reload system settings** to load
+that version before saving again. Reloading a newer version replaces the draft.
+Setup read failures are reported separately from missing configuration.
+
+Artwork size, accepted and preferred audio formats, quality priorities and output
+templates are administrator-controlled system policy. They apply to the shared
+library, not to an individual user. The current production host permits one
+configured Entra tenant/object pair. A multi-user administrator/viewer role model
+is not implemented. Adding other production users must not grant them settings
+write access automatically. Explicit anonymous development access remains
+loopback-only.
+
+Open **System** in the main application navigation to configure accepted audio
+format/bitrate combinations, a separate preferred combination, artwork size and
+output templates. Currently supported combinations are MP3 320 kbps CBR and FLAC
+lossless (which has no fixed bitrate). Other bitrates, VBR and M4A remain unavailable
+until complete validation and metadata support exist. The preferred choice must
+be accepted. New requests start with that choice; another accepted combination
+can be selected explicitly. The backend rejects unaccepted formats for new plans.
+Legacy settings preserve both previously available formats. Existing plans and
+approvals retain their frozen policy.
+
+The same page can register existing absolute server-side main/backup folders and
+run separate index scans. `POST /api/locations` takes `root` and `kind` (`main` or
+`backup`); `POST /api/locations/{id}/scan` takes `{}`. Both require normal command
+guards and editable System settings. Registration binds the existing folder
+through native identity and overlap checks. It does not create folders or start a
+scan. Scanning updates the index only, never media files. At most 100 roots and
+one main root can be registered. Existing roots cannot be edited, deleted or
+rebound through this page; saved plans and publication receipts depend on them.
 
 Create an isolated local database and start the API after saving the configuration and certificate files:
 
@@ -1186,6 +1243,16 @@ Development requires a direct loopback connection. The origin must use `localhos
 The generated-album browser harness above remains a separate HTTP-only fixture tool. This HTTPS development mode enables the real API without Entra; it does not yet install the production browser application or implement Soulseek acquisition.
 
 ### Production authentication
+
+The connected application includes a **Decisions** inbox for saved acquisition
+questions and separate recovery actions. See
+[Failure and recovery](docs/local-development.md#failure-and-recovery).
+`GET /api/inbox` is paginated and includes saved answers still waiting for recovery.
+`GET /api/questions/{id}` returns the question, current job/plan state and its
+typed recovery binding. `GET /api/jobs/{id}/plans/{version}/decision` returns the
+latest saved decision for that request, or `null`. These reads do not answer,
+resume, claim, fetch or start acquisition. Existing `/api/questions` retains its
+unanswered-only behavior. All routes require normal authentication.
 
 Production is the default when `environment` is omitted. Set `"environment": "production"` explicitly in production configuration. Missing or invalid credentials fail startup; they never select development mode. Production always checks the signed Entra identity. A development certificate does not disable authentication.
 
@@ -1236,6 +1303,7 @@ The session and login cookies use `Secure`, `HttpOnly`, `SameSite=Lax`, and the 
 | GET    | `/api/locations`, `/api/locations/{id}`    | Read locations and coverage             |
 | GET    | `/api/locations/{id}/entries`              | Read indexed folder entries             |
 | GET    | `/api/settings`, `/api/jobs`               | Read saved settings and jobs            |
+| GET    | `/api/system/settings-policy`              | Read the output-settings edit policy    |
 | PUT    | `/api/settings`                            | Save an immutable settings version      |
 | POST   | `/api/jobs`, `/api/plans`                  | Create a job or prepare an output plan  |
 | GET    | `/api/jobs/{id}/plans/{version}`           | Read a saved plan                       |

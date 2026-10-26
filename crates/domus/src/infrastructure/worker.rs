@@ -46,12 +46,50 @@ pub struct PublicationOutcome {
     pub destinations: Vec<super::store::PublicationDestination>,
 }
 
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct ResumePublication {
+    pub normalization_run: i64,
+    pub acknowledge_new_only_publication: bool,
+}
+
+/// Resume only an existing publication journal. Browser input selects no paths
+/// or credentials. All plan, claim, staging and exact-file checks still apply.
+pub fn resume_publication(
+    database: &Path,
+    staging_root: &Path,
+    job: i64,
+    version: i64,
+    request: ResumePublication,
+) -> Result<PublicationOutcome> {
+    publish_configuration(
+        PublicationConfiguration {
+            database: database.to_owned(),
+            staging_root: staging_root.to_owned(),
+            job_id: job,
+            plan_version: version,
+            normalization_run: request.normalization_run,
+            acknowledge_new_only_publication: request.acknowledge_new_only_publication,
+        },
+        &[],
+        true,
+    )
+}
+
 /// Explicit local publication, never an acquisition retry or replacement.
 /// No account credentials or provider connection is used by this command.
 pub fn publish_new_once(path: &Path) -> Result<PublicationOutcome> {
     let configuration: PublicationConfiguration =
         serde_json::from_slice(&read_local(path, 16384, false)?)
             .map_err(|_| Error::InvalidInput("invalid publication configuration".into()))?;
+    publish_configuration(configuration, &[path], false)
+}
+
+fn publish_configuration(
+    configuration: PublicationConfiguration,
+    protected_files: &[&Path],
+    require_journal: bool,
+) -> Result<PublicationOutcome> {
     if !configuration.acknowledge_new_only_publication
         || !configuration.database.is_absolute()
         || !configuration.staging_root.is_absolute()
@@ -62,7 +100,7 @@ pub fn publish_new_once(path: &Path) -> Result<PublicationOutcome> {
         return Err(Error::InvalidInput("publication requires absolute local state/staging paths, positive IDs and explicit new-only acknowledgement".into()));
     }
     let mut store = Store::open_current_existing(&configuration.database)?;
-    protect_files(&store, &[path])?;
+    protect_files(&store, protected_files)?;
     if !matches!(
         store.job_state(configuration.job_id)?.as_deref(),
         Some("publishing" | "backup_pending")
@@ -70,6 +108,19 @@ pub fn publish_new_once(path: &Path) -> Result<PublicationOutcome> {
         return Err(Error::Conflict(
             "publication needs a publishing or backup_pending job".into(),
         ));
+    }
+    if require_journal {
+        let targets =
+            store.publication_destinations(configuration.job_id, configuration.plan_version)?;
+        if targets.is_empty()
+            || targets
+                .iter()
+                .any(|target| target.run_id != configuration.normalization_run)
+        {
+            return Err(Error::Conflict(
+                "publication recovery requires the exact retained publication journal".into(),
+            ));
+        }
     }
     let claimed = store
         .claim_approved_plan(

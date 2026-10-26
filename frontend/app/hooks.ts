@@ -44,7 +44,13 @@ export function useResource<T>(
       clearTimeout(timer);
     };
   }, [key, revision, interval]);
-  return { data, error, loading, refresh };
+  const changed = previousKey.current !== key;
+  return {
+    data: changed ? undefined : data,
+    error: changed ? undefined : error,
+    loading: changed || loading,
+    refresh,
+  };
 }
 
 /** A ref closes the gap before React paints disabled command buttons. */

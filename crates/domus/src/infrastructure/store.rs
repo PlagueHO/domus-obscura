@@ -11,6 +11,7 @@ mod artwork_questions;
 mod caa;
 mod catalog;
 mod catalog_clock;
+mod inbox;
 mod job_controls;
 mod native_roots;
 mod normalization;
@@ -18,6 +19,7 @@ mod planning;
 mod private_roots;
 mod publication;
 mod queries;
+mod queue;
 mod sessions;
 mod source_candidates;
 mod transfers;
@@ -27,6 +29,7 @@ pub use caa::CaaArtworkEvidence;
 pub use catalog::{
     CatalogCache, CatalogCompletion, CatalogPermit, CatalogProviderState, CatalogStatus,
 };
+pub use inbox::{QuestionDetails, QuestionRecovery};
 pub use job_controls::{JobControl, JobControlAction};
 pub use normalization::{NormalizationRun, NormalizationWork};
 pub use planning::{
@@ -34,6 +37,7 @@ pub use planning::{
 };
 pub use publication::{PublicationDestination, PublicationFile};
 pub use queries::{JobEvent, JobSummary};
+pub use queue::QueueSelection;
 pub use sessions::{CreatedSession, SessionCredential, SessionIdentity};
 pub use source_candidates::SourceCandidate;
 pub use transfers::{SourceFile, TransferFile};
@@ -57,6 +61,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/016_publication.sql"),
     include_str!("../../migrations/017_job_controls.sql"),
     include_str!("../../migrations/018_source_candidates.sql"),
+    include_str!("../../migrations/019_queue_presentation.sql"),
+    include_str!("../../migrations/020_plan_events.sql"),
 ];
 
 pub struct Store {
@@ -279,6 +285,16 @@ impl Store {
         }
         let transaction = self.connection.unchecked_transaction()?;
         native_roots::require_bound_roots(&transaction)?;
+        let (count, mains): (i64, i64) = transaction.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(kind = 'main'), 0) FROM locations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if count >= 100 || (kind == "main" && mains != 0) {
+            return Err(Error::Conflict(
+                "at most 100 library roots and one main root can be registered; existing roots cannot be replaced".into(),
+            ));
+        }
         let mut statement = transaction
             .prepare("SELECT root FROM locations UNION ALL SELECT root FROM private_roots")?;
         for existing in statement.query_map([], |row| row.get::<_, String>(0))? {

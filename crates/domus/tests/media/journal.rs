@@ -462,12 +462,13 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
          DROP TABLE normalization_receipts;
          DROP TABLE normalization_files;
          DROP TABLE normalization_runs;
+         DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations;
          PRAGMA user_version = 9;",
     )?;
     fixture.store = Store::open_existing(&fixture.database)?;
     fixture.bind_roots()?;
     let version: i64 = raw.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 18);
+    assert_eq!(version, 20);
     let selected = fixture.store.prepare_artwork(
         fixture.job,
         fixture.version,
@@ -500,6 +501,7 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
          DROP TABLE artwork_candidates;
          DROP TABLE private_roots;
          DROP TABLE application_identity;
+         DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations;
          PRAGMA user_version = 10;",
     )?;
     fixture.store = Store::open_existing(&fixture.database)?;

@@ -6,13 +6,52 @@ import type { ArtworkCandidate } from "../src/generated/ArtworkCandidate";
 import type { PublicationDestination } from "../src/generated/PublicationDestination";
 import type { TransferFile } from "../src/generated/TransferFile";
 import type { StartLocalDownload } from "../src/generated/StartLocalDownload";
+import type { QuestionDetails } from "../src/generated/QuestionDetails";
 import { OutputPreview } from "../src/OutputPreview";
 import { request, type LocalStatus } from "./api";
 import { useCommand, useResource } from "./hooks";
-import { activeStates, canStart, stateLabel } from "./state";
-import { Alert, Badge, Button, Card, Check, Empty, Pager } from "./components/ui";
+import { activeStates, canStart } from "./state";
+import { Alert, Badge, Button, Card, Empty, Pager } from "./components/ui";
 import { SourceReview } from "./SourceReview";
 import { ArtworkReview } from "./ArtworkReview";
+import { CancelJob, JobStatus } from "./components/Media";
+import { RequestHistory } from "./RequestHistory";
+import { PublicationRecovery } from "./PublicationRecovery";
+
+export function RequestProgress({
+  planApproved,
+  sourceApproved,
+  coverApproved,
+  inputsReceived,
+}: {
+  planApproved: boolean;
+  sourceApproved: boolean;
+  coverApproved: boolean;
+  inputsReceived: boolean;
+}) {
+  return (
+    <ol className="request-progress" aria-label="Separate request approvals">
+      <li>
+        <strong>Edition and outputs</strong>
+        <Badge>{planApproved ? "Plan approved" : "Review the frozen plan"}</Badge>
+      </li>
+      <li>
+        <strong>Source</strong>
+        <Badge>
+          {inputsReceived
+            ? "Received inputs retained"
+            : sourceApproved
+              ? "Acknowledgement saved"
+              : "Choose and acknowledge exact source"}
+        </Badge>
+      </li>
+      <li>
+        <strong>Cover</strong>
+        <Badge>{coverApproved ? "Exact JPEG approved" : "Choose and approve exact preview"}</Badge>
+      </li>
+    </ol>
+  );
+}
 
 export function RequestPage({
   id,
@@ -70,13 +109,21 @@ export function RequestPage({
   );
   const [sourceId, setSourceId] = useState<number>();
   const [coverId, setCoverId] = useState<number>();
-  const [approvedOutput, setApprovedOutput] = useState(false);
-  const [newOnly, setNewOnly] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [notice, setNotice] = useState("");
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const [recoveryRevision, setRecoveryRevision] = useState(0);
   const command = useCommand();
   const stored = plan.data;
   const current = job.data;
+  const decision = useResource(
+    async (signal) =>
+      current?.state === "awaiting_input"
+        ? request<QuestionDetails | null>(`${base}/decision`, { signal })
+        : null,
+    `${base}:${current?.state ?? ""}`,
+    poll ? 2000 : 0,
+  );
   const source =
     sources.data?.find((item) => item.id === sourceId) ??
     (sourceId === undefined
@@ -95,11 +142,13 @@ export function RequestPage({
     receipts.data.transfers.every((file) => file.state === "received"),
   );
   function refresh() {
+    setHistoryRevision((value) => value + 1);
     job.refresh();
     plan.refresh();
     sources.refresh();
     artwork.refresh();
     receipts.refresh();
+    decision.refresh();
     onChanged();
   }
   function selectSource(id: number) {
@@ -111,13 +160,37 @@ export function RequestPage({
     if (!artwork.data?.some((item) => item.id === id)) setArtworkPages([Math.max(0, id - 1)]);
   }
   const stale = Boolean(current && current.plan_version !== version);
+  const readsBlocked = Boolean(
+    job.loading ||
+    plan.loading ||
+    sources.loading ||
+    artwork.loading ||
+    receipts.loading ||
+    job.error ||
+    plan.error ||
+    sources.error ||
+    artwork.error ||
+    receipts.error,
+  );
   const editable = Boolean(
     stored?.approved_at !== null && stored && current?.state === "queued" && !submitted && !stale,
+  );
+  const coverRecovery = Boolean(
+    stored &&
+    stored.approved_at !== null &&
+    !stale &&
+    decision.data?.current &&
+    decision.data.recovery.kind === "artwork" &&
+    decision.data.question.answer === null &&
+    current?.state === "awaiting_input" &&
+    !decision.loading &&
+    !decision.error,
   );
   const canRun = Boolean(
     current &&
     stored &&
-    canStart(current, stored, source, cover, status, newOnly, allReceived) &&
+    canStart(current, stored, source, cover, status, true, allReceived) &&
+    !readsBlocked &&
     !submitted &&
     !command.busy,
   );
@@ -129,13 +202,29 @@ export function RequestPage({
           <p>
             {stored?.plan.edition.album_artist} · Request #{id} · Plan {version}
           </p>
-          {current && <Badge>{stateLabel(current.state)}</Badge>}
+          {current && <JobStatus job={current} />}
         </div>
-        <Button variant="secondary" disabled={command.busy} onClick={refresh}>
+        <Button
+          variant="secondary"
+          disabled={command.busy || status?.busy}
+          onClick={() => {
+            setRecoveryRevision((value) => value + 1);
+            refresh();
+          }}
+        >
           Refresh request
         </Button>
       </header>
-      <Alert error={job.error || plan.error || sources.error || artwork.error || receipts.error} />
+      <Alert
+        error={
+          job.error ||
+          plan.error ||
+          sources.error ||
+          artwork.error ||
+          receipts.error ||
+          decision.error
+        }
+      />
       <Alert error={command.error} />
       {(job.loading || plan.loading) && !stored && <p role="status">Loading saved request…</p>}
       {stale && (
@@ -145,32 +234,21 @@ export function RequestPage({
         </p>
       )}
       {stored && current && (
-        <>
-          <Card title="What you need to do" className="request-summary">
-            <ul className="checklist">
-              <li>
-                Edition{" "}
-                <Badge>
-                  {stored.approved_at !== null ? "Plan approved" : "Review output names and tags"}
-                </Badge>
-              </li>
-              <li>
-                Source{" "}
-                <Badge>
-                  {source?.approved_at !== null && source
-                    ? "Acknowledgement saved"
-                    : "Choose and acknowledge exact source"}
-                </Badge>
-              </li>
-              <li>
-                Cover{" "}
-                <Badge>
-                  {cover?.approved_at !== null && cover
-                    ? "Exact JPEG approved"
-                    : "Choose and approve exact preview"}
-                </Badge>
-              </li>
-            </ul>
+        <fieldset className="review-fields" disabled={readsBlocked || stale}>
+          <Card
+            title={
+              current.state === "queued" || current.state === "awaiting_input"
+                ? "What you need to do"
+                : "Request status"
+            }
+            className="request-review"
+          >
+            <RequestProgress
+              planApproved={stored.approved_at !== null}
+              sourceApproved={Boolean(source && source.approved_at !== null)}
+              coverApproved={Boolean(cover && cover.approved_at !== null)}
+              inputsReceived={allReceived}
+            />
             {status?.last_error && (
               <p role="alert" className="warning">
                 {status.last_error}
@@ -195,254 +273,324 @@ export function RequestPage({
             )}
             {current.state === "awaiting_input" && (
               <p className="warning">
-                Action required: inspect this request's saved question with the operator CLI. Answer
-                it and run the matching recovery command there, then refresh this page. This page
-                never answers questions or resumes work automatically.
+                Action required:{" "}
+                <a href={decision.data ? `#/inbox/${decision.data.question.id}` : "#/inbox"}>
+                  Open the saved decision
+                </a>
+                . Save an offered answer, then use its separate recovery action. Nothing starts
+                automatically.
               </p>
             )}
-          </Card>
-          <section className="review-section">
-            <h2>Review the frozen edition and outputs</h2>
-            <p className="identifier">MusicBrainz release · {stored.plan.edition.release_id}</p>
-            <p>
-              {stored.plan.format.toUpperCase()} · Settings version {stored.settings_version} ·{" "}
-              {stored.plan.edition.tracks.length} tracks
-            </p>
-            <dl className="properties">
-              <dt>Album artist</dt>
-              <dd>{stored.plan.edition.album_artist}</dd>
-              <dt>Album</dt>
-              <dd>{stored.plan.edition.album}</dd>
-            </dl>
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Track</th>
-                    <th>Frozen tag text</th>
-                    <th>Server output preview</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {stored.plan.edition.tracks.map((track, index) => (
-                    <tr key={index}>
-                      <td>
-                        {index + 1}
-                        {track.disc !== null && (
-                          <small>
-                            Disc {track.disc} · {track.disc_track}
-                          </small>
-                        )}
-                      </td>
-                      <td>
-                        <strong>{track.title}</strong>
-                        <small>{track.artist}</small>
-                      </td>
-                      <td>
-                        {stored.plan.outputs[index] ? (
-                          <OutputPreview preview={stored.plan.outputs[index]} />
-                        ) : (
-                          <span className="warning">Server output preview is missing.</span>
-                        )}
-                      </td>
+            <details className="review-section edition-details" open={stored.approved_at === null}>
+              <summary>
+                Edition ·{" "}
+                {stored.approved_at === null
+                  ? "Review and approve the frozen edition"
+                  : "Inspect saved edition and destinations"}
+              </summary>
+              <p className="identifier">MusicBrainz release · {stored.plan.edition.release_id}</p>
+              <p>
+                {stored.plan.format.toUpperCase()} · Settings version {stored.settings_version} ·{" "}
+                {stored.plan.edition.tracks.length} tracks
+              </p>
+              <dl className="properties">
+                <dt>Album artist</dt>
+                <dd>{stored.plan.edition.album_artist}</dd>
+                <dt>Album</dt>
+                <dd>{stored.plan.edition.album}</dd>
+              </dl>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Track</th>
+                      <th>Frozen tag text</th>
+                      <th>Server output preview</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <h3>Approved destinations</h3>
-            {stored.plan.destinations.map((destination) => (
-              <div className="list-row" key={destination.location_id}>
-                <div>
-                  <strong>
-                    {destination.kind} · {destination.root}
-                  </strong>
-                  <p>
-                    Coverage: {destination.coverage} · Observation:{" "}
-                    {destination.observed_at === null
-                      ? "incomplete / not observed"
-                      : new Date(destination.observed_at * 1000).toLocaleString()}
-                  </p>
-                </div>
+                  </thead>
+                  <tbody>
+                    {stored.plan.edition.tracks.map((track, index) => (
+                      <tr key={index}>
+                        <td>
+                          {index + 1}
+                          {track.disc !== null && (
+                            <small>
+                              Disc {track.disc} · {track.disc_track}
+                            </small>
+                          )}
+                        </td>
+                        <td>
+                          <strong>{track.title}</strong>
+                          <small>{track.artist}</small>
+                        </td>
+                        <td>
+                          {stored.plan.outputs[index] ? (
+                            <OutputPreview preview={stored.plan.outputs[index]} />
+                          ) : (
+                            <span className="warning">Server output preview is missing.</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-            ))}
-            {stored.plan.accepts_incomplete_coverage && (
-              <p className="warning">
-                This frozen plan accepts incomplete index coverage. Unknown coverage is not proof
-                that files are absent.
+              <h3>Approved destinations</h3>
+              {stored.plan.destinations.map((destination) => (
+                <div className="list-row" key={destination.location_id}>
+                  <div>
+                    <strong>
+                      {destination.kind} · {destination.root}
+                    </strong>
+                    <p>
+                      Coverage: {destination.coverage} · Observation:{" "}
+                      {destination.observed_at === null
+                        ? "incomplete / not observed"
+                        : new Date(destination.observed_at * 1000).toLocaleString()}
+                    </p>
+                  </div>
+                </div>
+              ))}
+              {stored.plan.accepts_incomplete_coverage && (
+                <p className="warning">
+                  This frozen plan accepts incomplete index coverage. Unknown coverage is not proof
+                  that files are absent.
+                </p>
+              )}
+              {stored.approved_at === null && (
+                <>
+                  <p>
+                    Approve this exact edition, destination folders, filenames and tag text. This
+                    saves the frozen plan approval only. Source, cover and download approval remain
+                    separate.
+                  </p>
+                  <Button
+                    disabled={
+                      command.busy ||
+                      stale ||
+                      readsBlocked ||
+                      stored.plan.outputs.length !== stored.plan.edition.tracks.length
+                    }
+                    onClick={() =>
+                      void command.run(async () => {
+                        await request(`${base}/approve`, { method: "POST" });
+                        plan.refresh();
+                      })
+                    }
+                  >
+                    Approve frozen plan {stored.version}
+                  </Button>
+                </>
+              )}
+            </details>
+            {editable ? (
+              <>
+                <details className="request-editor" open={!source || source.approved_at === null}>
+                  <summary>
+                    Source ·{" "}
+                    {source?.approved_at !== null && source
+                      ? "Change or inspect acknowledged source"
+                      : "Choose a source"}
+                  </summary>
+                  <SourceReview
+                    base={base}
+                    releaseId={stored.plan.edition.release_id}
+                    format={stored.plan.format}
+                    candidates={sources.data ?? []}
+                    selected={source}
+                    onSelect={selectSource}
+                    refresh={sources.refresh}
+                    localEnabled={Boolean(status?.enabled && !status.busy)}
+                  />
+                  <Pager
+                    busy={sources.loading}
+                    previous={
+                      sourcePages.length > 1
+                        ? () => {
+                            setSourceId(undefined);
+                            setSourcePages(sourcePages.slice(0, -1));
+                          }
+                        : undefined
+                    }
+                    next={
+                      sources.data?.length === 50
+                        ? () => {
+                            setSourceId(undefined);
+                            setSourcePages([
+                              ...sourcePages,
+                              sources.data?.at(-1)?.id ?? sourceAfter,
+                            ]);
+                          }
+                        : undefined
+                    }
+                  />
+                </details>
+                <details className="request-editor" open={!cover || cover.approved_at === null}>
+                  <summary>
+                    Cover ·{" "}
+                    {cover?.approved_at !== null && cover
+                      ? "Change or inspect approved cover"
+                      : "Choose a cover"}
+                  </summary>
+                  <ArtworkReview
+                    key={base}
+                    base={base}
+                    candidates={artwork.data ?? []}
+                    selected={cover}
+                    onSelect={selectCover}
+                    refresh={artwork.refresh}
+                  />
+                  <Pager
+                    busy={artwork.loading}
+                    previous={
+                      artworkPages.length > 1
+                        ? () => {
+                            setCoverId(undefined);
+                            setArtworkPages(artworkPages.slice(0, -1));
+                          }
+                        : undefined
+                    }
+                    next={
+                      artwork.data?.length === 50
+                        ? () => {
+                            setCoverId(undefined);
+                            setArtworkPages([
+                              ...artworkPages,
+                              artwork.data?.at(-1)?.id ?? artworkAfter,
+                            ]);
+                          }
+                        : undefined
+                    }
+                  />
+                </details>
+              </>
+            ) : stored.approved_at === null ? (
+              <p className="muted">
+                Approve the frozen plan before selecting the source and cover.
+              </p>
+            ) : (
+              <p className="muted">
+                Source and cover changes are locked while this request is active or no longer
+                queued. Saved receipts remain below.
               </p>
             )}
-            {stored.approved_at === null && (
+            {coverRecovery && (
               <>
-                <Check
-                  checked={approvedOutput}
-                  onChange={setApprovedOutput}
-                  disabled={command.busy || stale}
-                >
-                  I reviewed this exact edition, destination folders, filenames and tag text.
-                </Check>
-                <Button
-                  disabled={
-                    command.busy ||
-                    stale ||
-                    !approvedOutput ||
-                    stored.plan.outputs.length !== stored.plan.edition.tracks.length
+                <p className="warning">
+                  This request is safely paused for a cover decision. Prepare and approve the exact
+                  JPEG below, then return to the saved decision to answer and restore its safe
+                  state.
+                </p>
+                <ArtworkReview
+                  key={`${base}:recovery`}
+                  base={base}
+                  candidates={artwork.data ?? []}
+                  selected={cover}
+                  onSelect={selectCover}
+                  refresh={artwork.refresh}
+                />
+                <Pager
+                  busy={artwork.loading}
+                  previous={
+                    artworkPages.length > 1
+                      ? () => {
+                          setCoverId(undefined);
+                          setArtworkPages(artworkPages.slice(0, -1));
+                        }
+                      : undefined
                   }
-                  onClick={() =>
-                    void command.run(async () => {
-                      await request(`${base}/approve`, { method: "POST" });
-                      setApprovedOutput(false);
-                      plan.refresh();
-                    })
+                  next={
+                    artwork.data?.length === 50
+                      ? () => {
+                          setCoverId(undefined);
+                          setArtworkPages([
+                            ...artworkPages,
+                            artwork.data?.at(-1)?.id ?? artworkAfter,
+                          ]);
+                        }
+                      : undefined
                   }
-                >
-                  Approve frozen plan {stored.version}
-                </Button>
+                />
               </>
             )}
-          </section>
-          {editable ? (
-            <>
-              <SourceReview
-                base={base}
-                releaseId={stored.plan.edition.release_id}
-                format={stored.plan.format}
-                candidates={sources.data ?? []}
-                selected={source}
-                onSelect={selectSource}
-                refresh={sources.refresh}
-                localEnabled={Boolean(status?.enabled && !status.busy)}
-              />
-              <Pager
-                busy={sources.loading}
-                previous={
-                  sourcePages.length > 1
-                    ? () => {
-                        setSourceId(undefined);
-                        setSourcePages(sourcePages.slice(0, -1));
-                      }
-                    : undefined
-                }
-                next={
-                  sources.data?.length === 50
-                    ? () => {
-                        setSourceId(undefined);
-                        setSourcePages([...sourcePages, sources.data?.at(-1)?.id ?? sourceAfter]);
-                      }
-                    : undefined
-                }
-              />
-              <ArtworkReview
-                key={base}
-                base={base}
-                candidates={artwork.data ?? []}
-                selected={cover}
-                onSelect={selectCover}
-                refresh={artwork.refresh}
-              />
-              <Pager
-                busy={artwork.loading}
-                previous={
-                  artworkPages.length > 1
-                    ? () => {
-                        setCoverId(undefined);
-                        setArtworkPages(artworkPages.slice(0, -1));
-                      }
-                    : undefined
-                }
-                next={
-                  artwork.data?.length === 50
-                    ? () => {
-                        setCoverId(undefined);
-                        setArtworkPages([
-                          ...artworkPages,
-                          artwork.data?.at(-1)?.id ?? artworkAfter,
-                        ]);
-                      }
-                    : undefined
-                }
-              />
-            </>
-          ) : stored.approved_at === null ? (
-            <p className="muted">Approve the frozen plan before selecting the source and cover.</p>
-          ) : (
-            <p className="muted">
-              Source and cover changes are locked while this request is active or no longer queued.
-              Saved receipts remain below.
-            </p>
-          )}
-          <section className="review-section">
-            <h2>Start the approved download</h2>
-            <p className="warning">
-              New folders only. This action connects to the configured source, downloads media,
-              writes tags in private staging, then publishes to the approved local roots. Existing
-              files are never overwritten. A failed copy stays for recovery.
-            </p>
-            <Check checked={newOnly} onChange={setNewOnly} disabled={command.busy || submitted}>
-              I approve new-only publication to the destinations shown above.
-            </Check>
-            {notice && <p role="status">{notice}</p>}
-            <div className="actions">
-              <Button
-                disabled={!canRun}
-                onClick={() =>
-                  void command.run(async () => {
-                    const body: StartLocalDownload = {
-                      source_candidate: allReceived ? null : (source?.id ?? null),
-                      acknowledge_new_only_publication: true,
-                    };
-                    await request(`${base}/run`, { body });
-                    setSubmitted(true);
-                    setNewOnly(false);
-                    setNotice(
-                      "The server accepted the local run. The saved job state will show the actual result.",
-                    );
-                    setPoll(true);
-                    refresh();
-                  })
-                }
-              >
-                {command.busy
-                  ? "Sending command…"
-                  : allReceived
-                    ? "Continue approved local work"
-                    : "Start Download"}
-              </Button>
-              <Button
-                variant="destructive"
-                disabled={
-                  command.busy ||
-                  stale ||
-                  ![
-                    "queued",
-                    "searching",
-                    "downloading",
-                    "validating",
-                    "normalizing",
-                    "awaiting_input",
-                  ].includes(current.state)
-                }
-                onClick={() =>
-                  void command.run(async () => {
-                    await request(`${base}/controls`, { body: { action: "cancel" } });
-                    setNotice(
-                      "Safe stop requested. In-flight work and receipts are preserved until a safe boundary.",
-                    );
-                    refresh();
-                  })
-                }
-              >
-                Cancel request safely
-              </Button>
-            </div>
-            {!canRun && current.state !== "complete" && (
-              <p className="muted">
-                Start requires a current approved plan, an acknowledged complete source, an approved
-                exact cover, local acquisition enabled, an idle worker and the new-only
-                acknowledgement. Uncertain submissions are never retried here.
-              </p>
+            {!["publishing", "backup_pending", "complete", "cancelled"].includes(current.state) && (
+              <section className="review-section">
+                <h2>Start the approved download</h2>
+                <p className="warning">
+                  New folders only. This action connects to the configured source, downloads media,
+                  writes tags in private staging, then publishes to the approved local roots.
+                  Existing files are never overwritten. A failed copy stays for recovery.
+                </p>
+                <p>
+                  Clicking the start control approves new-only publication to the frozen
+                  destinations. It does not replace the separate source and exact-cover approvals.
+                </p>
+                {notice && <p role="status">{notice}</p>}
+                <div className="actions">
+                  <Button
+                    disabled={!canRun}
+                    onClick={() =>
+                      void command.run(async () => {
+                        const body: StartLocalDownload = {
+                          source_candidate: allReceived ? null : (source?.id ?? null),
+                          acknowledge_new_only_publication: true,
+                        };
+                        await request(`${base}/run`, { body });
+                        setSubmitted(true);
+                        setNotice(
+                          "The server accepted the local run. The saved job state will show the actual result.",
+                        );
+                        setPoll(true);
+                        refresh();
+                      })
+                    }
+                  >
+                    {command.busy
+                      ? "Sending command…"
+                      : allReceived
+                        ? "Continue approved local work"
+                        : "Start Download"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={
+                      command.busy ||
+                      readsBlocked ||
+                      stale ||
+                      !["queued", "searching", "downloading", "validating", "normalizing"].includes(
+                        current.state,
+                      )
+                    }
+                    onClick={() =>
+                      void command.run(async () => {
+                        await request(`${base}/controls`, { body: { action: "pause" } });
+                        setNotice(
+                          "Pause requested. The worker must reach a safe boundary. Open Decisions when the saved pause question appears.",
+                        );
+                        refresh();
+                      })
+                    }
+                  >
+                    Pause at a safe boundary
+                  </Button>
+                  <CancelJob
+                    key={`${id}:${version}:${current.state}`}
+                    job={current}
+                    disabled={command.busy || readsBlocked || stale}
+                    onChanged={refresh}
+                  />
+                </div>
+                {!canRun && current.state !== "complete" && (
+                  <p className="muted">
+                    Start requires a current approved plan, an acknowledged complete source, an
+                    approved exact cover, local acquisition enabled and an idle worker. Clicking
+                    Start Download supplies the explicit new-only acknowledgement. Uncertain
+                    submissions are never retried here.
+                  </p>
+                )}
+              </section>
             )}
-          </section>
+          </Card>
           <section className="review-section">
             <h2>Transfer receipts</h2>
             {receipts.data?.transfers.length ? (
@@ -479,6 +627,19 @@ export function RequestPage({
               <p className="muted">Showing the first 100 transfer receipts.</p>
             )}
             <h2>Publication receipts</h2>
+            <PublicationRecovery
+              key={`${base}:${current.state}:${recoveryRevision}`}
+              job={current}
+              version={version}
+              destinations={receipts.data?.publication ?? []}
+              status={status}
+              blocked={readsBlocked || stale || stored.approved_at === null}
+              command={command}
+              onChanged={() => {
+                setPoll(true);
+                refresh();
+              }}
+            />
             {receipts.data?.publication.length ? (
               receipts.data.publication.map((destination) => (
                 <div className="list-row" key={destination.id}>
@@ -503,8 +664,9 @@ export function RequestPage({
               </Empty>
             )}
           </section>
-        </>
+        </fieldset>
       )}
+      <RequestHistory key={base} base={base} revision={historyRevision} active={poll} />
     </>
   );
 }

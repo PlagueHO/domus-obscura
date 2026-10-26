@@ -26,6 +26,87 @@ The application uses the real guarded API, not `frontend/local-test`.
 It serves the built browser files from `frontend/dist-app`.
 Rebuild and restart after frontend changes. The browser has a Component library.
 
+The saved design target is `docs/ui-poc/structure.html`, not the temporary
+functional forms. The connected app now uses the approved Orbit header and
+icon-only Media navigation, Home focus header, shared queue/status components
+and fixed-size artist/album cards. The queue groups attention, active and
+finished requests; it initially shows five finished rows. Album preparation
+opens in a keyboard-accessible download drawer. A cancellation requires inline
+confirmation and remains visible until the server confirms its safe result.
+The real queue reads album names and the approved retained cover from the current
+frozen plan, not sample data. Failed cover loads show an explicit unavailable
+state. Remove and Clear finished on this page only hide completed queue entries.
+Clearing includes the finished rows behind Show all on that loaded page.
+These shared, version-bound choices survive restart. They do not delete albums,
+jobs, approvals or receipts. Finished rows also leave the queue after seven days
+from completion. Backup-pending and failed rows remain visible.
+The diagnostic `/api/jobs` route still returns hidden jobs.
+On schema upgrade, known completion event times are retained. A legacy completed
+job with no completion event remains visible for seven days from upgrade; its
+unknown historical completion time is not inferred from request creation.
+Search groups Artists and Albums with separate errors and page controls.
+Artist pages use a canonical-ID lookup through the same catalog client, cache
+and durable budget. The UI leaves a one-second gap between its initial distinct
+reads, as required by the [MusicBrainz API](https://musicbrainz.org/doc/MusicBrainz_API).
+This is scheduling, not a failed-request retry. Longer shared provider backoff
+remains visible and authoritative. Optional name, type, country and
+disambiguation values use the existing bounded parser.
+Album pages can browse editions through
+`GET /api/discovery/release-groups/{id}/releases`. This uses a dedicated
+release-group browse query, not title-search syntax. Every returned edition must
+belong to that exact group. The selector keeps the current exact release visible
+across pages, uses the provider's actual cursor and can include unofficial
+editions explicitly. Selecting an edition opens that exact release. It does not
+create or approve a plan, source or cover. The [MusicBrainz API](https://musicbrainz.org/doc/MusicBrainz_API)
+documents group-linked browsing and short release pages caused by its track limit.
+No provider ordering is treated as a recommendation. Recommendation criteria
+remain undefined. The request uses one amber review surface for plan, source,
+cover and start controls. Unapproved source and cover editors open for review;
+approved details can be expanded without changing approval. Complete received
+inputs are labelled as retained receipts, not a new source acknowledgement.
+Transfer and publication receipts remain separate from the review. Failed or
+stale required reads disable commands. These screens are a partial port; other
+retained V1 work remains open.
+
+**Saved request history** reads
+`GET /api/jobs/{id}/plans/{version}/events`. It uses bounded ID-based pages and
+an index on job, plan version and event ID. Migration 20 adds that index only;
+it does not manufacture events or change any approval or job state. The view
+shows only events with the exact saved plan version, oldest first. Global
+diagnostic event reads retain the older unversioned events. History reads need
+the normal authenticated or explicit loopback-development boundary. There is no
+history mutation, resume or retry command.
+The local `domus job-history <local-database> <job-id> <plan-version> <after-id> <limit>`
+command returns the same JSON event page through a current-schema read-only
+snapshot. It never creates or upgrades state. For the first page, use `after-id`
+`0` and a limit from `1` through `200`.
+
+The Library screen reads bounded saved-index pages only. **Refresh index view**
+repeats that read; it never starts a scan or changes media. Run explicit scans
+from System settings. Coverage, last scan errors and retained absence labels
+remain visible. A failed read is not shown as an empty folder. A failed refresh
+keeps the last response with a warning and disables its page controls.
+Changing roots resets folder navigation. Changing any resource key immediately
+hides the previous resource while the new read starts, so a previous root,
+folder or approval cannot appear as the newly selected resource.
+
+**Check root availability** is a separate, explicit protected GET at
+`/api/locations/{id}/availability`. It opens only the configured root through
+the existing no-follow component walk and checks the retained native identity
+and ancestry. Success returns 204. Missing, replaced, unbound and inaccessible
+roots return normal API errors. The check does not scan, register or rebind a
+root, change coverage or update the index. Cached browsing remains available
+when the check fails. Success is a point-in-time observation, not authority for
+later media operations. This check does not check child files.
+
+The Start Download click supplies the explicit new-only publication
+acknowledgement. It replaces the extra publication checkbox, not the saved
+plan, permitted-source or exact-JPEG approvals. Commands are disabled when
+required reads are loading, failed or stale. The server still rechecks all
+authority before effects. Provider reads retain the existing durable
+[MusicBrainz request limits](https://musicbrainz.org/doc/MusicBrainz_API);
+the UI does not bypass limits or add automatic provider retries.
+
 The generated certificate is self-signed. Use a certificate already trusted by
 your browser, or review and trust the generated public certificate through your
 normal development certificate process. Keep the private key private.
@@ -153,9 +234,56 @@ transfer intent, normalization evidence and failed destination copies.
 The page shows the local operation error and durable job/transfer/publication state.
 The last-operation message is process-local; receipts and questions are durable.
 
-Use existing `job-control`, artwork answer/resume and publication commands for
-operator-controlled recovery. The browser identifies unresolved questions but
-does not invent an answer or resume. An uncertain submission must not be reset.
+For foreground shutdown, use Ctrl+C. On Linux, SIGTERM uses the same path.
+The server first rejects new local source, download and publication operations.
+It closes HTTP connections with a ten-second grace period, then waits for the
+current local operation and its result recording. This wait has no forced
+timeout: it must not abandon an active receive or publication copy.
+A server error also drains before the process exits. A forced process kill
+cannot use this path; inspect saved receipts and uncertainty before recovery.
+This is not a native Windows service or systemd package.
+The local drain regression runs on Windows. Linux signal execution and
+service-manager shutdown still need Linux acceptance.
+
+Open **Decisions** in the application navigation for durable questions. Pending
+answers and saved answers that still need recovery remain in the paginated inbox.
+Open a decision and select one offered answer. **Save answer** only saves that
+choice. A separate **Apply saved pause answer** command applies a pause decision.
+It restores the saved safe state or cancels according to the saved answer; it does
+not claim work, start a download or contact a provider. Requests also have a
+**Pause at a safe boundary** control. A live worker must reach a safe boundary
+before a pause question appears.
+
+For a cover question, open the linked request. Its cover editor is available while
+the current unanswered artwork decision is safely paused. Prepare a permitted
+image, inspect the JPEG and approve its exact bytes. Return to the decision,
+save **Use approved cover**, then separately apply the approved cover and restore
+the safe state. The backend rechecks the plan, destinations, approved JPEG and
+transfer safety. Failed answers or recovery commands retain the paused state.
+The browser cannot bypass these checks, infer an answer or retry a command.
+
+Generic operator questions without an installed browser recovery action still
+require the matching CLI command after their answer is saved.
+For a current `publishing` or `backup_pending` request with retained publication
+receipts, use **Review publication recovery**, then **Confirm new-only publication**.
+This sends `POST /api/jobs/{id}/plans/{version}/publication/resume` with the exact
+`normalization_run` and `acknowledge_new_only_publication: true`. Normal browser
+Origin and CSRF guards apply. The local runtime shares one operation slot with
+downloads and source operations. A 202 response means accepted, not complete.
+Read saved job state and publication receipts for the result.
+
+Recovery requires an existing journal for that exact run, a current approved
+plan, no live worker lease and the host-configured staging root. It reuses the
+same new-only publication implementation as `publish-new-once`. It reads no
+account credentials, makes no provider connection and never downloads or
+normalizes again. Exact synced files can close an unreceipted crash gap.
+Partial/different files, missing receipted files and changed destination bindings
+remain errors; they are not overwritten, adopted or recreated. A still-offline
+backup remains `backup_pending`. Refresh the request after the operation finishes
+to inspect its result before another explicit attempt. No automatic retry occurs.
+The CLI remains available for explicit publication before any journal exists.
+This browser action is not replacement, restore or cleanup.
+An uncertain submission must not be reset.
 All fully received, sealed inputs can finish locally without another peer
 connection. Supply `source_candidate: null` only for an existing source; an idle
 new job needs its exact approved source candidate.
@@ -168,6 +296,7 @@ has finished, then refresh the browser's library view.
 
 ```powershell
 .\dev.ps1 test anonymous_https_approves_exact_album
+.\dev.ps1 test anonymous_https_resumes_retained_publication
 .\dev.ps1 test complete_mp3_and_flac_albums
 .\dev.ps1 check
 .\dev.ps1 build

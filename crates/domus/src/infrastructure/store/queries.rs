@@ -10,6 +10,10 @@ pub struct JobSummary {
     pub plan_version: i64,
     pub state: String,
     pub created_at: i64,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub approved_at: Option<i64>,
+    pub artwork_candidate_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, ts_rs::TS)]
@@ -22,6 +26,38 @@ pub struct JobEvent {
 }
 
 impl Store {
+    /// Read only the events bound to one retained plan. Unversioned historical
+    /// events cannot prove which immutable plan they describe.
+    pub fn plan_events(&self, job: i64, version: i64, page: Page) -> Result<Vec<JobEvent>> {
+        if job <= 0 || version <= 0 {
+            return Err(Error::InvalidInput(
+                "positive job and plan IDs are required".into(),
+            ));
+        }
+        self.connection.query_row(
+            "SELECT version FROM job_plans WHERE job_id = ?1 AND version = ?2",
+            params![job, version],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT id, job_id, plan_version, event_type, created_at FROM events
+             WHERE job_id = ?1 AND plan_version = ?2 AND id > ?3
+             ORDER BY id LIMIT ?4",
+        )?;
+        statement
+            .query_map(params![job, version, page.after(), page.limit()], |row| {
+                Ok(JobEvent {
+                    id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    plan_version: row.get(2)?,
+                    event_type: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
     pub fn last_event_id(&self) -> Result<i64> {
         self.connection
             .query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
@@ -53,17 +89,44 @@ impl Store {
     }
 
     pub fn jobs(&self, page: Page) -> Result<Vec<JobSummary>> {
+        self.job_summaries(page, false)
+    }
+
+    /// Read the queue without changing durable jobs or completion evidence.
+    /// Completed rows leave this view after seven days or explicit dismissal.
+    pub fn queue(&self, page: Page) -> Result<Vec<JobSummary>> {
+        self.job_summaries(page, true)
+    }
+
+    fn job_summaries(&self, page: Page, queue_only: bool) -> Result<Vec<JobSummary>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT id, plan_version, state, created_at FROM jobs
-             WHERE id > ?1 ORDER BY id LIMIT ?2",
+            "SELECT j.id, j.plan_version, j.state, j.created_at,
+                    json_extract(p.body, '$.edition.album'),
+                    json_extract(p.body, '$.edition.album_artist'), p.approved_at,
+                    a.candidate_id
+             FROM jobs j LEFT JOIN job_plans p
+               ON p.job_id = j.id AND p.version = j.plan_version
+             LEFT JOIN artwork_approvals a
+               ON a.job_id = j.id AND a.plan_version = j.plan_version
+             LEFT JOIN queue_presentations q
+               ON q.job_id = j.id AND q.plan_version = j.plan_version
+             WHERE j.id > ?1 AND (?3 = 0 OR
+               (j.state != 'cancelled' AND (j.state != 'complete' OR
+                (q.dismissed_at IS NULL AND
+                 (q.completed_at IS NULL OR q.completed_at > unixepoch() - 604800)))))
+             ORDER BY j.id LIMIT ?2",
         )?;
         statement
-            .query_map(params![page.after(), page.limit()], |row| {
+            .query_map(params![page.after(), page.limit(), queue_only], |row| {
                 Ok(JobSummary {
                     id: row.get(0)?,
                     plan_version: row.get(1)?,
                     state: row.get(2)?,
                     created_at: row.get(3)?,
+                    album: row.get(4)?,
+                    album_artist: row.get(5)?,
+                    approved_at: row.get(6)?,
+                    artwork_candidate_id: row.get(7)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()

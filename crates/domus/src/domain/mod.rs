@@ -18,6 +18,6 @@ pub use jobs::JobState;
 pub use media::TrackTags;
 pub(crate) use media::valid_release_date;
 pub use paths::{LibraryPath, Page};
-pub use planning::{EditionSelection, OutputSettings, PlannedTrack};
+pub use planning::{ArtworkSize, EditionSelection, OutputSettings, PlannedTrack};
 pub use questions::{ArtworkIssue, Question};
 pub use templates::{AudioFormat, OutputPreview, OutputTemplate, TrackMetadata};

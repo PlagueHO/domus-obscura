@@ -15,7 +15,7 @@ export class ApiError extends Error {
 export async function request<T>(
   path: string,
   options: {
-    method?: "POST";
+    method?: "POST" | "PUT";
     body?: unknown;
     file?: File;
     signal?: AbortSignal;
@@ -26,7 +26,7 @@ export async function request<T>(
   }
   const headers = new Headers({ Accept: "application/json" });
   const hasBody = options.body !== undefined || options.file !== undefined;
-  const command = options.method === "POST" || hasBody;
+  const command = options.method !== undefined || hasBody;
   if (command) {
     headers.set("x-domus-csrf", "1");
   }
@@ -34,7 +34,7 @@ export async function request<T>(
     headers.set("Content-Type", options.file ? "application/octet-stream" : "application/json");
   }
   const response = await fetch(path, {
-    method: command ? "POST" : "GET",
+    method: command ? (options.method ?? "POST") : "GET",
     credentials: "same-origin",
     redirect: "error",
     headers,

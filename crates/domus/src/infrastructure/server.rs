@@ -157,6 +157,8 @@ enum Environment {
 struct Configuration {
     #[serde(default)]
     environment: Environment,
+    #[serde(default = "system_settings_read_only_by_default")]
+    system_settings_read_only: bool,
     #[serde(default)]
     services: crate::application::services::ServiceConfiguration,
     database: PathBuf,
@@ -170,6 +172,10 @@ struct Configuration {
     private_key_file: PathBuf,
     browser_assets: Option<PathBuf>,
     local_acquisition: Option<super::worker::LocalAcquisition>,
+}
+
+fn system_settings_read_only_by_default() -> bool {
+    true
 }
 
 /// Plaintext credentials exist only in memory after bounded, local-file reads.
@@ -212,6 +218,7 @@ impl PreparedServer {
                     ));
                 }
             }
+
             Environment::Development => {
                 if configuration.tenant_id.is_some()
                     || configuration.object_id.is_some()
@@ -369,6 +376,7 @@ impl PreparedServer {
                 )?
             }
         };
+        api = api.with_system_settings_read_only(configuration.system_settings_read_only)?;
         if let Some(root) = &configuration.browser_assets {
             let root = root.clone();
             let browser =
@@ -402,16 +410,36 @@ impl PreparedServer {
         );
         let result = tokio::select! {
             result = &mut serving => result.map_err(Error::from),
-            result = tokio::signal::ctrl_c() => {
-                result?;
+            result = shutdown_signal() => {
+                api.stop_local_operations();
                 handle.graceful_shutdown(Some(Duration::from_secs(10)));
-                serving.await.map_err(Error::from)
+                let served = serving.await.map_err(Error::from);
+                result.map_err(Error::from).and(served)
             },
             _ = api.refresh_identity() => Err(Error::Internal("identity refresh stopped unexpectedly")),
             _ = watch_tls(configuration, hostname, tls) => Err(Error::Internal("TLS refresh stopped unexpectedly")),
         };
+        api.stop_local_operations();
         handle.shutdown();
+        eprintln!("API stopped accepting work; waiting for local operations and saved results");
+        api.drain_local_operations().await?;
         result
+    }
+}
+
+async fn shutdown_signal() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            received = terminate.recv() => received.ok_or_else(|| io::Error::other("termination signal stream closed")),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
     }
 }
 
@@ -474,6 +502,34 @@ mod tests {
         assert_eq!(acceptor.active_connections(), 64);
         drop(streams);
         assert_eq!(acceptor.active_connections(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn system_settings_read_only_defaults_to_true() -> std::result::Result<(), serde_json::Error> {
+        let configuration: Configuration = serde_json::from_value(serde_json::json!({
+            "database": "C:\\DomusDev\\state.db",
+            "listen": "127.0.0.1:8443",
+            "origin": "https://localhost:8443",
+            "certificate_file": "C:\\DomusDev\\localhost.pem",
+            "private_key_file": "C:\\DomusDev\\localhost-key.pem"
+        }))?;
+        assert!(configuration.system_settings_read_only);
+        Ok(())
+    }
+
+    #[test]
+    fn system_settings_read_only_can_be_disabled_by_the_operator()
+    -> std::result::Result<(), serde_json::Error> {
+        let configuration: Configuration = serde_json::from_value(serde_json::json!({
+            "database": "C:\\DomusDev\\state.db",
+            "listen": "127.0.0.1:8443",
+            "origin": "https://localhost:8443",
+            "certificate_file": "C:\\DomusDev\\localhost.pem",
+            "private_key_file": "C:\\DomusDev\\localhost-key.pem",
+            "system_settings_read_only": false
+        }))?;
+        assert!(!configuration.system_settings_read_only);
         Ok(())
     }
 }

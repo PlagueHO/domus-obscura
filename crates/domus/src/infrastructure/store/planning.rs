@@ -83,7 +83,8 @@ impl Store {
         .transpose()
     }
 
-    /// Append an immutable settings version. An optimistic version check keeps
+    /// Append an immutable, system-wide library settings version. No user or
+    /// session owns a separate copy. An optimistic version check keeps
     /// another client's change from being overwritten by an older form.
     pub fn save_settings(
         &mut self,
@@ -245,6 +246,11 @@ impl Store {
         }
         let mut effective = settings.settings.clone();
         if let Some(format) = request.format {
+            if !effective.accepts(format) {
+                return Err(Error::InvalidInput(
+                    "selected audio format is not accepted by the system settings".into(),
+                ));
+            }
             effective.format = format;
         }
         let outputs = request.edition.preview(&effective)?;

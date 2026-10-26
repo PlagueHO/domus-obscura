@@ -399,10 +399,34 @@ async fn catalog_authenticated_discovery_freezes_evidence_and_preserves_backoff(
     domus::application::scan_location(&mut store, location)?;
     let settings = store.save_settings(None, &OutputSettings::default())?;
     let job = store.enqueue(1)?;
+    let artist_query = CatalogQuery::artist(ARTIST)?;
+    let artist_body = serde_json::to_vec(&json!({
+        "id":ARTIST,"name":"Canonical Artist","type":"Group","country":"NZ",
+        "disambiguation":"generated exact identity"
+    }))?;
+    {
+        use sha2::{Digest, Sha256};
+        let raw = rusqlite::Connection::open(&database)?;
+        raw.execute(
+            "INSERT INTO catalog_cache VALUES (?1,?2,?3,unixepoch(),unixepoch()+3600,unixepoch()*1000)",
+            rusqlite::params![artist_query.source(), artist_body, &Sha256::digest(&artist_body)[..]],
+        )?;
+        let group = "30000000-0000-4000-8000-000000000001";
+        let query = CatalogQuery::group_releases(group, 0, 25, Default::default())?;
+        let body = serde_json::to_vec(&json!({
+            "release-offset":0,"release-count":1,"releases":[release_data()]
+        }))?;
+        raw.execute(
+            "INSERT INTO catalog_cache VALUES (?1,?2,?3,unixepoch(),unixepoch()+3600,unixepoch()*1000)",
+            rusqlite::params![query.source(),body,&Sha256::digest(&body)[..]],
+        )?;
+    }
     let api = Api::new_with_catalog(ORIGIN, store, broker, client(&material, &metadata_server)?)?;
     let router = api.router();
     for path in [
         "/api/discovery/artists?query=Fixture",
+        &format!("/api/discovery/artists/{ARTIST}"),
+        "/api/discovery/release-groups/30000000-0000-4000-8000-000000000001/releases",
         "/api/discovery/releases/invalid",
     ] {
         assert_eq!(
@@ -414,6 +438,43 @@ async fn catalog_authenticated_discovery_freezes_evidence_and_preserves_backoff(
     }
     assert_eq!(catalog_fixture.count()?, 0);
     let cookie = browser_login(&router, &provider, None).await?;
+    let editions_path =
+        "/api/discovery/release-groups/30000000-0000-4000-8000-000000000001/releases";
+    let editions =
+        json_body(api_request(&router, "GET", editions_path, Some(&cookie), None, None).await?)
+            .await?;
+    assert_eq!(editions["cached"], true);
+    assert_eq!(editions["data"]["items"][0]["id"], RELEASE);
+    assert_eq!(catalog_fixture.count()?, 0);
+    assert_eq!(
+        api_request(
+            &router,
+            "GET",
+            &format!("{editions_path}?query=not-a-group-filter"),
+            Some(&cookie),
+            None,
+            None,
+        )
+        .await?
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let identity = json_body(
+        api_request(
+            &router,
+            "GET",
+            &format!("/api/discovery/artists/{ARTIST}"),
+            Some(&cookie),
+            None,
+            None,
+        )
+        .await?,
+    )
+    .await?;
+    assert_eq!(identity["cached"], true);
+    assert_eq!(identity["data"]["id"], ARTIST);
+    assert_eq!(identity["data"]["name"], "Canonical Artist");
+    assert_eq!(catalog_fixture.count()?, 0);
     let application_tls = certificates("domus.fixture.invalid")?;
     let application_server =
         FixtureServer::start(router.clone(), &application_tls, "domus.fixture.invalid")?;

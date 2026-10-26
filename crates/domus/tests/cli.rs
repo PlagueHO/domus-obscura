@@ -14,6 +14,40 @@ fn run(args: &[&str]) -> Result<std::process::Output, std::io::Error> {
 }
 
 #[test]
+fn job_history_never_creates_or_upgrades_state() -> Result<(), Box<dyn std::error::Error>> {
+    let state = tempdir()?;
+    let database = state.path().join("history.db");
+    let path = database.to_str().ok_or("database path")?;
+    let missing = run(&["job-history", path, "1", "2", "0", "50"])?;
+    assert!(!missing.status.success());
+    assert!(missing.stdout.is_empty());
+    assert!(!database.exists());
+    let raw = rusqlite::Connection::open(&database)?;
+    raw.execute_batch(
+        "PRAGMA user_version=19; CREATE TABLE sentinel(value TEXT);
+         INSERT INTO sentinel VALUES ('retained');",
+    )?;
+    let old = run(&["job-history", path, "1", "2", "0", "50"])?;
+    assert!(!old.status.success());
+    assert!(old.stdout.is_empty());
+    assert_eq!(
+        raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+        19
+    );
+    assert_eq!(
+        raw.query_row("SELECT value FROM sentinel", [], |row| row
+            .get::<_, String>(0))?,
+        "retained"
+    );
+    for (after, limit) in [("-1", "50"), ("0", "201"), ("0", "0")] {
+        let invalid = run(&["job-history", path, "1", "2", after, limit])?;
+        assert!(!invalid.status.success());
+        assert!(invalid.stdout.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn mcp_startup_never_creates_or_upgrades_state_or_echoes_private_configuration()
 -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
@@ -431,7 +465,7 @@ fn local_cli_explicitly_binds_legacy_media_and_staging_without_changing_files()
     drop(store);
     std::fs::write(media.path().join("sentinel.txt"), b"unchanged")?;
     let raw = rusqlite::Connection::open(&database)?;
-    raw.execute_batch("DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; PRAGMA user_version = 12;")?;
+    raw.execute_batch("DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; PRAGMA user_version = 12;")?;
     drop(raw);
     let location = location.to_string();
     let identity = run(&["root-identity", root])?;

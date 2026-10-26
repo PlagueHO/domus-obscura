@@ -6,7 +6,16 @@ import type { ArtworkCandidate } from "../src/generated/ArtworkCandidate";
 import type { LocalStatus } from "../src/generated/LocalStatus";
 import { canStart, stateLabel, visibleJobs } from "./state";
 
-const job: JobSummary = { id: 1, plan_version: 2, state: "queued", created_at: 1 };
+const job: JobSummary = {
+  id: 1,
+  plan_version: 2,
+  state: "queued",
+  created_at: 1,
+  album: "Album",
+  album_artist: "Artist",
+  approved_at: 1,
+  artwork_candidate_id: null,
+};
 const plan: StoredPlan = {
   job_id: 1,
   version: 2,
@@ -20,7 +29,12 @@ const plan: StoredPlan = {
       bucket: null,
       tracks: [],
     },
-    settings: { format: "mp3", template: { folder: "server", filename: "server" } },
+    settings: {
+      format: "mp3",
+      template: { folder: "server", filename: "server" },
+      artwork_size: null,
+      accepted_formats: null,
+    },
     format: "mp3",
     outputs: [],
     destinations: [],

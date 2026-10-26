@@ -79,6 +79,14 @@ impl CoverJpeg {
 /// Other unsupported inputs and transparent pixels without an explicit
 /// background return errors instead of substituting content.
 pub fn normalize_cover(input: &[u8], background: Option<[u8; 3]>) -> Result<CoverJpeg> {
+    normalize_cover_for_size(input, background, None)
+}
+
+pub fn normalize_cover_for_size(
+    input: &[u8],
+    background: Option<[u8; 3]>,
+    size: Option<crate::domain::ArtworkSize>,
+) -> Result<CoverJpeg> {
     if input.is_empty() || input.len() > MAX_COMPRESSED_BYTES {
         return Err(invalid("cover must be nonempty and no larger than 8 MiB"));
     }
@@ -120,9 +128,10 @@ pub fn normalize_cover(input: &[u8], background: Option<[u8; 3]>) -> Result<Cove
     drop(rgba);
     // Composite before filtering so hidden colors in transparent pixels cannot
     // bleed into the resized cover.
-    let rgb = if rgb.width() > OUTPUT_SIDE || rgb.height() > OUTPUT_SIDE {
+    let output_side = size.map_or(OUTPUT_SIDE, crate::domain::ArtworkSize::target_side);
+    let rgb = if rgb.width() > output_side || rgb.height() > output_side {
         DynamicImage::ImageRgb8(rgb)
-            .resize(OUTPUT_SIDE, OUTPUT_SIDE, FilterType::Lanczos3)
+            .resize(output_side, output_side, FilterType::Lanczos3)
             .into_rgb8()
     } else {
         rgb

@@ -4,6 +4,30 @@ import { ApiError, errorText, query, request } from "./api";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("same-origin client", () => {
+  it("saves shared system settings with PUT, a frozen expected version and command guards", async () => {
+    const fetch = vi.fn().mockResolvedValue(Response.json(8));
+    vi.stubGlobal("fetch", fetch);
+    const body = { expected_version: 7, settings: { artwork_size: "recommended" } };
+    expect(await request("/api/settings", { method: "PUT", body })).toBe(8);
+    const options = fetch.mock.calls[0]?.[1] as RequestInit;
+    expect(options.method).toBe("PUT");
+    expect(new Headers(options.headers).get("x-domus-csrf")).toBe("1");
+    expect(options.credentials).toBe("same-origin");
+    expect(JSON.parse(options.body as string)).toEqual(body);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([403, 409, 500])("does not retry a rejected settings save (%s)", async (status) => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValue(Response.json({ error: "Settings could not be saved." }, { status }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(
+      request("/api/settings", { method: "PUT", body: { expected_version: 7 } }),
+    ).rejects.toMatchObject({ status, message: "Settings could not be saved." });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("posts plan approval with no body or content type", async () => {
     const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetch);

@@ -291,10 +291,21 @@ async fn browser_caa_search_and_download_keep_exact_release_evidence_and_separat
 /// received peer bytes are generated. No live provider or account is contacted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anonymous_https_approves_exact_album_and_publishes_verified_mp3_folder() -> TestResult {
+    approved_album(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anonymous_https_resumes_retained_publication_after_offline_backup() -> TestResult {
+    approved_album(true).await
+}
+
+async fn approved_album(recover_backup: bool) -> TestResult {
     let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     let library = directory.path().join("library");
     let scratch = directory.path().join("staging");
+    let backup = directory.path().join("backup");
+    let offline = directory.path().join("backup-offline");
     std::fs::create_dir(&library)?;
     std::fs::create_dir(&scratch)?;
     private::directory(&scratch)?;
@@ -311,6 +322,13 @@ async fn anonymous_https_approves_exact_album_and_publishes_verified_mp3_folder(
     let mut store = Store::open(&database)?;
     let location = add_location(&store, &library, "main")?;
     scan_location(&mut store, location)?;
+    let mut locations = vec![location];
+    if recover_backup {
+        std::fs::create_dir(&backup)?;
+        let backup_id = add_location(&store, &backup, "backup")?;
+        scan_location(&mut store, backup_id)?;
+        locations.push(backup_id);
+    }
     store.save_settings(None, &OutputSettings::default())?;
     drop(StagingRoot::open(&mut store, &scratch)?);
     seed_release(&database)?;
@@ -409,7 +427,7 @@ async fn anonymous_https_approves_exact_album_and_publishes_verified_mp3_folder(
         &format!("/api/discovery/releases/{RELEASE}/plans"),
         json!({
             "job_id":job,"expected_version":1,"settings_version":1,"format":"mp3",
-            "locations":[location],"accepts_incomplete_coverage":false,"bucket":null
+            "locations":locations,"accepts_incomplete_coverage":false,"bucket":null
         }),
     )
     .await?;
@@ -568,6 +586,9 @@ async fn anonymous_https_approves_exact_album_and_publishes_verified_mp3_folder(
             .status(),
         StatusCode::FORBIDDEN
     );
+    if recover_backup {
+        std::fs::rename(&backup, &offline)?;
+    }
     command(
         &client,
         &origin,
@@ -579,11 +600,93 @@ async fn anonymous_https_approves_exact_album_and_publishes_verified_mp3_folder(
     .await?;
     let status = idle(&client, &origin).await?;
     assert!(status["last_error"].is_null(), "{status}");
+    if recover_backup {
+        let store = Store::open_read_snapshot(&database)?;
+        assert_eq!(store.job_state(job)?.as_deref(), Some("backup_pending"));
+        let targets = store.publication_destinations(job, version)?;
+        let run = targets.first().ok_or("publication journal")?.run_id;
+        assert_eq!(targets.len(), 2);
+        let saved_transfers =
+            serde_json::to_value(store.transfers(job, version, Page::new(0, 200)?)?)?;
+        let raw = rusqlite::Connection::open(&database)?;
+        let runs: i64 = raw.query_row("SELECT count(*) FROM normalization_runs", [], |row| {
+            row.get(0)
+        })?;
+        let path = format!("{origin}{base}/publication/resume");
+        let body = json!({"normalization_run":run,"acknowledge_new_only_publication":true});
+        assert_eq!(
+            client
+                .post(&path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(serde_json::to_vec(&body)?)
+                .send()
+                .await?
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        for invalid in [
+            json!({"normalization_run":run,"acknowledge_new_only_publication":false}),
+            json!({"normalization_run":0,"acknowledge_new_only_publication":true}),
+            json!({"normalization_run":run,"acknowledge_new_only_publication":true,"staging_root":"injected"}),
+        ] {
+            assert!(
+                client
+                    .post(&path)
+                    .header(header::ORIGIN, &origin)
+                    .header("x-domus-csrf", "1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(serde_json::to_vec(&invalid)?)
+                    .send()
+                    .await?
+                    .status()
+                    .is_client_error()
+            );
+        }
+        command(
+            &client,
+            &origin,
+            &format!("{base}/publication/resume"),
+            json!({"normalization_run":run+1,"acknowledge_new_only_publication":true}),
+        )
+        .await?;
+        assert!(idle(&client, &origin).await?["last_error"].is_string());
+        std::fs::rename(&offline, &backup)?;
+        // Recovery uses no account credentials, catalog request or audio connection.
+        std::fs::remove_file(directory.path().join("credentials.json"))?;
+        command(
+            &client,
+            &origin,
+            &format!("{base}/publication/resume"),
+            body,
+        )
+        .await?;
+        let resumed = idle(&client, &origin).await?;
+        assert!(resumed["last_error"].is_null(), "{resumed}");
+        let recovered = Store::open_read_snapshot(&database)?;
+        assert_eq!(recovered.job_state(job)?.as_deref(), Some("complete"));
+        assert_eq!(
+            serde_json::to_value(recovered.transfers(job, version, Page::new(0, 200)?)?)?,
+            saved_transfers
+        );
+        assert_eq!(
+            raw.query_row("SELECT count(*) FROM normalization_runs", [], |row| row
+                .get::<_, i64>(0))?,
+            runs
+        );
+        assert_eq!(
+            client.get(&path).send().await?.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
     let store = Store::open_read_snapshot(&database)?;
     assert_eq!(store.job_state(job)?.as_deref(), Some("complete"));
     let destinations = store.publication_destinations(job, version)?;
-    assert_eq!(destinations.len(), 1);
-    assert!(destinations[0].verified_at.is_some());
+    assert_eq!(destinations.len(), if recover_backup { 2 } else { 1 });
+    assert!(
+        destinations
+            .iter()
+            .all(|target| target.verified_at.is_some() && target.last_error.is_none())
+    );
     let folder = library
         .join("F")
         .join("FIXTURE ARTIST")
@@ -607,6 +710,18 @@ async fn anonymous_https_approves_exact_album_and_publishes_verified_mp3_folder(
             .collect::<Vec<_>>()
     );
     assert_eq!(std::fs::read(folder.join("folder.jpg"))?, image.as_ref());
+    if recover_backup {
+        let backup_folder = backup
+            .join("F")
+            .join("FIXTURE ARTIST")
+            .join("FIXTURE ALBUM");
+        for name in &expected {
+            assert_eq!(
+                std::fs::read(backup_folder.join(name))?,
+                std::fs::read(folder.join(name))?
+            );
+        }
+    }
     let source_proof = domus::infrastructure::mp3::inspect_mp3_320(&mut Cursor::new(&source))?;
     for (index, title) in TITLES.iter().enumerate() {
         let path = folder.join(format!(

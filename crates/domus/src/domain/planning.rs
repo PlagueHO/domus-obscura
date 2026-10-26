@@ -3,15 +3,72 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtworkSize {
+    Small,
+    Recommended,
+    Large,
+}
+
+impl ArtworkSize {
+    pub fn target_side(self) -> u32 {
+        match self {
+            Self::Small => 200,
+            Self::Recommended => 400,
+            Self::Large => 800,
+        }
+    }
+}
+
+/// Administrator-controlled policy for the shared library, not per-user preferences.
+/// Plans freeze a settings version so later system changes cannot alter approved work.
+/// `format` is preferred; MP3 means verified 320 kbps CBR and FLAC is lossless.
+/// A missing accepted set preserves both legacy formats.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct OutputSettings {
     pub format: AudioFormat,
+    #[serde(default)]
+    pub accepted_formats: Option<Vec<AudioFormat>>,
     pub template: OutputTemplate,
+    #[serde(default)]
+    pub artwork_size: Option<ArtworkSize>,
+}
+
+impl Default for OutputSettings {
+    fn default() -> Self {
+        Self {
+            format: AudioFormat::default(),
+            accepted_formats: Some(vec![AudioFormat::Mp3, AudioFormat::Flac]),
+            template: OutputTemplate::default(),
+            artwork_size: Some(ArtworkSize::Recommended),
+        }
+    }
 }
 
 impl OutputSettings {
+    pub fn accepts(&self, format: AudioFormat) -> bool {
+        self.accepted_formats
+            .as_ref()
+            .is_none_or(|formats| formats.contains(&format))
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if let Some(formats) = &self.accepted_formats
+            && (formats.is_empty()
+                || formats.len() > 2
+                || !formats.contains(&self.format)
+                || formats
+                    .iter()
+                    .enumerate()
+                    .any(|(index, format)| formats[..index].contains(format)))
+        {
+            return Err(Error::InvalidInput(
+                "select distinct accepted audio formats and a preferred format from that selection"
+                    .into(),
+            ));
+        }
         self.template.preview(
             &TrackMetadata {
                 album_artist: "Artist",

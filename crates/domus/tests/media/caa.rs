@@ -28,6 +28,7 @@ fn schema_thirteen_upgrade_preserves_legacy_previews_without_fabricated_evidence
         .artwork_jpeg(fixture.job, fixture.version, candidate.id)?;
     drop(fixture.store);
     let raw = Connection::open(&fixture.database)?;
+    raw.execute_batch("DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations;")?;
     raw.execute_batch(
         "DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; PRAGMA user_version=13;",
     )?;
@@ -45,7 +46,7 @@ fn schema_thirteen_upgrade_preserves_legacy_previews_without_fabricated_evidence
     );
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        18
+        20
     );
     Ok(())
 }

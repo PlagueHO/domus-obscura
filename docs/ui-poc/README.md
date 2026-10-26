@@ -4,6 +4,12 @@ This folder holds the approved interface study for Domus Obscura V1. It is a
 static HTML prototype with generated sample data. It contacts no provider,
 library or account. It is not the production frontend.
 
+This is the design target for the connected application in `frontend/app`.
+Implement its shared Component library, navigation and page layouts with real
+API-backed state. The current connected application is only a partial port,
+not a replacement design. See **Confirmed Interface Design (V1)** in
+[`PRODUCT.md`](../../PRODUCT.md).
+
 ## Run
 
 ```sh

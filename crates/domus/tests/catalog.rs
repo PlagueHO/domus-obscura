@@ -15,6 +15,36 @@ const ARTIST: &str = "10000000-0000-4000-8000-000000000001";
 const RELEASE: &str = "20000000-0000-4000-8000-000000000001";
 const GROUP: &str = "30000000-0000-4000-8000-000000000001";
 
+#[test]
+fn catalog_editions_are_bound_to_the_exact_group_and_provider_cursor() -> TestResult {
+    let query = CatalogQuery::group_releases(GROUP, 0, 24, Default::default())?;
+    let url = reqwest::Url::parse(query.source())?;
+    let pairs = url
+        .query_pairs()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        pairs.get("release-group").map(|value| value.as_ref()),
+        Some(GROUP)
+    );
+    assert!(!pairs.contains_key("query"));
+    let page = json!({"release-offset":0,"release-count":3,"releases":[release()]});
+    let parsed = query.parse_releases(&serde_json::to_vec(&page)?)?;
+    assert_eq!(parsed.next_offset, Some(1));
+    assert_eq!(parsed.items[0].id, RELEASE);
+    let mut wrong = page.clone();
+    wrong["releases"][0]["release-group"]["id"] = json!(ARTIST);
+    assert!(query.parse_releases(&serde_json::to_vec(&wrong)?).is_err());
+    wrong["releases"][0]["release-group"] = Value::Null;
+    assert!(query.parse_releases(&serde_json::to_vec(&wrong)?).is_err());
+    let mut filtered = page;
+    filtered["releases"][0]["status"] = json!("Bootleg");
+    let parsed = query.parse_releases(&serde_json::to_vec(&filtered)?)?;
+    assert!(parsed.items.is_empty());
+    assert_eq!(parsed.next_offset, Some(1));
+    assert!(CatalogQuery::group_releases("../escape", 0, 24, Default::default()).is_err());
+    Ok(())
+}
+
 fn credit(name: &str) -> Value {
     json!({"artist": {"id": ARTIST, "name": name}, "name": name, "joinphrase": ""})
 }
@@ -298,6 +328,49 @@ fn catalog_pages_preserve_labels_and_reject_inconsistent_results() -> TestResult
     assert!(
         query
             .parse_artists(&vec![b' '; 2 * 1024 * 1024 + 1])
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn catalog_artist_lookup_binds_the_exact_identity_and_preserves_optional_labels() -> TestResult {
+    let query = CatalogQuery::artist(ARTIST)?;
+    assert_eq!(
+        query.source(),
+        format!("https://musicbrainz.org/ws/2/artist/{ARTIST}?fmt=json")
+    );
+    let minimal = serde_json::to_vec(&json!({"id":ARTIST,"name":"Generated <artist>"}))?;
+    let artist = query.parse_artist(&minimal)?;
+    assert_eq!(artist.id, ARTIST);
+    assert_eq!(artist.name, "Generated <artist>");
+    assert_eq!(artist.country, None);
+    query.validate_response(&minimal)?;
+    let rich = serde_json::to_vec(&json!({
+        "id":ARTIST,"name":"Generated artist","sort-name":"Artist, Generated",
+        "country":"NZ","type":"Group","disambiguation":"isolated fixture",
+        "life-span":{"begin":null,"end":null,"ended":false}
+    }))?;
+    let artist = query.parse_artist(&rich)?;
+    assert_eq!(artist.sort_name.as_deref(), Some("Artist, Generated"));
+    assert_eq!(artist.kind.as_deref(), Some("Group"));
+    for bad in [
+        json!({"id":RELEASE,"name":"Wrong artist"}),
+        json!({"id":ARTIST,"name":""}),
+        json!({"id":ARTIST,"name":"Artist","country":"bad\ntext"}),
+        json!({"id":ARTIST}),
+    ] {
+        assert!(query.parse_artist(&serde_json::to_vec(&bad)?).is_err());
+    }
+    assert!(CatalogQuery::artist("../escape").is_err());
+    assert!(
+        CatalogQuery::artists("Generated", 0, 1)?
+            .parse_artist(&minimal)
+            .is_err()
+    );
+    assert!(
+        query
+            .parse_artist(&vec![b' '; 2 * 1024 * 1024 + 1])
             .is_err()
     );
     Ok(())

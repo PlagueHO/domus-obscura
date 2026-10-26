@@ -35,12 +35,39 @@ Use Entra ID for one tenant/user pair in production. Explicit local development 
 - Share Rust policy across worker, API, CLI, and local MCP adapters.
 - Exclude playback, streaming, Plex integration, bulk cleanup, missing-track repair, multi-peer assembly, and runtime AI from V1.
 
+## Connected Acquisition Recovery
+
+The connected application has a paginated **Decisions** inbox. It retains pending
+answers and saved answers whose jobs still await a recovery action. Question
+details expose the actual artwork or pause-control relationship and current plan
+state; prompt text is never used to select a recovery command. Saving an offered
+answer and applying it are separate explicit actions. Both use the existing
+version-bound, guarded backend commands. Neither starts a worker or a transfer.
+Obsolete decisions are view-only.
+
+A safely paused, current, unanswered artwork question can use the request's
+normal exact-JPEG preparation and approval interface. Answering requires the
+approved cover; recovery rechecks its saved binding and transfer safety. Source
+changes stay locked while paused. Generic questions without a supported browser
+recovery action remain operator-controlled. Publication recovery, supervised
+production services and complete Windows/Linux acceptance remain open.
+
 ## Planned System Configuration Form
 
 The user requires a System configuration form to view and update backend JSON
-settings through the UI. This is a product requirement, not an implemented
-configuration editor. Keep system settings separate from personal preferences
-such as audio quality, image size and tag rules.
+settings through the UI. The full JSON configuration editor is not implemented.
+Artwork size, accepted audio formats, preferred formats, quality priorities,
+output templates and future tag rules are system-wide library policy, not
+per-user preferences. All users share the same library. Only the system
+administrator controls this policy. Do not add user-specific copies or overrides
+of these settings.
+
+The current production host authorizes one configured Entra tenant/object pair.
+That identity controls administration; there is no general multi-user role model
+yet. Explicit anonymous development access remains loopback-only and is not a
+production administrator role. Before adding other production users, enforce
+administrator-only system-setting writes in the backend. The read-only switch
+is an additional operator restriction, not a replacement for authorization.
 
 Cover all supported backend JSON configuration fields through typed form controls,
 including optional and provider-specific settings. Show field descriptions,
@@ -53,7 +80,21 @@ Read-only mode must still allow safe configuration viewing. Enforce this mode in
 the backend on every configuration write; disabled UI controls alone are not
 protection. Do not allow the UI to change this control setting or bypass it through
 another endpoint. The operator must change it outside the UI. The exact setting
-name and default need to be defined during implementation.
+name is `system_settings_read_only`. It defaults to `true`. The operator must
+change it in the server JSON file. The first UI editing surface is limited to
+versioned shared-library output policy stored in SQLite. It does not edit startup JSON,
+provider configuration, credentials, TLS or database paths.
+System settings is a route inside the main application, with its normal header
+and navigation. It also supports explicit registration of existing server-side
+main/backup library folders and separate read-only index scans. Both commands
+require the same backend edit policy and browser command guards. Registration
+uses normal native root identity, ancestry and overlap checks. It cannot create
+folders, move media, replace existing roots or rebind legacy roots.
+
+The system output-settings API uses the existing immutable version history and rejects
+stale versions. Existing plans keep their saved settings. Other JSON configuration
+fields remain read-only until their validation, activation and recovery rules are
+implemented.
 
 Do not return saved passwords, tokens, private keys or other secret values to the
 browser. Show only their configured state. Where secret updates are supported,
@@ -123,7 +164,9 @@ HTTP, CLI and future clients instead of implementing policy in React or handlers
 Keep credentials and native paths in trusted host configuration, not client tool
 arguments. No public MCP endpoint is authorized by this requirement.
 
-Separate user defaults from explicit per-operation choices. Freeze effective
+Separate administrator-controlled library defaults from explicit per-operation choices.
+Per-album choices must stay within the system policy when accepted-format rules
+are implemented; they must not become per-user policy overrides. Freeze effective
 choices when creating an approved plan. Test service contracts without React and
 test adapter mapping separately. Extend contracts compatibly where possible;
 never silently reinterpret saved settings, approved plans or existing receipts.
@@ -171,13 +214,15 @@ show its effects before approval and verify the written tags against that policy
 Retained tags must not bypass metadata validation or required output rules.
 Do not change current tag behavior until the supported rules are agreed.
 
-## Planned Image Size Setting and Cached Variants
+## Image Size Setting and Cached Variants
 
 The user requires an image-size setting with targets of 200 x 200, 400 x 400
 (recommended) or 800 x 800 pixels. The album/artist image retrieval service must
 produce the scaled variant before artwork is embedded in MP3 files or written
-to the album folder. This is planned behavior, not the current implementation.
-Recommend 400 x 400 for new settings; do not change existing approved previews.
+to the album folder. Album output settings now save one of these choices and
+freeze it with each new plan. The shared original-and-variant cache and artist
+image provider are still planned. New settings recommend 400 x 400 pixels;
+legacy settings without a saved size retain the previous 1200-pixel limit.
 
 Treat the target as a bounding box. Preserve aspect ratio without cropping,
 stretching or padding. Never enlarge an image. A square original can reach the
@@ -211,21 +256,26 @@ smaller originals with no enlargement, cache reuse without another fetch,
 variant-key separation and unchanged existing approvals. Verify that embedded
 artwork and the folder image match the exact approved JPEG bytes.
 
-## Planned Audio Format and Quality Preferences
+## Planned System Audio Format and Quality Policy
 
-The user requested a planned user-settings system for accepted audio formats and
-quality options. Each option can be enabled or disabled and has an explicit
-priority. Include MP3 CBR, MP3 VBR, FLAC and M4A in the design. M4A is less preferred
+The administrator controls accepted audio formats and quality options for the
+shared library. These are system settings, not per-user preferences.
+Use a multi-select for accepted format/bitrate combinations, plus one separate
+preferred format/bitrate choice from that accepted set. An ordered list alone
+does not satisfy this requirement. Include MP3 CBR, MP3 VBR, FLAC and M4A in the design. M4A is less preferred
 by the user; recommend keeping it disabled by default. VBR is an encoding mode,
 not a fixed bitrate. M4A is a container; distinguish AAC from lossless ALAC.
 
-This system is not implemented. Preserve existing MP3 320 kbps CBR and FLAC
-behavior until their replacements pass validation. Do not enable a new option
+The current System editor supports accepted MP3 320 kbps CBR and FLAC lossless,
+with a separate preferred choice. FLAC has no fixed bitrate. New settings accept
+both supported choices by default and prefer MP3 320 CBR. Old settings without
+an accepted set retain both previously supported choices. New plan preparation
+rejects formats outside the saved accepted set. Existing plans stay unchanged.
+Additional bitrate, VBR and M4A support is not implemented. Do not enable a new option
 until source assessment, complete audio validation, metadata writing and output
 verification support it without transcoding.
 
-Use one ordered list of accepted format/quality profiles. Recommend preserving
-MP3 320 kbps CBR as the initial enabled default, with other profiles opt-in.
+Use one Rust implementation of accepted and preferred format/quality policy.
 Freeze the policy version and selected profile with each plan. Settings changes
 must not change saved approvals. Recommend presenting a lower-priority match for
 review, not starting it automatically. A different selected format requires a
@@ -347,7 +397,8 @@ This section replaces the earlier "Wall + inspector" direction where they differ
   The "Needs your input" pill has an exclamation icon everywhere.
 - Finished shows 5 rows, with "Show all N" and "Clear finished". Clearing only
   tidies the list; albums stay in the library. Finished items should leave
-  after 7 days (not built).
+  after 7 days. The connected app clears only the loaded queue page, including
+  its finished rows behind "Show all". Other pages remain separate.
 - Cancel asks for inline confirmation. A cancelled item vanishes at once.
   There is no Cancelled state. Files already saved stay.
   The real backend must never reset uncertain submissions on cancel.
@@ -391,6 +442,74 @@ evidence and requires separate permission acknowledgement and exact JPEG approva
 Local cover upload remains available. This does not complete the approved UI port.
 It is not the complete V1 application. The local setup creates a developer
 certificate but never changes browser trust or enables a live account.
+
+The connected UI now shares the approved Orbit header, Home focus header and
+collapsible queue, grouped queue page, fixed-width icon status pills and fixed-size
+artist/album cards. Notifications show only loaded-page problems and link to saved
+decisions. Recent searches are bounded to twelve entries in the current browser
+session. Album preparation opens in a native dialog styled as the download
+slide-out. Safe cancellation uses one shared, explicit inline-confirmation
+component and never hides an active request before server confirmation.
+The request retains frozen edition/destination details in an expandable section.
+Its start click is the new-only acknowledgement; the extra publication checkbox
+is removed. Saved plan, source and exact-cover approvals are still independent.
+
+The queue uses only the retained cover approved for its exact current plan.
+Missing covers remain placeholders; image failures have an explicit unavailable
+state. Finished-list dismissal is durable and version-bound. The server filters
+finished entries after seven days from completion, not request creation.
+Clearing is atomic for the selected loaded-page rows and never deletes media,
+jobs, approvals or recovery receipts. Backup-pending and failed work remain visible.
+These controls affect the shared queue, not a per-user queue.
+
+Search now groups Artists and Albums with independent results, errors, manual
+reloads and page cursors. Initial reads run in sequence with a one-second gap.
+The server still enforces the shared provider budget and any longer backoff;
+the browser never retries automatically. Artist pages load the exact provider
+identity instead of using a generic heading or inferring a name from releases.
+No artist-image provider is installed, so missing artist art stays explicit.
+
+Album pages now offer an exact-edition dropdown backed by release-group browsing.
+Each result must belong to the requested group. Pagination uses actual provider
+rows. The current exact edition remains visible on other pages. Unofficial
+editions require an explicit filter. Selection opens the exact release without
+creating or approving work. Recommendation criteria remain undefined; provider
+ordering does not create a recommended edition or a star.
+
+The request now keeps the plan, source, cover and explicit start controls in one
+amber review surface. Missing source and cover editors open for review. Approved
+details remain available without repeating approval. Received inputs have a
+separate retained-input label, not an invented source acknowledgement.
+Transfer and publication receipts remain outside the approval surface.
+Stale or failed reads block commands. Saved decisions still require separate
+answer and recovery actions.
+Requests also expose bounded, read-only saved event history for the exact plan.
+Old or unversioned events are not assigned to the current plan. History reads
+cannot approve, resume or retry work.
+Requests with an existing publication journal now expose a separate, explicit
+new-only publication recovery confirmation. It uses retained normalized files
+and the exact saved run. It never downloads, normalizes, replaces or removes
+files. Current plan approval, worker fencing, staging lock and destination
+identity checks remain authoritative. An offline backup is not completion.
+This does not implement replacement, restore or cleanup.
+The foreground API stops admitting local operations on shutdown and drains the
+active operation through result recording instead of abandoning its blocking
+task. Ctrl+C is supported; Linux SIGTERM is wired to the same path. Forced
+termination and native service-manager acceptance remain unverified.
+
+The read-only Library screen now offers an explicit saved-index refresh,
+root-bound folder navigation and clear incomplete-coverage and failed-refresh
+states. It does not scan or change media. Changing a resource key immediately
+hides the old resource until the new read starts. This also protects request
+and provider views from showing another resource's saved result as current.
+The Library is still a folder index, not a completed tag-based album browser.
+An explicit root-availability check opens only the configured root through the
+existing no-follow boundary and verifies its saved native binding. It does not
+scan, update coverage or authorize later writes. Missing, inaccessible, unbound
+or replaced roots remain errors; cached browsing remains available.
+
+This remains a partial port: recommendation policy and other retained V1 work
+remain open. The original HTML study is unchanged and remains authoritative.
 
 Generated regression tests cover anonymous HTTPS approval through local MP3
 normalization/publication, exact folders/filenames, all required tags and unchanged

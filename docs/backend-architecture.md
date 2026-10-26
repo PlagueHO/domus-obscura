@@ -8,6 +8,14 @@ servers. The browser is one client. It must not define the service boundaries.
 Dashed arrows and nodes marked **Planned** show requirements, not working features.
 The complete V1 application is not delivered.
 
+Artwork size, accepted audio formats, format priorities and output templates
+belong to one administrator-controlled system policy for the shared library.
+`settings_versions` stores global immutable versions, not per-user preferences.
+Plans retain their selected settings version. The current production identity
+boundary permits one configured tenant/object pair; multi-user administrator
+roles are not yet implemented. Any later multi-user access must keep system
+setting writes administrator-only.
+
 ## Current service map
 
 Arrows show calls or use of a contract. This is a logical map, not an exhaustive
@@ -27,7 +35,7 @@ flowchart TB
         Catalog["CatalogService<br/>Discovery and metadata"]
         Art["ArtworkService<br/>Listing and original image retrieval"]
         Index["Location registration, scans<br/>and read-only library queries"]
-        Plan["Exact-release planning<br/>Versioned settings and approvals"]
+        Plan["Exact-release planning<br/>System library policy and approvals"]
         Source["Source search, folder assessment<br/>and source selection"]
         Acquire["Approved acquisition"]
         Normalize["Album normalization"]
@@ -195,15 +203,21 @@ bounding box. Preserve aspect ratio and never enlarge. Cache the original and
 each content-bound variant through the shared cache interface. Remote clients
 fetch bytes; they do not each implement resizing. New plans freeze the chosen
 target, and approval remains bound to the exact JPEG used for tags and folder
-artwork. This setting is not implemented; current normalization uses a fixed
-1200-pixel maximum side.
+artwork. New settings support 200/400/800-pixel targets; legacy plans retain the
+1200-pixel maximum. Target selection currently runs through plan-bound Store
+preparation. Shared file-cache variants and reusable service orchestration remain
+open.
 
 ## Known gaps for design review
 
 - Artist-photo discovery has no installed provider. CAA supplies release artwork,
   not artist photos. The image normalizer itself is reusable.
-- Ordered format/quality preferences are planned. Current processing supports
-  MP3 320 CBR and FLAC; VBR and M4A acceptance are not implemented.
+- System settings now separate accepted combinations from one preferred choice.
+  New plans enforce that accepted set. Current processing supports MP3 320 CBR
+  and FLAC; other bitrates, VBR and M4A acceptance are not implemented.
+- The System route uses the normal application shell. Guarded root registration
+  and indexing reuse application use cases, native root bindings and Store
+  checks. Existing roots cannot be edited, deleted or rebound through the UI.
 - Search and acquisition are not general concurrent Soulseek services. Persistent
   concurrent operations need one reader per connection and bounded typed routing.
 - Settings, approvals, indexing and recovery use cases still depend on concrete
