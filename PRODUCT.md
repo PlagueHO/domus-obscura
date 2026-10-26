@@ -1,5 +1,14 @@
 # Product
 
+## Delivery tracking
+
+Issue #1 remains the approved V1 scope tracker. Its linked checklist separates
+remaining delivery tasks, unresolved decisions and explicitly future work.
+Merging the foundation does not complete or close that tracker. Future tag rules,
+conversational integration and cross-core design are not V1 acceptance gates.
+Use the issue templates for new work and preserve the confirmed requirements
+below when closing individual delivery tasks.
+
 <!-- impeccable:product-schema 1 -->
 
 ## Platform

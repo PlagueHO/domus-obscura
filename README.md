@@ -7,6 +7,20 @@ Personal home-media management with Rust, React, and SQLite.
 See the [backend services and domains](docs/backend-architecture.md) for architecture
 diagrams, current boundaries and planned changes.
 
+Use [issue #1](https://github.com/PlagueHO/domus-obscura/issues/1) as the V1 scope
+tracker and remaining-work checklist. Follow its linked delivery issues rather
+than treating the foundation PR as complete V1. Future tag rules, conversational
+integration and cross-core decisions are tracked separately from V1 acceptance.
+New issues use the repository's bug, feature, implementation, decision or
+documentation form.
+
+AI contributors start with [AGENTS.md](AGENTS.md) for commands and layout.
+[Copilot instructions](.github/copilot-instructions.md) contain authoring rules.
+[Media/provider instructions](.github/instructions/media-providers.instructions.md)
+apply to Rust implementation and tests. The
+[detailed operations guide](docs/agent-operations.md) preserves command-specific
+approval, recovery and external-service rules.
+
 ## Implemented locally
 
 - Shared Rust path validation, bounded pages, job states, and output-template previews.

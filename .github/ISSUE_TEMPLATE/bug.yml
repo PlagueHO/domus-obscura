@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a reproducible failure in existing behavior.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, tokens, private paths, music or recovery data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the failure and its effect.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Use generated or permitted fixtures. Include the exact command or UI action.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and evidence
+      description: Include the commit, OS, tool versions and redacted error text. State what was not checked.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and recovery
+      description: Describe affected approvals, retained files or uncertain transfers. Do not retry uncertain work.

@@ -41,15 +41,14 @@ See AGENTS.md for layout and commands.
 - Recheck approvals before new effects. Preserve receipts for already-submitted work when index observations change.
 - Keep event replay bounded and check the session before each streamed event.
 - Keep secrets, tokens, state, music, and recovery data out of Git.
-- Require the durable single-use CatalogPermit for every MusicBrainz HTTP request.
-- Use that same catalog budget for each CAA redirect hop. Keep exact listing membership, release, archive item and filename bindings. Never follow arbitrary artwork URLs or HTTP downgrades.
-- Keep provider edit approval separate from user approval and rights decisions. Transport hashes do not prove valid images; retain strict normalization.
-- Keep its OS lock through response persistence. Use saved intervals and monotonic clocks for provider backoff, not wall-clock deadlines.
-- Preserve longer provider backoff. Never automatically clear an unsupported retry pause.
 - Bind new acquisition to a validated, frozen provider snapshot. Keep legacy receipts possible.
 - Keep multi-album plan writes atomic. Require separate approval for each album.
 - Bind artwork approval to the exact JPEG preview and plan version. Never infer user approval from CAA edit approval.
 - Require the approved cover before new normalization effects and final handoff. Preserve legacy receipts without inventing approval.
+- Keep shared-cache keys provider-scoped and content-bound. Never fall back to SQLite when a selected file cache fails.
+- Keep evictable cache entries separate from immutable plans, approved JPEGs and receipts.
+- Keep backend configuration inspection passive and redacted. Never use PreparedServer::load as an effect-free validator; it can migrate SQLite and bind cache roots.
+- Keep active startup configuration separate from saved, unvalidated JSON. Enforce system_settings_read_only on each command; never let the UI disable it.
 
 ## Purpose
 
@@ -87,12 +86,9 @@ Build a personal home-media application with Rust, React, and SQLite. V1 acquire
 - Keep preview rendering distinct from template execution.
 - Display filename replacements without changing valid tag text.
 - Preserve encoded audio when media processing is added.
-- Check every MP3 audio frame for actual 320 kbps and complete decoding. Keep the optional first metadata frame separate; never substitute average or advertised bitrate.
-- Independently check FLAC coding boundaries, reconstructed sample ranges and frame CRCs before decoding. Require a supplied MD5 to match; keep an absent MD5 explicitly unverified.
-- Write fresh metadata only to empty private staging. Derive tags from the frozen exact release, preserve encoded audio, bind the full input hash and verify the complete written output before saving a receipt.
-- Keep JPEG container checks and warning-free native decoding together. Never accept a repaired image or remove the scan, coding, color and allocation limits.
-- Use shadcn/ui for application components when that stage begins.
+- Use the existing owned shadcn/ui-style primitives for application components.
 - Do not treat neutral scaffold components as an approved final theme.
+- Keep resource keys bound to the exact selected entity. Never show retained data as a new entity or current evidence after a failed refresh.
 
 ## Testing
 

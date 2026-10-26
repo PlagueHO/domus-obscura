@@ -1,0 +1,28 @@
+name: Documentation task
+description: Add or correct operator, developer or acceptance documentation.
+title: "Docs: "
+labels: ["documentation"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Documentation need
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Current evidence and affected documents
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Include command accuracy, safety boundaries and unverified limits.
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: Related work
