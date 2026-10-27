@@ -830,7 +830,9 @@ function LibraryRootControls({
     if (busy) return;
     setMessage("");
     await request<Location>(`/api/locations/${id}/scan`, { body: {} });
-    setMessage("Index scan completed. No media files were changed.");
+    setMessage(
+      "The server accepted the scan request. Refresh the saved index to check progress. No media files were changed.",
+    );
     onChanged();
   }
 

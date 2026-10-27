@@ -90,6 +90,38 @@ fn publish_configuration(
     protected_files: &[&Path],
     require_journal: bool,
 ) -> Result<PublicationOutcome> {
+    publish_controlled(configuration, protected_files, require_journal, None)
+}
+
+pub(crate) fn publish_worker(
+    database: &Path,
+    staging_root: &Path,
+    job: i64,
+    version: i64,
+    run: i64,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<PublicationOutcome> {
+    publish_controlled(
+        PublicationConfiguration {
+            database: database.to_owned(),
+            staging_root: staging_root.to_owned(),
+            job_id: job,
+            plan_version: version,
+            normalization_run: run,
+            acknowledge_new_only_publication: true,
+        },
+        &[],
+        false,
+        Some(stop),
+    )
+}
+
+fn publish_controlled(
+    configuration: PublicationConfiguration,
+    protected_files: &[&Path],
+    require_journal: bool,
+    stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<PublicationOutcome> {
     if !configuration.acknowledge_new_only_publication
         || !configuration.database.is_absolute()
         || !configuration.staging_root.is_absolute()
@@ -100,6 +132,10 @@ fn publish_configuration(
         return Err(Error::InvalidInput("publication requires absolute local state/staging paths, positive IDs and explicit new-only acknowledgement".into()));
     }
     let mut store = Store::open_current_existing(&configuration.database)?;
+    if let Some(stop) = stop {
+        store = store.with_worker_stop(stop);
+    }
+    store.check_worker_stop()?;
     protect_files(&store, protected_files)?;
     if !matches!(
         store.job_state(configuration.job_id)?.as_deref(),
@@ -130,14 +166,18 @@ fn publish_configuration(
             300,
         )?
         .ok_or_else(|| Error::Conflict("publication job already has a live worker".into()))?;
-    store.publication_source(&claimed.claim, configuration.normalization_run)?;
-    let staging = StagingRoot::open(&mut store, &configuration.staging_root)?;
-    let state = crate::application::publish_new_album(
-        &mut store,
-        &claimed.claim,
-        &staging,
-        configuration.normalization_run,
-    )?;
+    let result = (|| {
+        store.publication_source(&claimed.claim, configuration.normalization_run)?;
+        let staging = StagingRoot::open(&mut store, &configuration.staging_root)?;
+        crate::application::publish_new_album(
+            &mut store,
+            &claimed.claim,
+            &staging,
+            configuration.normalization_run,
+        )
+    })();
+    store.release_job_claim(&claimed.claim)?;
+    let state = result?;
     Ok(PublicationOutcome {
         state,
         destinations: store
@@ -231,6 +271,20 @@ fn read_credentials(path: &Path) -> Result<Credentials> {
         parsed.map_err(|_| Error::InvalidInput("invalid Soulseek credentials file".into()))?;
     super::soulseek::validate_credentials(&credentials.username, &credentials.password)?;
     Ok(credentials)
+}
+
+fn account_lock(
+    database: &Path,
+    credentials: &Credentials,
+) -> Result<super::local_file::ProcessLock> {
+    use sha2::{Digest, Sha256};
+    super::local_file::ProcessLock::acquire(
+        database,
+        &format!(
+            "account-{:x}",
+            Sha256::digest(credentials.username.as_bytes())
+        ),
+    )
 }
 
 #[derive(Deserialize)]
@@ -440,6 +494,7 @@ fn source_token() -> Result<u32> {
 /// A selected metadata-only query. Loading never opens a socket or mutates
 /// state. Running does not claim jobs, approve editions or queue audio.
 pub struct PreparedFolder {
+    _account: super::local_file::ProcessLock,
     credentials: Credentials,
     server: SocketAddrV4,
     edition: crate::domain::EditionSelection,
@@ -455,11 +510,13 @@ pub struct SourceFolderReport {
 impl PreparedFolder {
     pub fn load(path: &Path) -> Result<Self> {
         let (config, release, credentials) = SearchConfiguration::read(path, true)?;
+        let account = account_lock(&config.database, &credentials)?;
         let edition = release.selection(None)?;
         let selection = config.folder.ok_or_else(|| {
             Error::InvalidInput("source-folder requires one selected peer folder".into())
         })?;
         Ok(Self {
+            _account: account,
             credentials,
             server: config.server,
             edition,
@@ -484,6 +541,7 @@ impl PreparedFolder {
 /// Explicit metadata-only network operation, separate from worker claims,
 /// source selection and audio download. The release must be in the real cache.
 pub struct PreparedSearch {
+    _account: super::local_file::ProcessLock,
     credentials: Credentials,
     server: SocketAddrV4,
     query: String,
@@ -492,6 +550,7 @@ pub struct PreparedSearch {
 impl PreparedSearch {
     pub fn load(path: &Path) -> Result<Self> {
         let (config, release, credentials) = SearchConfiguration::read(path, false)?;
+        let account = account_lock(&config.database, &credentials)?;
         let query = format!("{} {}", release.summary.artist, release.summary.title);
         if query.len() > 256 || query.chars().any(char::is_control) {
             return Err(Error::InvalidInput(
@@ -499,6 +558,7 @@ impl PreparedSearch {
             ));
         }
         Ok(Self {
+            _account: account,
             credentials,
             server: config.server,
             query,
@@ -517,6 +577,7 @@ impl PreparedSearch {
 /// Network access starts solely in run(). It never searches for peers, retries
 /// uncertain submissions or publishes destinations.
 pub struct PreparedWorker {
+    _account: super::local_file::ProcessLock,
     services: ServiceConfiguration,
     store: Store,
     claim: JobClaim,
@@ -684,6 +745,7 @@ impl PreparedWorker {
             source,
             credentials,
         } = validated;
+        let account = account_lock(&configuration.database, &credentials)?;
         if let Some(decision) =
             store.check_artwork(configuration.job_id, configuration.plan_version)?
         {
@@ -698,39 +760,50 @@ impl PreparedWorker {
             )?
             .ok_or_else(|| Error::Conflict("job is already owned by a live worker".into()))?;
         let normalize_only = matches!(state.as_str(), "validating" | "normalizing");
-        if source.is_some() || normalize_only {
-            store.job_work_boundary(&claimed.claim)?;
-        }
-        if source.is_none() && !normalize_only {
-            store.reconciliation_files(&claimed.claim)?;
-        }
-        let staging = StagingRoot::open(&mut store, &configuration.staging_root)?;
-        if let Some((peer, files)) = source {
-            if state == "queued" {
-                store.advance(&claimed.claim, JobState::Queued, JobState::Searching)?;
+        let prepared = (|| {
+            if source.is_some() || normalize_only {
+                store.job_work_boundary(&claimed.claim)?;
             }
-            if let Some(candidate) = configuration.source_candidate {
-                store.begin_reviewed_acquisition(&claimed.claim, candidate)?;
+            if source.is_none() && !normalize_only {
+                store.reconciliation_files(&claimed.claim)?;
+            }
+            let staging = StagingRoot::open(&mut store, &configuration.staging_root)?;
+            if let Some((peer, files)) = source {
+                if state == "queued" {
+                    store.advance(&claimed.claim, JobState::Queued, JobState::Searching)?;
+                }
+                if let Some(candidate) = configuration.source_candidate {
+                    store.begin_reviewed_acquisition(&claimed.claim, candidate)?;
+                } else {
+                    store.begin_acquisition(&claimed.claim, &peer, &files)?;
+                }
+            }
+            let files = if normalize_only {
+                store.acquisition_preview(configuration.job_id, configuration.plan_version)?
             } else {
-                store.begin_acquisition(&claimed.claim, &peer, &files)?;
+                store.reconciliation_files(&claimed.claim)?
+            };
+            let peer = files
+                .first()
+                .ok_or(Error::Internal("selected source is empty"))?
+                .peer
+                .clone();
+            for file in &files {
+                if file.state == "received" {
+                    staging.received(file)?;
+                }
             }
-        }
-        let files = if normalize_only {
-            store.acquisition_preview(configuration.job_id, configuration.plan_version)?
-        } else {
-            store.reconciliation_files(&claimed.claim)?
+            Ok::<_, Error>((staging, peer))
+        })();
+        let (staging, peer) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                store.release_job_claim(&claimed.claim)?;
+                return Err(error);
+            }
         };
-        let peer = files
-            .first()
-            .ok_or(Error::Internal("selected source is empty"))?
-            .peer
-            .clone();
-        for file in &files {
-            if file.state == "received" {
-                staging.received(file)?;
-            }
-        }
         Ok(Self {
+            _account: account,
             services: configuration.services,
             store,
             claim: claimed.claim,
@@ -769,6 +842,16 @@ impl PreparedWorker {
         publish: bool,
         login: &mut impl FnMut(SocketAddrV4, &str, &str) -> Result<SoulseekSession>,
     ) -> Result<WorkerOutcome> {
+        let result = self.execute_inner(publish, login);
+        self.store.release_job_claim(&self.claim)?;
+        result
+    }
+
+    fn execute_inner(
+        &mut self,
+        publish: bool,
+        login: &mut impl FnMut(SocketAddrV4, &str, &str) -> Result<SoulseekSession>,
+    ) -> Result<WorkerOutcome> {
         self.store.renew_claim(&self.claim, 300)?;
         if !self.normalize_only {
             crate::application::reconcile_local_inputs(
@@ -791,7 +874,6 @@ impl PreparedWorker {
         }
         let run = if self.normalize_only {
             self.credentials.password.clear();
-            drop(self.credentials);
             let cover = self
                 .store
                 .approved_artwork(self.claim.job(), self.claim.plan_version())?;
@@ -806,7 +888,6 @@ impl PreparedWorker {
             self.store.job_work_boundary(&self.claim)?;
             let account = self.credentials.username.clone();
             self.credentials.password.clear();
-            drop(self.credentials);
             let mut budget = super::soulseek::ReconnectBudget::default();
             loop {
                 self.store.renew_claim(&self.claim, 300)?;
@@ -979,6 +1060,7 @@ impl LocalAcquisition {
             ));
         }
         PreparedSearch {
+            _account: account_lock(database, &credentials)?,
             credentials,
             server: config.server,
             query,
@@ -1014,6 +1096,7 @@ impl LocalAcquisition {
             cache,
         )?;
         PreparedFolder {
+            _account: account_lock(database, &credentials)?,
             credentials,
             server: config.server,
             edition: release.selection(None)?,
@@ -1032,12 +1115,43 @@ impl LocalAcquisition {
         plan_version: i64,
         request: StartLocalDownload,
     ) -> Result<WorkerOutcome> {
+        self.acquire_controlled(database, services, job_id, plan_version, request, None)
+    }
+
+    pub(crate) fn acquire_with_stop(
+        &self,
+        database: &Path,
+        services: ServiceConfiguration,
+        job_id: i64,
+        plan_version: i64,
+        request: StartLocalDownload,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<WorkerOutcome> {
+        self.acquire_controlled(
+            database,
+            services,
+            job_id,
+            plan_version,
+            request,
+            Some(stop),
+        )
+    }
+
+    fn acquire_controlled(
+        &self,
+        database: &Path,
+        services: ServiceConfiguration,
+        job_id: i64,
+        plan_version: i64,
+        request: StartLocalDownload,
+        stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<WorkerOutcome> {
         if !request.acknowledge_new_only_publication {
             return Err(Error::InvalidInput(
                 "new-only publication needs explicit acknowledgement".into(),
             ));
         }
-        let validated = ValidatedWorker::validate(
+        let mut validated = ValidatedWorker::validate(
             Configuration {
                 services,
                 database: database.to_owned(),
@@ -1054,6 +1168,9 @@ impl LocalAcquisition {
             &[],
             false,
         )?;
+        if let Some(stop) = stop {
+            validated.store = validated.store.with_worker_stop(stop);
+        }
         PreparedWorker::from_validated(validated)?.execute(true)
     }
 }

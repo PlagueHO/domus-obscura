@@ -180,6 +180,9 @@ pub struct LocalStatus {
     pub enabled: bool,
     pub busy: bool,
     pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub worker: Option<super::production_worker::WorkerStatus>,
 }
 
 impl LocalRuntime {
@@ -210,6 +213,7 @@ impl LocalRuntime {
                 .lock()
                 .map_err(|_| Error::Internal("local status lock failed"))?
                 .clone(),
+            worker: None,
         })
     }
 

@@ -6,6 +6,7 @@ import type { SystemSettingsPolicy } from "../src/generated/SystemSettingsPolicy
 import type { JobSummary } from "../src/generated/JobSummary";
 import type { StoredQuestion } from "../src/generated/StoredQuestion";
 import { request, type LocalStatus } from "./api";
+import { WorkerRequests } from "./WorkerRequests";
 import { useResource } from "./hooks";
 import { activeStates } from "./state";
 import { Alert, Badge, Button, Card, Check, Cover, Empty, Pager } from "./components/ui";
@@ -143,7 +144,13 @@ export function App() {
     poll ? 2000 : 15000,
   );
   useEffect(() => {
-    setPoll(Boolean(local.data?.busy || jobs.data?.some((job) => activeStates.has(job.state))));
+    setPoll(
+      Boolean(
+        local.data?.busy ||
+        local.data?.worker?.unfinished ||
+        jobs.data?.some((job) => activeStates.has(job.state)),
+      ),
+    );
   }, [local.data, jobs.data]);
   const [term, setTerm] = useState("");
   const [recent, setRecent] = useState<string[]>([]);
@@ -209,7 +216,7 @@ export function App() {
         key={`${routeId}:${routeVersion}`}
         id={Number(routeId)}
         version={routeVersion}
-        status={local.data}
+        status={local.error ? undefined : local.data}
         onChanged={changed}
       />
     );
@@ -226,6 +233,8 @@ export function App() {
           </Button>
         </header>
         <Alert error={jobs.error} />
+        <Alert error={local.error} />
+        {!local.error && local.data?.worker && <WorkerRequests status={local.data.worker} />}
         {jobs.loading && !jobs.data && <p role="status">Loading requests…</p>}
         {jobs.data && (
           <QueuePage

@@ -34,6 +34,7 @@ pub fn publish_new_album(
     staging: &StagingRoot,
     run: i64,
 ) -> Result<String> {
+    store.check_worker_stop()?;
     staging.check_store(store)?;
     store.renew_claim(claim, 300)?;
     let (normalized, _, work) = store.publication_source(claim, run)?;
@@ -56,6 +57,7 @@ pub fn publish_new_album(
     let mut targets = store.begin_publication(claim, run)?;
     targets.sort_by_key(|target| (target.kind != "main", target.id));
     for target in targets {
+        store.check_worker_stop()?;
         let result: Result<()> = (|| {
             store.renew_claim(claim, 300)?;
             let directory = PublicationDirectory::open(store, &target)?;
@@ -65,6 +67,7 @@ pub fn publish_new_album(
             let target = store.check_publication(claim, target.id)?;
             let files = store.publication_files(claim, target.id)?;
             for file in &files {
+                store.check_worker_stop()?;
                 store.renew_claim(claim, 300)?;
                 let item = if file.ordinal == 0 {
                     None
@@ -95,6 +98,9 @@ pub fn publish_new_album(
             store.finish_publication_destination(claim, target.id)
         })();
         if let Err(error) = result {
+            if matches!(error, Error::WorkerStopping) {
+                return Err(error);
+            }
             store.publication_error(claim, target.id, &error.to_string())?;
             if target.kind == "main" {
                 return Err(error);

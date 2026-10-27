@@ -14,6 +14,7 @@ import { useCommand, useResource } from "./hooks";
 import { activeStates, canStart } from "./state";
 import { Alert, Badge, Button, Card, Empty, Pager } from "./components/ui";
 import { SourceReview } from "./SourceReview";
+import { WorkerRequests } from "./WorkerRequests";
 import { ArtworkReview } from "./ArtworkReview";
 import { CancelJob, JobStatus } from "./components/Media";
 import { RequestHistory } from "./RequestHistory";
@@ -85,8 +86,14 @@ export function RequestPage({
     poll ? 2000 : 0,
   );
   useEffect(() => {
-    setPoll(Boolean(status?.busy || (job.data && activeStates.has(job.data.state))));
-  }, [status?.busy, job.data]);
+    setPoll(
+      Boolean(
+        status?.busy ||
+        status?.worker?.unfinished ||
+        (job.data && activeStates.has(job.data.state)),
+      ),
+    );
+  }, [status?.busy, status?.worker?.unfinished, job.data]);
   const plan = useResource((signal) => request<StoredPlan>(base, { signal }), base);
   const sources = useResource(
     (signal) =>
@@ -258,10 +265,11 @@ export function RequestPage({
             )}
             {!status?.enabled && (
               <p className="warning">
-                Local acquisition is not enabled. Complete the explicit development host setup
-                before starting.
+                Acquisition is not enabled. Configure the production worker or the explicit
+                development runtime before starting.
               </p>
             )}
+            {status?.worker && <WorkerRequests key={id} status={status.worker} job={id} />}
             {current.state === "backup_pending" && (
               <p className="warning">
                 The primary is verified. The backup is not complete. Do not treat this request as
@@ -402,7 +410,7 @@ export function RequestPage({
                     selected={source}
                     onSelect={selectSource}
                     refresh={sources.refresh}
-                    localEnabled={Boolean(status?.enabled && !status.busy)}
+                    localEnabled={Boolean(status?.enabled && !status.busy && !status.worker)}
                   />
                   <Pager
                     busy={sources.loading}
@@ -543,7 +551,9 @@ export function RequestPage({
                         await request(`${base}/run`, { body });
                         setSubmitted(true);
                         setNotice(
-                          "The server accepted the local run. The saved job state will show the actual result.",
+                          status?.worker
+                            ? "The worker request is saved. The saved job state will show the actual result."
+                            : "The server accepted the local run. The saved job state will show the actual result.",
                         );
                         setPoll(true);
                         refresh();

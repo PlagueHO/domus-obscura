@@ -4,6 +4,72 @@ use crate::{Error, Result};
 use std::io::Read;
 use std::path::Path;
 
+/// Stable no-follow lock files are retained across exits, never replaced.
+pub(crate) struct ProcessLock {
+    _file: std::fs::File,
+}
+
+impl ProcessLock {
+    pub(crate) fn acquire(database: &Path, purpose: &str) -> Result<Self> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+        use cap_std::fs::OpenOptions;
+        if purpose.is_empty()
+            || !purpose
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(Error::InvalidInput("invalid process lock purpose".into()));
+        }
+        let directory = LibraryDirectory::open(
+            database
+                .parent()
+                .ok_or(Error::Internal("database parent is missing"))?,
+        )?
+        .into_directory();
+        FilePermissions::current()?.check(&directory.try_clone()?.into_std_file(), false)?;
+        let name = format!(".domus-{purpose}.lock");
+        let options = |create| {
+            let mut options = OpenOptions::new();
+            options
+                .read(true)
+                .write(true)
+                .create_new(create)
+                .follow(FollowSymlinks::No);
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            #[cfg(windows)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.access_mode(0xc004_0000).share_mode(3);
+            }
+            options
+        };
+        let file = match directory.open_with(&name, &options(true)) {
+            Ok(file) => file.into_std(),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                directory.open_with(&name, &options(false))?.into_std()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !file.metadata()?.is_file() || super::filesystem::is_unsafe_link(&file.metadata()?) {
+            return Err(Error::InvalidInput(
+                "process lock must be a regular file".into(),
+            ));
+        }
+        FilePermissions::current()?.check(&file, true)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                Err(Error::Busy("another process owns this worker or account"))
+            }
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+}
+
 pub(crate) fn read_local(path: &Path, maximum: u64, sensitive: bool) -> Result<Vec<u8>> {
     if !path.is_absolute() {
         return Err(Error::InvalidInput(

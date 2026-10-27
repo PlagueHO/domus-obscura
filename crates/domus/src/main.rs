@@ -11,6 +11,7 @@ const USAGE: &str = "Usage:
   domus contracts <output-directory>
   domus init <local-database>
   domus api-preview <absolute-configuration-file>
+  domus worker <absolute-configuration-file>
   domus worker-once <absolute-configuration-file>
   domus worker-check <absolute-configuration-file>
   domus publish-new-once <absolute-configuration-file>
@@ -55,7 +56,7 @@ const USAGE: &str = "Usage:
 
 Only api-preview opens a listener. It requires HTTPS and loopback binding.
 Production requires Entra. Explicit development mode uses _anonymous without sign-in.
-Only worker-once downloads and tags an approved album from an explicitly selected source.
+The worker and worker-once download only an approved album from an explicitly selected source.
 It requires separate Soulseek credentials and explicit plaintext-login acknowledgement.
 source-search uses the same login acknowledgement for metadata-only outgoing peer search.
 source-folder reads one selected peer folder and assesses names; it never approves or downloads.
@@ -108,6 +109,11 @@ fn run(args: &[String]) -> Result<()> {
             // serde_json emits integer JSON numbers, not JavaScript bigint values.
             let config = ts_rs::Config::default().with_large_int("number");
             let contracts = [
+                ("WorkerOperation.ts", domus::infrastructure::production_worker::WorkerOperation::export_to_string(&config)),
+                ("WorkerRequest.ts", domus::infrastructure::production_worker::WorkerRequest::export_to_string(&config)),
+                ("WorkerStatus.ts", domus::infrastructure::production_worker::WorkerStatus::export_to_string(&config)),
+                ("BackendWorker.ts", domus::infrastructure::server::configuration::BackendWorker::export_to_string(&config)),
+                ("BackendWorkerDraft.ts", domus::infrastructure::server::configuration::BackendWorkerDraft::export_to_string(&config)),
                 (
                     "ConfigurationSection.ts",
                     domus::infrastructure::server::configuration::ConfigurationSection::export_to_string(&config),
@@ -466,6 +472,15 @@ fn run(args: &[String]) -> Result<()> {
                 domus::infrastructure::worker::PreparedWorker::load(Path::new(configuration))?;
             let outcome = worker.run()?;
             println!("{}", serde_json::to_string(&outcome)?);
+        }
+        [command, configuration] if command == "worker" => {
+            let worker = domus::infrastructure::production_worker::PreparedProductionWorker::load(
+                Path::new(configuration),
+            )?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(worker.run())?;
         }
         [command, configuration] if command == "worker-check" => {
             let report =

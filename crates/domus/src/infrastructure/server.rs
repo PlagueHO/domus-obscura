@@ -230,6 +230,9 @@ impl PreparedServer {
         };
         api = api.with_system_settings_read_only(configuration.system_settings_read_only)?;
         api = api.with_shared_configuration(configuration_source.clone())?;
+        if let Some(worker) = configuration.production_worker.clone() {
+            api = api.with_production_worker(worker)?;
+        }
         if let Some(root) = &configuration.browser_assets {
             let root = root.clone();
             let browser =
@@ -456,7 +459,7 @@ fn join_listener(
         .map_err(Error::from)
 }
 
-async fn shutdown_signal() -> io::Result<()> {
+pub(crate) async fn shutdown_signal() -> io::Result<()> {
     #[cfg(unix)]
     {
         let mut terminate =

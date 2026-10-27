@@ -30,15 +30,15 @@ pub(super) enum Environment {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Configuration {
+pub(crate) struct Configuration {
     #[serde(default)]
     pub(super) environment: Environment,
     #[serde(default = "system_settings_read_only_by_default")]
     pub(super) system_settings_read_only: bool,
     #[serde(default)]
-    pub(super) services: ServiceConfiguration,
+    pub(crate) services: ServiceConfiguration,
     pub(super) cache: Option<crate::infrastructure::cache::CacheConfiguration>,
-    pub(super) database: PathBuf,
+    pub(crate) database: PathBuf,
     pub(super) listen: std::net::SocketAddr,
     pub(super) origin: String,
     pub(super) tenant_id: Option<String>,
@@ -49,6 +49,8 @@ pub(super) struct Configuration {
     pub(super) private_key_file: PathBuf,
     pub(super) browser_assets: Option<PathBuf>,
     pub(super) local_acquisition: Option<crate::infrastructure::worker::LocalAcquisition>,
+    pub(crate) production_worker:
+        Option<crate::infrastructure::production_worker::WorkerConfiguration>,
 }
 
 fn system_settings_read_only_by_default() -> bool {
@@ -72,6 +74,19 @@ pub struct BackendLocalAcquisition {
     pub acknowledge_plaintext_login: bool,
 }
 
+#[derive(Clone, Serialize, ts_rs::TS)]
+pub struct BackendWorker {
+    pub queue_capacity: u16,
+    pub acquisition: Option<BackendLocalAcquisition>,
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct BackendWorkerDraft {
+    pub queue_capacity: u16,
+    pub acquisition: Option<BackendLocalAcquisitionDraft>,
+}
+
 /// Hidden fields never become browser-readable, including after replacement.
 #[derive(Clone, Serialize, ts_rs::TS)]
 pub struct BackendConfiguration {
@@ -90,6 +105,7 @@ pub struct BackendConfiguration {
     pub private_key_file_configured: bool,
     pub browser_assets: Option<String>,
     pub local_acquisition: Option<BackendLocalAcquisition>,
+    pub production_worker: Option<BackendWorker>,
 }
 
 #[derive(Clone, Serialize, ts_rs::TS)]
@@ -145,6 +161,7 @@ pub enum ConfigurationSectionUpdate {
     },
     MusicAcquisition {
         local_acquisition: Option<BackendLocalAcquisitionDraft>,
+        production_worker: Option<BackendWorkerDraft>,
     },
 }
 
@@ -231,6 +248,7 @@ pub struct BackendConfigurationDraft {
     pub private_key_file: ConfigurationReplacement,
     pub browser_assets: Option<String>,
     pub local_acquisition: Option<BackendLocalAcquisitionDraft>,
+    pub production_worker: Option<BackendWorkerDraft>,
 }
 
 #[derive(Deserialize, ts_rs::TS)]
@@ -279,6 +297,9 @@ enum SaveFailure {
 }
 
 impl ConfigurationService {
+    pub(crate) fn active_revision(&self) -> &str {
+        &self.active_revision
+    }
     pub(crate) fn output_settings(
         store: &Store,
     ) -> Result<Option<crate::infrastructure::store::SettingsVersion>> {
@@ -329,7 +350,7 @@ impl ConfigurationService {
         Ok(())
     }
 
-    pub(super) fn load(path: &Path) -> Result<(Self, Configuration, String)> {
+    pub(crate) fn load(path: &Path) -> Result<(Self, Configuration, String)> {
         valid_reference(path)?;
         let bytes = crate::infrastructure::local_file::read_local(path, MAXIMUM, false)?;
         let mut configuration = Self::parse(&bytes)?;
@@ -811,8 +832,12 @@ impl ConfigurationService {
                             draft.services = services;
                             ConfigurationSection::MusicProviders
                         }
-                        ConfigurationSectionUpdate::MusicAcquisition { local_acquisition } => {
+                        ConfigurationSectionUpdate::MusicAcquisition {
+                            local_acquisition,
+                            production_worker,
+                        } => {
                             draft.local_acquisition = local_acquisition;
+                            draft.production_worker = production_worker;
                             ConfigurationSection::MusicAcquisition
                         }
                     };
@@ -908,6 +933,49 @@ impl ConfigurationService {
                 })
             })
             .transpose()?;
+        saved.production_worker = draft
+            .production_worker
+            .map(|worker| {
+                let previous = saved
+                    .production_worker
+                    .as_ref()
+                    .and_then(|worker| worker.acquisition.as_ref());
+                let acquisition = worker
+                    .acquisition
+                    .map(|local| {
+                        Ok(crate::infrastructure::worker::LocalAcquisition {
+                            staging_root: local.staging_root.into(),
+                            credentials_file: replacement(
+                                local.credentials_file,
+                                previous.map(|local| {
+                                    local.credentials_file.to_string_lossy().into_owned()
+                                }),
+                            )
+                            .map(PathBuf::from)
+                            .ok_or_else(|| {
+                                issue(
+                                    "production_worker.acquisition.credentials_file",
+                                    "Select a credential-file reference.",
+                                )
+                            })?,
+                            server: local.server.parse().map_err(|_| {
+                                issue(
+                                    "production_worker.acquisition.server",
+                                    "Enter a public IPv4 address and port.",
+                                )
+                            })?,
+                            acknowledge_plaintext_login: local.acknowledge_plaintext_login,
+                        })
+                    })
+                    .transpose()?;
+                Ok::<_, BackendConfigurationIssue>(
+                    crate::infrastructure::production_worker::WorkerConfiguration {
+                        queue_capacity: worker.queue_capacity,
+                        acquisition,
+                    },
+                )
+            })
+            .transpose()?;
         Self::normalize(&mut saved)?;
         Self::check_references(&saved)?;
         let store = Store::open_read_current(&saved.database)
@@ -943,6 +1011,17 @@ impl ConfigurationService {
                     server: local.server,
                     acknowledge_plaintext_login: local.acknowledge_plaintext_login,
                 }),
+            production_worker: value.production_worker.map(|worker| BackendWorkerDraft {
+                queue_capacity: worker.queue_capacity,
+                acquisition: worker
+                    .acquisition
+                    .map(|local| BackendLocalAcquisitionDraft {
+                        staging_root: local.staging_root,
+                        credentials_file: ConfigurationReplacement::Keep,
+                        server: local.server,
+                        acknowledge_plaintext_login: local.acknowledge_plaintext_login,
+                    }),
+            }),
         }
     }
 
@@ -971,7 +1050,7 @@ impl ConfigurationService {
             (ConfigurationSection::MusicProviders, &["services"][..]),
             (
                 ConfigurationSection::MusicAcquisition,
-                &["local_acquisition"][..],
+                &["local_acquisition", "production_worker"][..],
             ),
         ]
         .into_iter()
@@ -993,6 +1072,22 @@ impl ConfigurationService {
                 "Select only installed providers, without duplicates, for each service.",
             )
         })?;
+        if configuration
+            .production_worker
+            .as_ref()
+            .is_some_and(|worker| !(1..=1024).contains(&worker.queue_capacity))
+        {
+            return Err(issue(
+                "production_worker.queue_capacity",
+                "Use 1 through 1024 unfinished requests.",
+            ));
+        }
+        if configuration.production_worker.is_some() && configuration.local_acquisition.is_some() {
+            return Err(issue(
+                "production_worker",
+                "Select the production worker or local acquisition, not both.",
+            ));
+        }
         match configuration.environment {
             Environment::Production => {
                 if configuration.local_acquisition.is_some() {
@@ -1100,7 +1195,25 @@ impl ConfigurationService {
                     &local.credentials_file,
                 ),
             ]
-        })) {
+        }))
+        .chain(
+            configuration
+                .production_worker
+                .iter()
+                .filter_map(|worker| worker.acquisition.as_ref())
+                .flat_map(|local| {
+                    [
+                        (
+                            "production_worker.acquisition.staging_root",
+                            &local.staging_root,
+                        ),
+                        (
+                            "production_worker.acquisition.credentials_file",
+                            &local.credentials_file,
+                        ),
+                    ]
+                }),
+        ) {
             valid_reference(file).map_err(|_| {
                 issue(
                     field,
@@ -1157,6 +1270,13 @@ impl ConfigurationService {
         if let Some(local) = &configuration.local_acquisition {
             paths.push(local.credentials_file.clone());
         }
+        if let Some(local) = configuration
+            .production_worker
+            .as_ref()
+            .and_then(|worker| worker.acquisition.as_ref())
+        {
+            paths.push(local.credentials_file.clone());
+        }
         paths
     }
 
@@ -1171,6 +1291,9 @@ impl ConfigurationService {
         }
         if let Some(local) = &configuration.local_acquisition {
             local.validate(store, &configuration.services)?;
+        }
+        if let Some(worker) = &configuration.production_worker {
+            worker.validate(store, &configuration.services)?;
         }
         self.client_secret(configuration)?;
         let origin = reqwest::Url::parse(&configuration.origin)
@@ -1378,6 +1501,21 @@ fn summary(configuration: &Configuration) -> BackendConfiguration {
                 acknowledge_plaintext_login: local.acknowledge_plaintext_login,
             }
         }),
+        production_worker: configuration
+            .production_worker
+            .as_ref()
+            .map(|worker| BackendWorker {
+                queue_capacity: worker.queue_capacity,
+                acquisition: worker
+                    .acquisition
+                    .as_ref()
+                    .map(|local| BackendLocalAcquisition {
+                        staging_root: local.staging_root.to_string_lossy().into_owned(),
+                        credentials_file_configured: !local.credentials_file.as_os_str().is_empty(),
+                        server: local.server.to_string(),
+                        acknowledge_plaintext_login: local.acknowledge_plaintext_login,
+                    }),
+            }),
     }
 }
 

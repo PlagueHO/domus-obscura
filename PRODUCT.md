@@ -58,8 +58,13 @@ A safely paused, current, unanswered artwork question can use the request's
 normal exact-JPEG preparation and approval interface. Answering requires the
 approved cover; recovery rechecks its saved binding and transfer safety. Source
 changes stay locked while paused. Generic questions without a supported browser
-recovery action remain operator-controlled. Publication recovery, supervised
-production services and complete Windows/Linux acceptance remain open.
+recovery action remain operator-controlled. A separate foreground production
+worker now accepts bounded durable requests, with one acquisition pipeline and
+one independent scan. Queue capacity is operator-controlled; requests can be
+accepted offline. Interrupted requests recover from saved evidence. Failed work
+and saved questions require explicit action. Source discovery remains
+development-only. Native supervised service packaging and complete Windows/Linux
+acceptance remain open.
 
 ## System Configuration Form
 

@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod media;
 pub mod mp3;
 mod permissions;
+pub mod production_worker;
 pub(crate) mod publication;
 pub mod server;
 pub mod services;

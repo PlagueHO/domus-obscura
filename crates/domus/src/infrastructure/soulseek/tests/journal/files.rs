@@ -42,13 +42,24 @@ fn accept(stream: &mut TcpStream) -> TestResultSend {
 #[test]
 fn server_bound_file_channel_receives_through_real_journal_and_sealed_staging() -> TestResult {
     for disconnect_server in [false, true] {
-        receive_bound_file(disconnect_server)?;
+        receive_bound_file(disconnect_server, false)?;
     }
     Ok(())
 }
 
-fn receive_bound_file(disconnect_server: bool) -> TestResult {
+#[test]
+fn worker_stop_during_active_receive_seals_the_file_before_the_next_boundary() -> TestResult {
+    receive_bound_file(false, true)
+}
+
+fn receive_bound_file(disconnect_server: bool, stopping: bool) -> TestResult {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     let mut fixture = Fixture::new()?;
+    let stop = Arc::new(AtomicBool::new(false));
+    fixture.store = fixture.store.with_worker_stop(stop.clone());
     let scratch = tempdir()?;
     let staging = StagingRoot::open(&mut fixture.store, scratch.path())?;
     let (client, mut server) = server_pair()?;
@@ -76,6 +87,9 @@ fn receive_bound_file(disconnect_server: bool) -> TestResult {
         let mut offset = [0; 8];
         file.read_exact(&mut offset)?;
         assert_eq!(offset, [0; 8]);
+        if stopping {
+            stop.store(true, Ordering::Release);
+        }
         if disconnect_server {
             drop(server);
             std::thread::sleep(Duration::from_millis(100));
@@ -126,6 +140,12 @@ fn receive_bound_file(disconnect_server: bool) -> TestResult {
     let mut bytes = Vec::new();
     reopened.read_to_end(&mut bytes)?;
     assert_eq!(bytes, expected);
+    if stopping {
+        assert!(matches!(
+            fixture.store.job_work_boundary(&fixture.claim),
+            Err(Error::WorkerStopping)
+        ));
+    }
     drop(peer);
     join(task)
 }
