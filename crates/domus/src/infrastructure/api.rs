@@ -306,6 +306,18 @@ impl Api {
                 "/api/system/configuration/save",
                 post(save_backend_configuration).layer(DefaultBodyLimit::max(16384)),
             )
+            .route(
+                "/api/system/configuration/sections/validate",
+                post(validate_configuration_sections).layer(DefaultBodyLimit::max(16384)),
+            )
+            .route(
+                "/api/system/configuration/sections/save",
+                post(save_configuration_sections).layer(DefaultBodyLimit::max(16384)),
+            )
+            .route(
+                "/api/system/configuration/reload",
+                post(reload_configuration).layer(DefaultBodyLimit::max(1024)),
+            )
             .route("/api/jobs", get(jobs).post(create_job))
             .route("/api/queue", get(queue))
             .route(
@@ -432,15 +444,23 @@ impl Api {
         Ok(self)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_backend_configuration(
-        mut self,
+        self,
         configuration: super::server::configuration::ConfigurationService,
+    ) -> Result<Self> {
+        self.with_shared_configuration(Arc::new(configuration))
+    }
+
+    pub(crate) fn with_shared_configuration(
+        mut self,
+        configuration: Arc<super::server::configuration::ConfigurationService>,
     ) -> Result<Self> {
         Arc::get_mut(&mut self.0)
             .ok_or(Error::Internal(
                 "API configuration must finish before sharing",
             ))?
-            .backend_configuration = Some(Arc::new(configuration));
+            .backend_configuration = Some(configuration);
         Ok(self)
     }
 
@@ -469,6 +489,14 @@ impl Api {
             local.drain().await?;
         }
         Ok(())
+    }
+
+    pub(crate) fn reload_permit(&self) -> Result<Option<tokio::sync::OwnedSemaphorePermit>> {
+        self.0
+            .local
+            .as_ref()
+            .map(|local| local.reload_permit())
+            .transpose()
     }
 
     fn local(&self) -> ApiResult<&super::local_runtime::LocalRuntime> {
@@ -1296,7 +1324,10 @@ async fn locations(
 ) -> ApiResult<Json<Vec<Location>>> {
     let page = query.page()?;
     Ok(Json(
-        api.database(move |store| store.locations(page)).await?,
+        api.database(move |store| {
+            super::server::configuration::ConfigurationService::library_roots(store, page)
+        })
+        .await?,
     ))
 }
 async fn location(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult<Json<Location>> {
@@ -1323,21 +1354,14 @@ async fn register_location(
     State(api): State<Api>,
     Json(request): Json<RegisterLocation>,
 ) -> ApiResult<Json<Location>> {
-    api.require_settings_write()?;
-    if request.root.len() > 4096 || !std::path::Path::new(&request.root).is_absolute() {
-        return Err(Error::InvalidInput(
-            "library root must be an absolute server path of at most 4096 bytes".into(),
-        )
-        .into());
-    }
+    api.require_configuration_write().await?;
     Ok(Json(
         api.database(move |store| {
-            let id = crate::application::add_location(
+            super::server::configuration::ConfigurationService::register_library_root(
                 store,
-                std::path::Path::new(&request.root),
+                &request.root,
                 &request.kind,
-            )?;
-            store.location(id)
+            )
         })
         .await?,
     ))
@@ -1352,7 +1376,7 @@ async fn scan_location(
     Path(id): Path<i64>,
     Json(_request): Json<ScanLocation>,
 ) -> ApiResult<Json<Location>> {
-    api.require_settings_write()?;
+    api.require_configuration_write().await?;
     Ok(Json(
         api.database(move |store| {
             crate::application::scan_location(store, id)?;
@@ -1390,7 +1414,12 @@ async fn entries(
     ))
 }
 async fn settings(State(api): State<Api>) -> ApiResult<Json<Option<SettingsVersion>>> {
-    Ok(Json(api.database(|store| store.settings()).await?))
+    Ok(Json(
+        api.database(|store| {
+            super::server::configuration::ConfigurationService::output_settings(store)
+        })
+        .await?,
+    ))
 }
 
 async fn settings_policy(State(api): State<Api>) -> Json<SystemSettingsPolicy> {
@@ -1461,6 +1490,76 @@ async fn save_backend_configuration(
     ))
 }
 
+async fn validate_configuration_sections(
+    State(api): State<Api>,
+    request: std::result::Result<
+        Json<super::server::configuration::ConfigurationSectionCommand>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> ApiResult<Json<super::server::configuration::BackendConfigurationResult>> {
+    let Json(command) = request.map_err(|error| {
+        ApiError::new(error.status(), "configuration section request is invalid")
+    })?;
+    let source = api.configuration_service()?;
+    Ok(Json(
+        tokio::task::spawn_blocking(move || source.validate_sections(command))
+            .await
+            .map_err(|_| Error::Internal("configuration validation task failed"))??,
+    ))
+}
+
+async fn save_configuration_sections(
+    State(api): State<Api>,
+    request: std::result::Result<
+        Json<super::server::configuration::ConfigurationSectionCommand>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> ApiResult<Json<super::server::configuration::BackendConfigurationResult>> {
+    api.require_settings_write()?;
+    let Json(command) = request.map_err(|error| {
+        ApiError::new(error.status(), "configuration section request is invalid")
+    })?;
+    let source = api.configuration_service()?;
+    Ok(Json(
+        tokio::task::spawn_blocking(move || source.save_sections(command))
+            .await
+            .map_err(|_| Error::Internal("configuration save task failed"))??,
+    ))
+}
+
+async fn reload_configuration(
+    State(api): State<Api>,
+    request: std::result::Result<
+        Json<super::server::configuration::ConfigurationReloadCommand>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> ApiResult<Json<super::server::configuration::ConfigurationReloadState>> {
+    api.require_settings_write()?;
+    let Json(command) = request.map_err(|error| {
+        ApiError::new(error.status(), "configuration reload request is invalid")
+    })?;
+    let source = api.configuration_service()?;
+    drop(api.reload_permit()?);
+    Ok(Json(
+        tokio::task::spawn_blocking(move || source.request_reload(command))
+            .await
+            .map_err(|_| Error::Internal("configuration reload task failed"))??,
+    ))
+}
+
+impl Api {
+    fn configuration_service(
+        &self,
+    ) -> ApiResult<Arc<super::server::configuration::ConfigurationService>> {
+        self.0.backend_configuration.clone().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "backend configuration is not attached to this host",
+            )
+        })
+    }
+}
+
 #[derive(Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct SaveSettings {
@@ -1471,14 +1570,30 @@ async fn save_settings(
     State(api): State<Api>,
     Json(request): Json<SaveSettings>,
 ) -> ApiResult<Json<i64>> {
-    api.require_settings_write()?;
+    api.require_configuration_write().await?;
     Ok(Json(
-        api.database(move |store| store.save_settings(request.expected_version, &request.settings))
-            .await?,
+        api.database(move |store| {
+            super::server::configuration::ConfigurationService::save_output_settings(
+                store,
+                request.expected_version,
+                &request.settings,
+            )
+        })
+        .await?,
     ))
 }
 
 impl Api {
+    async fn require_configuration_write(&self) -> ApiResult<()> {
+        self.require_settings_write()?;
+        if let Some(source) = self.0.backend_configuration.clone() {
+            tokio::task::spawn_blocking(move || source.require_editable())
+                .await
+                .map_err(|_| Error::Internal("configuration policy task failed"))??;
+        }
+        Ok(())
+    }
+
     fn require_settings_write(&self) -> ApiResult<()> {
         if self.0.system_settings_read_only {
             return Err(ApiError::new(

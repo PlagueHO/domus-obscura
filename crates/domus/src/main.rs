@@ -109,6 +109,26 @@ fn run(args: &[String]) -> Result<()> {
             let config = ts_rs::Config::default().with_large_int("number");
             let contracts = [
                 (
+                    "ConfigurationSection.ts",
+                    domus::infrastructure::server::configuration::ConfigurationSection::export_to_string(&config),
+                ),
+                (
+                    "ConfigurationSectionUpdate.ts",
+                    domus::infrastructure::server::configuration::ConfigurationSectionUpdate::export_to_string(&config),
+                ),
+                (
+                    "ConfigurationSectionCommand.ts",
+                    domus::infrastructure::server::configuration::ConfigurationSectionCommand::export_to_string(&config),
+                ),
+                (
+                    "ConfigurationReloadCommand.ts",
+                    domus::infrastructure::server::configuration::ConfigurationReloadCommand::export_to_string(&config),
+                ),
+                (
+                    "ConfigurationReloadState.ts",
+                    domus::infrastructure::server::configuration::ConfigurationReloadState::export_to_string(&config),
+                ),
+                (
                     "ServiceConfiguration.ts",
                     domus::application::services::ServiceConfiguration::export_to_string(&config),
                 ),

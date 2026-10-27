@@ -1,6 +1,8 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import type { BackendConfigurationDraft } from "../src/generated/BackendConfigurationDraft";
 import type { ConfigurationReplacement } from "../src/generated/ConfigurationReplacement";
+import type { ConfigurationSection } from "../src/generated/ConfigurationSection";
+import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
 import type { ConfigurationEditor } from "./backend-configuration-state";
 import { Button, Check } from "./components/ui";
 
@@ -12,6 +14,10 @@ type Props = {
   onValidate: () => void;
   onSave: () => void;
   onDiscard: () => void;
+  section?: ConfigurationSection;
+  onSaveAll?: (() => void) | undefined;
+  changed?: boolean;
+  saved?: BackendConfigurationState["saved"];
 };
 
 export function BackendConfigurationForm({
@@ -22,6 +28,10 @@ export function BackendConfigurationForm({
   onValidate,
   onSave,
   onDiscard,
+  section,
+  onSaveAll,
+  changed = true,
+  saved,
 }: Props) {
   const errorSummary = useRef<HTMLDivElement>(null);
   const conflictSummary = useRef<HTMLParagraphElement>(null);
@@ -30,6 +40,15 @@ export function BackendConfigurationForm({
     else if (editor.conflict) conflictSummary.current?.focus();
   }, [editor.errors, editor.conflict]);
   const draft = editor.draft;
+  const savedSecrets: Record<string, boolean | undefined> = {
+    tenant_id: saved?.tenant_id_configured,
+    object_id: saved?.object_id_configured,
+    client_id: saved?.client_id_configured,
+    client_secret_file: saved?.client_secret_file_configured,
+    private_key_file: saved?.private_key_file_configured,
+    "local_acquisition.credentials_file": saved?.local_acquisition?.credentials_file_configured,
+  };
+  const visible = (value: ConfigurationSection) => section === undefined || section === value;
   const update = <K extends keyof BackendConfigurationDraft>(
     field: K,
     value: BackendConfigurationDraft[K],
@@ -80,7 +99,11 @@ export function BackendConfigurationForm({
       {field(
         name,
         label,
-        "The saved value stays hidden. A blank replacement keeps the saved value.",
+        savedSecrets[name] === false
+          ? "Not configured. Choose Replace value to add it."
+          : savedSecrets[name]
+            ? "Configured. The saved value stays hidden."
+            : "The saved value stays hidden.",
         <select
           name={`${name}.action`}
           value={value.action}
@@ -110,6 +133,7 @@ export function BackendConfigurationForm({
             value={value.value}
             onChange={(event) => change({ action: "replace", value: event.target.value })}
           />
+          <small>Leave blank to keep the saved value.</small>
         </label>
       )}
     </div>
@@ -117,16 +141,14 @@ export function BackendConfigurationForm({
 
   return (
     <form
+      className={section ? "configuration-form" : undefined}
       aria-label="Edit backend configuration"
       onSubmit={(event) => {
         event.preventDefault();
         onSave();
       }}
     >
-      <p>
-        All changes require an API restart. Saving does not activate settings or start work. System
-        settings access stays operator-controlled.
-      </p>
+      {!section && <p>Saving does not activate settings. Reload the API to apply changes.</p>}
       {editor.errors.length > 0 && (
         <div role="alert" className="alert" tabIndex={-1} ref={errorSummary}>
           <strong>Configuration was not saved.</strong>
@@ -141,13 +163,12 @@ export function BackendConfigurationForm({
       )}
       {editor.conflict && (
         <p role="alert" tabIndex={-1} ref={conflictSummary}>
-          The saved file changed or the save result is uncertain. Your draft is retained. Reload and
-          review the saved values, then discard this draft before starting a new edit. This form
-          will not retry automatically.
+          The saved settings changed or the save could not be confirmed. Your draft is kept. Refresh
+          and review the saved values, then discard all drafts to start again. Nothing was retried.
         </p>
       )}
-      <fieldset disabled={disabled}>
-        <legend>Host · restart required</legend>
+      <fieldset disabled={disabled || !visible("general")} hidden={!visible("general")}>
+        <legend>General</legend>
         {field(
           "environment",
           "Environment",
@@ -159,13 +180,6 @@ export function BackendConfigurationForm({
             <option value="production">Production</option>
             <option value="development">Development</option>
           </select>,
-        )}
-        {text(
-          "database",
-          "Local database",
-          draft.database,
-          (value) => update("database", value),
-          "Absolute path to an existing local database. Migrate it separately.",
         )}
         {text(
           "listen",
@@ -189,8 +203,11 @@ export function BackendConfigurationForm({
           "Optional absolute path to existing built browser assets. Leave blank to disable.",
         )}
       </fieldset>
-      <fieldset disabled={disabled}>
-        <legend>Providers · restart required</legend>
+      <fieldset
+        disabled={disabled || !visible("music_providers")}
+        hidden={!visible("music_providers")}
+      >
+        <legend>Providers</legend>
         <p>
           Enable installed providers separately for each service. No provider requests run here.
         </p>
@@ -213,8 +230,15 @@ export function BackendConfigurationForm({
           </Check>
         ))}
       </fieldset>
-      <fieldset disabled={disabled}>
-        <legend>Provider cache · restart required</legend>
+      <fieldset disabled={disabled || !visible("storage")} hidden={!visible("storage")}>
+        <legend>Storage/cache</legend>
+        {text(
+          "database",
+          "Local database",
+          draft.database,
+          (value) => update("database", value),
+          "Absolute path to an existing local database. Migrate it separately.",
+        )}
         <Check
           checked={draft.cache !== null}
           onChange={(enabled) =>
@@ -269,8 +293,8 @@ export function BackendConfigurationForm({
           </>
         )}
       </fieldset>
-      <fieldset disabled={disabled}>
-        <legend>Entra identity · restart required</legend>
+      <fieldset disabled={disabled || !visible("identity")} hidden={!visible("identity")}>
+        <legend>Entra identity</legend>
         <p>
           Production authorizes one tenant/object pair. Changing environment can require explicit
           removal or replacement of these fields.
@@ -292,8 +316,8 @@ export function BackendConfigurationForm({
           contents.
         </small>
       </fieldset>
-      <fieldset disabled={disabled}>
-        <legend>TLS · restart required</legend>
+      <fieldset disabled={disabled || !visible("tls")} hidden={!visible("tls")}>
+        <legend>TLS</legend>
         {text(
           "certificate_file",
           "TLS certificate file",
@@ -309,8 +333,11 @@ export function BackendConfigurationForm({
           false,
         )}
       </fieldset>
-      <fieldset disabled={disabled}>
-        <legend>Development acquisition · restart required</legend>
+      <fieldset
+        disabled={disabled || !visible("music_acquisition")}
+        hidden={!visible("music_acquisition")}
+      >
+        <legend>Development acquisition</legend>
         <Check
           checked={draft.local_acquisition !== null}
           onChange={(enabled) =>
@@ -374,21 +401,34 @@ export function BackendConfigurationForm({
           </>
         )}
       </fieldset>
-      <p role="status">
-        {editor.validated
-          ? "This draft passed passive validation. It is not saved or active. Startup will check it again."
-          : "This draft has not passed passive validation."}
-      </p>
-      <div className="actions">
-        <Button variant="secondary" disabled={disabled || editor.conflict} onClick={onValidate}>
-          Validate backend configuration
+      {editor.validated && (
+        <p role="status">
+          Changes checked. Save them when you are ready. Reload performs full startup validation.
+        </p>
+      )}
+      <div className="actions configuration-form-actions">
+        {!section && (
+          <Button variant="secondary" disabled={disabled || editor.conflict} onClick={onValidate}>
+            Validate backend configuration
+          </Button>
+        )}
+        <Button type="submit" disabled={disabled || editor.conflict || !changed}>
+          {section ? "Save changes" : "Save backend configuration"}
         </Button>
-        <Button type="submit" disabled={disabled || editor.conflict}>
-          Save backend configuration
-        </Button>
-        <Button variant="secondary" disabled={busy} onClick={onDiscard}>
-          Discard backend draft
-        </Button>
+        {onSaveAll && (
+          <Button variant="secondary" disabled={disabled || editor.conflict} onClick={onSaveAll}>
+            Save all changed sections
+          </Button>
+        )}
+        {(!section || changed || editor.conflict) && (
+          <Button variant="ghost" disabled={busy} onClick={onDiscard}>
+            {section
+              ? editor.conflict
+                ? "Discard all drafts"
+                : "Discard changes"
+              : "Discard backend draft"}
+          </Button>
+        )}
       </div>
     </form>
   );

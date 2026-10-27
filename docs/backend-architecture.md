@@ -326,9 +326,28 @@ validation, synced temporary output, native handle-relative replacement, and
 result verification. Parent and target identities are checked. Pre-commit errors
 preserve the old file; post-replacement errors identify uncertainty explicitly.
 Successful saves retain only revision-bound validation evidence in memory.
-Changed external bytes invalidate it. All backend JSON changes require restart.
+Changed external bytes invalidate it. Backend JSON changes require explicit reload or restart.
 Startup loading is still not a safe dry-run validator: the runtime can migrate
 the database and bind the selected cache after service loading.
+
+Typed section commands share this service and the same persistence implementation.
+They carry complete updates for selected sections, not a replacement document.
+The service rejects duplicate/unknown sections and stale whole-file revisions,
+merges hidden references, and validates the full candidate before atomic save.
+It reports per-section active/saved differences without disclosing hidden values.
+Music output policy and root configuration delegate to their existing Store and
+application operations through ConfigurationService. Their persistence semantics
+remain separate from backend JSON.
+
+The service owns one bounded reload channel and pending/active/failed state.
+The API host consumes exact-revision requests. A candidate service keeps a new
+immutable active snapshot while sharing the writer identity and lifecycle gate.
+Host preparation runs beside the existing listener. Busy local effects reject
+reload. A local-runtime permit prevents new effects during preparation.
+After revision verification, the old generation drains and the new generation
+uses the same guarded listener implementation. A retained bound socket permits
+restoration on handover failure. Separate worker processes remain unchanged.
+Passive service operations cannot enter this lifecycle path.
 
 ## Known gaps for design review
 

@@ -15,10 +15,10 @@ import type { AudioFormat } from "../src/generated/AudioFormat";
 import type { RegisterLocation } from "../src/generated/RegisterLocation";
 import { query, request } from "./api";
 import { useCommand, useResource } from "./hooks";
-import { Alert, Badge, Button, Card, Check, Cover, Empty, Pager } from "./components/ui";
+import { Alert, Badge, Button, Check, Cover, Empty, Pager } from "./components/ui";
 import { AlbumCard } from "./components/Media";
 import { searchGap } from "./Search";
-import { BackendConfiguration } from "./BackendConfiguration";
+import { BackendConfiguration, ConfigurationCard } from "./BackendConfiguration";
 
 const audioChoices: { format: AudioFormat; label: string }[] = [
   { format: "mp3", label: "MP3 · 320 kbps CBR" },
@@ -493,135 +493,142 @@ export function Settings({
   onReload: () => void;
 }) {
   const [savedVersion, setSavedVersion] = useState<number>();
+  const [outputDirty, setOutputDirty] = useState(false);
+  const [rootDirty, setRootDirty] = useState(false);
   const readOnly = policy?.read_only ?? true;
 
   return (
     <>
-      <header className="hero">
+      <header className="page-heading">
         <div>
           <h1>System settings</h1>
-          <p>
-            The administrator controls these settings for the shared library. Artwork size and audio
-            format settings apply to all users, not to individual accounts.
-          </p>
+          <p className="muted">Manage the application and shared Music library.</p>
         </div>
       </header>
-      <Alert error={error} />
-      <Button variant="secondary" disabled={loading} onClick={onReload}>
-        {loading ? "Loading settings…" : "Reload system settings"}
-      </Button>
-      {savedVersion !== undefined && (
-        <p role="status">System output settings were saved as version {savedVersion}.</p>
-      )}
-      <BackendConfiguration />
-      <Card title="Shared library output">
-        {settings ? (
-          <>
-            <p>
-              Saved version {settings.version}. New plans use the latest system settings. Existing
-              plans keep their frozen settings.
-            </p>
-            {readOnly ? (
+      <BackendConfiguration
+        onRefreshRelated={onReload}
+        relatedLoading={loading}
+        otherDrafts={outputDirty || rootDirty}
+        output={
+          <ConfigurationCard title="Output policy">
+            <Alert error={error} />
+            {savedVersion !== undefined && (
+              <p role="status">Output policy saved. New plans use version {savedVersion}.</p>
+            )}
+            {settings ? (
               <>
-                <p role="status">
-                  This form is read-only. The administrator controls this mode in the server JSON
-                  configuration.
+                <p>
+                  These settings apply to the shared library. New plans use saved changes
+                  immediately. Existing plans keep their frozen settings.
                 </p>
-                <dl className="properties">
-                  <dt>Accepted audio formats and bitrate</dt>
-                  <dd>
-                    {audioChoices
-                      .filter((choice) =>
-                        acceptedFormats(settings.settings).includes(choice.format),
-                      )
-                      .map((choice) => choice.label)
-                      .join("; ")}
-                  </dd>
-                  <dt>Preferred audio format and bitrate</dt>
-                  <dd>
-                    {
-                      audioChoices.find((choice) => choice.format === settings.settings.format)
-                        ?.label
-                    }
-                  </dd>
-                  <dt>Artwork size</dt>
-                  <dd>
-                    {settings.settings.artwork_size === "small"
-                      ? "200 × 200 px"
-                      : settings.settings.artwork_size === "recommended"
-                        ? "400 × 400 px"
-                        : settings.settings.artwork_size === "large"
-                          ? "800 × 800 px"
-                          : "Legacy · up to 1200 × 1200 px"}
-                  </dd>
-                  <dt>Album folder template</dt>
-                  <dd>
-                    <code>{settings.settings.template.folder}</code>
-                  </dd>
-                  <dt>Track filename template</dt>
-                  <dd>
-                    <code>{settings.settings.template.filename}</code>
-                  </dd>
-                </dl>
+                {readOnly ? (
+                  <>
+                    <p role="status">
+                      This form is read-only. The administrator controls this mode in the server
+                      JSON configuration.
+                    </p>
+                    <dl className="properties">
+                      <dt>Accepted audio formats and bitrate</dt>
+                      <dd>
+                        {audioChoices
+                          .filter((choice) =>
+                            acceptedFormats(settings.settings).includes(choice.format),
+                          )
+                          .map((choice) => choice.label)
+                          .join("; ")}
+                      </dd>
+                      <dt>Preferred audio format and bitrate</dt>
+                      <dd>
+                        {
+                          audioChoices.find((choice) => choice.format === settings.settings.format)
+                            ?.label
+                        }
+                      </dd>
+                      <dt>Artwork size</dt>
+                      <dd>
+                        {settings.settings.artwork_size === "small"
+                          ? "200 × 200 px"
+                          : settings.settings.artwork_size === "recommended"
+                            ? "400 × 400 px"
+                            : settings.settings.artwork_size === "large"
+                              ? "800 × 800 px"
+                              : "Legacy · up to 1200 × 1200 px"}
+                      </dd>
+                      <dt>Album folder template</dt>
+                      <dd>
+                        <code>{settings.settings.template.folder}</code>
+                      </dd>
+                      <dt>Track filename template</dt>
+                      <dd>
+                        <code>{settings.settings.template.filename}</code>
+                      </dd>
+                    </dl>
+                  </>
+                ) : (
+                  <SystemOutputForm
+                    key={settings.version}
+                    settings={settings}
+                    onDirty={setOutputDirty}
+                    disabled={loading || Boolean(error)}
+                    onSaved={(version) => {
+                      setSavedVersion(version);
+                      onSaved();
+                    }}
+                  />
+                )}
               </>
+            ) : loading ? (
+              <p role="status">Loading system output settings…</p>
+            ) : error ? (
+              <Empty>
+                System output settings could not be loaded. Reload system settings to try again.
+              </Empty>
             ) : (
-              <SystemOutputForm
-                key={settings.version}
-                settings={settings}
+              <Empty>Output settings are missing. Run local setup.</Empty>
+            )}
+          </ConfigurationCard>
+        }
+        roots={
+          <ConfigurationCard title="Library roots">
+            <Alert error={error} />
+            {locations.length ? (
+              locations.map((location) => (
+                <div className="list-row" key={location.id}>
+                  <div>
+                    <strong>{location.root}</strong>
+                    <p>
+                      {location.kind} · Coverage: {location.coverage}
+                    </p>
+                    {location.last_error && <p className="warning">{location.last_error}</p>}
+                  </div>
+                  <Badge>{location.native_identity ? "Bound root" : "Binding required"}</Badge>
+                </div>
+              ))
+            ) : loading ? (
+              <p role="status">Loading library roots…</p>
+            ) : error ? (
+              <Empty>Library roots could not be loaded. Reload system settings to try again.</Empty>
+            ) : (
+              <Empty>No library roots are configured.</Empty>
+            )}
+            {!readOnly && (
+              <LibraryRootControls
+                key={locations.map((location) => location.id).join(":")}
+                locations={locations}
+                onDirty={setRootDirty}
                 disabled={loading || Boolean(error)}
-                onSaved={(version) => {
-                  setSavedVersion(version);
-                  onSaved();
-                }}
+                onChanged={onReload}
               />
             )}
-          </>
-        ) : loading ? (
-          <p role="status">Loading system output settings…</p>
-        ) : error ? (
-          <Empty>
-            System output settings could not be loaded. Reload system settings to try again.
-          </Empty>
-        ) : (
-          <Empty>Output settings are missing. Run local setup.</Empty>
-        )}
-      </Card>
-      <Card title="Library roots">
-        {locations.length ? (
-          locations.map((location) => (
-            <div className="list-row" key={location.id}>
-              <div>
-                <strong>{location.root}</strong>
-                <p>
-                  {location.kind} · Coverage: {location.coverage}
-                </p>
-                {location.last_error && <p className="warning">{location.last_error}</p>}
-              </div>
-              <Badge>{location.native_identity ? "Bound root" : "Binding required"}</Badge>
-            </div>
-          ))
-        ) : loading ? (
-          <p role="status">Loading library roots…</p>
-        ) : error ? (
-          <Empty>Library roots could not be loaded. Reload system settings to try again.</Empty>
-        ) : (
-          <Empty>No library roots are configured.</Empty>
-        )}
-        {!readOnly && (
-          <LibraryRootControls
-            key={locations.map((location) => location.id).join(":")}
-            locations={locations}
-            disabled={loading || Boolean(error)}
-            onChanged={onReload}
-          />
-        )}
-        <p className="muted">
-          Roots are folders on the server, not on this browser device. Register existing folders
-          before using them. Registration binds their filesystem identity and does not move media or
-          start a scan. Existing roots cannot be edited, removed or rebound here because saved plans
-          and receipts depend on them.
-        </p>
-      </Card>
+            <p className="muted">
+              Roots are folders on the server, not on this browser device. Register existing folders
+              before using them. Registration binds their filesystem identity and does not move
+              media or start a scan. Existing roots cannot be edited, removed or rebound here
+              because saved plans and receipts depend on them.
+            </p>
+          </ConfigurationCard>
+        }
+      />
     </>
   );
 }
@@ -630,10 +637,12 @@ function SystemOutputForm({
   settings,
   disabled,
   onSaved,
+  onDirty,
 }: {
   settings: SettingsVersion;
   disabled: boolean;
   onSaved: (version: number) => void;
+  onDirty: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState<OutputSettings>(settings.settings);
   const [submitted, setSubmitted] = useState(false);
@@ -641,6 +650,10 @@ function SystemOutputForm({
   const saving = disabled || command.busy || submitted;
   const accepted = acceptedFormats(draft);
   const validAudio = accepted.length > 0 && accepted.includes(draft.format);
+  useEffect(() => {
+    onDirty(!submitted && JSON.stringify(draft) !== JSON.stringify(settings.settings));
+    return () => onDirty(false);
+  }, [draft, settings.settings, submitted, onDirty]);
 
   async function save() {
     if (saving || !validAudio) return;
@@ -786,10 +799,12 @@ function LibraryRootControls({
   locations,
   disabled,
   onChanged,
+  onDirty,
 }: {
   locations: Location[];
   disabled: boolean;
   onChanged: () => void;
+  onDirty: (dirty: boolean) => void;
 }) {
   const hasMain = locations.some((location) => location.kind === "main");
   const [root, setRoot] = useState("");
@@ -798,6 +813,10 @@ function LibraryRootControls({
   const [message, setMessage] = useState("");
   const command = useCommand();
   const busy = disabled || command.busy;
+  useEffect(() => {
+    onDirty(!submitted && root.length > 0);
+    return () => onDirty(false);
+  }, [root, submitted, onDirty]);
 
   async function register() {
     if (busy || submitted) return;
@@ -856,7 +875,7 @@ function LibraryRootControls({
           Register library root
         </Button>
         {submitted && (
-          <p role="status">Library root registered. Reload system settings to view it.</p>
+          <p role="status">Library root registered. Refresh Music policy and roots to view it.</p>
         )}
       </form>
       {locations.length > 0 && (

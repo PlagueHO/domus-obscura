@@ -32,16 +32,37 @@ See [Linux flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html),
 [Rust File locking](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock),
 and [cap-std directory operations](https://docs.rs/cap-std/4.0.3/cap_std/fs/struct.Dir.html).
 
-Backend JSON saves are restart-only. They do not approve media work, change
+Backend JSON saves do not activate changes. They do not approve media work, change
 immutable plans, create or bind roots, or activate TLS. Validation requires a
 current-schema local database and existing valid file/root references. Set up new
 cache or staging roots separately. Full startup and operation-time checks remain.
 Do not report passive validation as proof that later startup will succeed.
 
+ConfigurationService also owns typed section saves and revision-bound reload
+requests. Section updates merge with the latest exact saved revision under the
+same writer protocol. Other sections retain their saved values. A browser can
+save several changed sections atomically when validation spans section boundaries.
+
+`POST /api/system/configuration/reload` explicitly replaces the API host with
+the expected saved revision. The runtime prepares the replacement before listener
+handover. It retains the old bound socket for restoration. Preparation failure
+keeps the previous host active. A failed restoration is a fatal host error and
+requires operator recovery; it is not reported as successful activation.
+Read-only policy and browser command guards apply. Host-owned local operations
+must be idle and remain excluded during preparation. Reload never interrupts a
+receive or publication and never restarts separate workers. Review each worker's
+configuration and restart it separately at a safe boundary.
+
+Read/validate operations remain passive. Only explicit startup or reload can
+initialize host resources, load identity, or activate a listener/TLS generation.
+Origin changes can require manual browser navigation. Identity changes can
+require login. Check the active revision after reconnecting. A pending command
+or lost response is not evidence of activation. Never retry reload automatically.
+
 After a stale revision or failed save, retain the draft and review the saved
 file. A pre-replacement error leaves the previous file intact. A post-replacement
 sync or verification error reports an uncertain saved result, not rollback.
-Reload before retrying. An interrupted save can leave an owned `.pending` file;
+Refresh saved values before retrying. An interrupted save can leave an owned `.pending` file;
 inspect and remove only that exact temporary file while the API is stopped.
 Never delete the configuration or lock file as automatic recovery.
 

@@ -55,8 +55,8 @@ describe("system library settings", () => {
     const markup = render({ policy: { read_only: false } });
     expect(markup).toContain("<form");
     expect(markup).toContain("Save system output settings");
-    expect(markup).toContain("The administrator controls these settings for the shared library.");
-    expect(markup).toContain("apply to all users, not to individual accounts.");
+    expect(markup).toContain("Manage the application and shared Music library.");
+    expect(markup).toContain("These settings apply to the shared library.");
     expect(markup).toContain("400 × 400 px · Recommended");
     expect(markup).not.toContain("Legacy ·");
     expect(markup).toContain('value="&lt;Title&gt;.&lt;ext&gt;"');
@@ -104,8 +104,7 @@ describe("system library settings", () => {
     });
     expect(markup).toContain('role="alert"');
     expect(markup).toContain("Setup is unavailable.");
-    expect(markup).toContain("Reload system settings");
-    expect(markup).not.toContain("Run local setup.");
+    expect(markup).toContain("Refresh settings");
   });
 
   it("disables cached editors during a failed or pending refresh", () => {

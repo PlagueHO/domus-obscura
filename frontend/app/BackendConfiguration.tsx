@@ -1,43 +1,148 @@
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
 import type { BackendConfigurationResult } from "../src/generated/BackendConfigurationResult";
+import type { ConfigurationSection } from "../src/generated/ConfigurationSection";
+import type { ConfigurationReloadState } from "../src/generated/ConfigurationReloadState";
 import { ApiError, request } from "./api";
 import { useCommand, useResource } from "./hooks";
-import { Alert, Badge, Button, Card } from "./components/ui";
+import { Alert, Button } from "./components/ui";
+import { Icon } from "./components/Media";
 import { BackendConfigurationForm } from "./BackendConfigurationForm";
 import {
+  acceptConfigurationSave,
   beginConfigurationEdit,
   changeConfigurationDraft,
   configurationErrors,
+  configurationSections,
+  dirtySections,
+  discardConfigurationSection,
+  sectionHasErrors,
+  sectionUpdate,
   type ConfigurationEditor,
 } from "./backend-configuration-state";
 
+type Section = ConfigurationSection | "music_output" | "music_roots";
 const configured = (value: boolean) => (value ? "Configured · value hidden" : "Not configured");
 
-export function BackendConfiguration() {
+const RefreshContext = createContext<{ busy: boolean; refresh: () => void } | undefined>(undefined);
+
+/** Settings card with the component-library header band and a shared refresh action. */
+export function ConfigurationCard({ title, children }: { title: string; children: ReactNode }) {
+  const refresh = useContext(RefreshContext);
+  return (
+    <section className="design-card configuration-section">
+      <header className="design-card-header">
+        <h2>{title}</h2>
+        {refresh && (
+          <Button
+            variant="ghost"
+            className="icon-button"
+            aria-label="Refresh settings"
+            title="Refresh settings"
+            disabled={refresh.busy}
+            onClick={refresh.refresh}
+          >
+            <Icon name="refresh" />
+          </Button>
+        )}
+      </header>
+      <div className="design-card-body">{children}</div>
+    </section>
+  );
+}
+
+/** A lost reload response must never cause a second activation command. */
+export async function confirmConfigurationReload(
+  revision: string,
+  load: () => Promise<BackendConfigurationState>,
+  wait: () => Promise<void>,
+): Promise<BackendConfigurationState> {
+  let failure = "The replacement host has not confirmed the saved revision.";
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await wait();
+    let state: BackendConfigurationState;
+    try {
+      state = await load();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) throw error;
+      failure = error instanceof Error ? error.message : "The host could not be reached.";
+      continue;
+    }
+    if (state.active_revision === revision) return state;
+    if (state.reload.status === "failed") throw new Error(state.reload.message);
+  }
+  throw new Error(
+    `Reload could not be confirmed. ${failure} Select Refresh or sign in again. The reload command was not retried.`,
+  );
+}
+
+export function BackendConfiguration({
+  output,
+  roots,
+  otherDrafts = false,
+  onRefreshRelated,
+  relatedLoading = false,
+}: {
+  output?: ReactNode;
+  roots?: ReactNode;
+  otherDrafts?: boolean;
+  onRefreshRelated?: () => void;
+  relatedLoading?: boolean;
+}) {
   const resource = useResource(
     (signal) => request<BackendConfigurationState>("/api/system/configuration", { signal }),
     "backend-configuration",
   );
-  const [selected, setSelected] = useState<"active" | "saved">("active");
-  const [editor, setEditor] = useState<ConfigurationEditor>();
+  const [section, setSection] = useState<Section>("general");
+  const [draft, setEditor] = useState<ConfigurationEditor>();
   const [confirmed, setConfirmed] = useState<BackendConfigurationState>();
   const [notice, setNotice] = useState("");
+  const [destination, setDestination] = useState("");
+  const [uncertain, setUncertain] = useState(false);
+  const abort = useRef<AbortController | undefined>(undefined);
   const command = useCommand();
-  useEffect(() => setConfirmed(undefined), [resource.data]);
+  useEffect(() => {
+    setConfirmed(undefined);
+    setUncertain(false);
+    setDestination("");
+    setNotice("");
+    setEditor((current) =>
+      current && (dirtySections(current).length > 0 || current.conflict) ? current : undefined,
+    );
+  }, [resource.data]);
+  useEffect(() => () => abort.current?.abort(), []);
   const state = confirmed ?? resource.data;
-  const configuration = state?.[selected];
   const fresh = !resource.error && !resource.loading;
   const readOnly =
     !state || state.active.system_settings_read_only || state.saved.system_settings_read_only;
-  async function submit(action: "validate" | "save") {
-    if (!editor || editor.conflict || !fresh || readOnly) return;
+  const editor = draft ?? (state && !readOnly ? beginConfigurationEdit(state) : undefined);
+  const changed = editor ? dirtySections(editor) : [];
+  const currentSection = configurationSections.find(({ id }) => id === section);
+  const backendSection = currentSection?.id;
+  const reloading = state?.reload.status === "pending";
+
+  async function submit(action: "validate" | "save", sections: ConfigurationSection[]) {
+    if (
+      !editor ||
+      !sections.length ||
+      editor.conflict ||
+      !fresh ||
+      readOnly ||
+      uncertain ||
+      reloading
+    )
+      return;
     await command.run(async () => {
       setNotice("");
       try {
         const result = await request<BackendConfigurationResult>(
-          `/api/system/configuration/${action}`,
-          { body: { expected_revision: editor.expectedRevision, draft: editor.draft } },
+          `/api/system/configuration/sections/${action}`,
+          {
+            body: {
+              expected_revision: editor.expectedRevision,
+              sections: sections.map((id) => sectionUpdate(editor.draft, id)),
+            },
+          },
         );
         if (result.errors.length) {
           setEditor(configurationErrors(editor, result.errors));
@@ -45,14 +150,11 @@ export function BackendConfiguration() {
           setEditor(configurationErrors(editor, []));
         } else if (result.state) {
           setConfirmed(result.state);
-          setEditor(undefined);
-          setNotice(
-            "Backend configuration saved and passively validated. It is not activated. Restart the API to apply it.",
-          );
-          resource.refresh();
+          setEditor(acceptConfigurationSave(editor, result.state, sections));
+          setNotice("Changes saved.");
         } else {
           throw new Error(
-            "The save response has no saved state. Reload and review before retrying.",
+            "The save response has no saved state. Refresh and review before retrying.",
           );
         }
       } catch (error) {
@@ -64,175 +166,370 @@ export function BackendConfiguration() {
     });
   }
 
+  async function reload() {
+    if (!state || changed.length || otherDrafts || !fresh || readOnly || reloading || uncertain)
+      return;
+    await command.run(async () => {
+      setNotice("");
+      const controller = new AbortController();
+      abort.current = controller;
+      setUncertain(true);
+      const result = await request<ConfigurationReloadState>("/api/system/configuration/reload", {
+        body: { expected_revision: state.saved_revision },
+        signal: controller.signal,
+      });
+      if (result.status !== "pending")
+        throw new Error("The host did not accept reload. Select Refresh before retrying.");
+      setConfirmed({ ...state, reload: result });
+      if (result.origin !== window.location.origin) {
+        setDestination(result.origin);
+        setNotice(
+          "Open the saved address and check that the changes are active. You may need to sign in.",
+        );
+        return;
+      }
+      const active = await confirmConfigurationReload(
+        result.revision,
+        async () => {
+          const observed = await request<BackendConfigurationState>("/api/system/configuration", {
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(3000)]),
+          });
+          setConfirmed(observed);
+          return observed;
+        },
+        () =>
+          new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, 1000);
+            controller.signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                reject(new Error("Reload confirmation stopped."));
+              },
+              { once: true },
+            );
+          }),
+      ).catch((error: unknown) => {
+        setNotice("");
+        throw error;
+      });
+      setConfirmed(active);
+      setUncertain(false);
+      setNotice("The saved revision is active in the API. Separate workers are unchanged.");
+      window.location.reload();
+    });
+  }
+
+  const navigation = (id: Section, label: string) => (
+    <Button
+      key={id}
+      variant="ghost"
+      type="button"
+      aria-current={section === id ? "page" : undefined}
+      onClick={() => setSection(id)}
+    >
+      <span>{label}</span>
+      {changed.some((value) => value === id) ? (
+        <small>Unsaved</small>
+      ) : (
+        state?.changed_sections.some((value) => value === id) && <small>Reload needed</small>
+      )}
+      {editor &&
+        configurationSections.some(
+          ({ id: value }) => value === id && sectionHasErrors(editor, value),
+        ) && <small>Error</small>}
+    </Button>
+  );
+
   return (
-    <Card title="Backend configuration">
-      <p>
-        This view covers the server JSON settings. Secret-file paths and Entra identifiers stay
-        hidden. Backend JSON changes require an API restart. Saving does not activate them.
-      </p>
-      <Alert error={resource.error} />
-      <Alert error={command.error} />
-      {notice && <p role="status">{notice}</p>}
-      <Button
-        variant="secondary"
-        disabled={resource.loading || command.busy}
-        onClick={resource.refresh}
-      >
-        {resource.loading ? "Loading backend configuration…" : "Reload backend configuration"}
-      </Button>
-      {state && (
-        <p>
-          {readOnly
-            ? "Backend configuration is read-only. The operator must enable editing outside the UI."
-            : "The configured administrator can edit backend configuration. System settings access cannot be changed here."}
-        </p>
-      )}
-      {!editor && !readOnly && (
-        <Button
-          disabled={!fresh || command.busy}
-          onClick={() => state && setEditor(beginConfigurationEdit(state))}
-        >
-          Edit backend configuration
-        </Button>
-      )}
-      {editor && (
-        <BackendConfigurationForm
-          editor={editor}
-          disabled={command.busy || !fresh || readOnly}
-          busy={command.busy}
-          onChange={(draft) => setEditor(changeConfigurationDraft(editor, draft))}
-          onValidate={() => void submit("validate")}
-          onSave={() => void submit("save")}
-          onDiscard={() => setEditor(undefined)}
-        />
-      )}
-      {Boolean(resource.error) && state && (
-        <p role="status">Last loaded configuration. The current saved file could not be checked.</p>
-      )}
-      {resource.loading && state && (
-        <p role="status">
-          Checking the saved file. Values from the last successful read remain below.
-        </p>
-      )}
-      {state && configuration && (
-        <>
-          {!resource.error && !resource.loading && (
-            <p role="status">
-              {state.restart_required
-                ? "Saved JSON differs from the active configuration. It is not active. A restart and full startup validation are required."
-                : "Saved JSON matches the active configuration."}
-            </p>
-          )}
-          <label>
-            Configuration version
-            <select
-              value={selected}
-              onChange={(event) => setSelected(event.target.value === "saved" ? "saved" : "active")}
+    <RefreshContext.Provider
+      value={{
+        busy: resource.loading || relatedLoading || command.busy,
+        refresh: () => {
+          resource.refresh();
+          onRefreshRelated?.();
+        },
+      }}
+    >
+      <div className="configuration-messages">
+        {notice && <p role="status">{notice}</p>}
+        <Alert error={resource.error} />
+        <Alert error={command.error} />
+        {state?.reload.status === "failed" && !command.error && (
+          <p role="alert">{state.reload.message}</p>
+        )}
+        {(state?.restart_required || reloading || uncertain) && (
+          <div className="configuration-notice">
+            <div role="status">
+              <strong>
+                {reloading
+                  ? "Applying saved changes…"
+                  : uncertain
+                    ? "Reload needs confirmation"
+                    : "Saved changes need a reload"}
+              </strong>
+              <p>
+                {uncertain && !command.busy
+                  ? "Refresh to check the server. The reload command was not retried."
+                  : changed.length > 0 || otherDrafts
+                    ? "Save or discard your unsaved changes before reloading."
+                    : "Reload the API to apply saved settings. Separate workers stay unchanged."}
+              </p>
+            </div>
+            <Button
+              variant="secondary"
+              disabled={
+                !fresh ||
+                readOnly ||
+                command.busy ||
+                reloading ||
+                uncertain ||
+                !state?.restart_required ||
+                changed.length > 0 ||
+                otherDrafts
+              }
+              onClick={() => void reload()}
             >
-              <option value="active">Active in this process</option>
-              <option value="saved">Saved JSON · not activated by this view</option>
-            </select>
-          </label>
+              Reload
+            </Button>
+          </div>
+        )}
+        {destination && (
           <p>
-            <Badge>{selected === "active" ? "Active configuration" : "Saved configuration"}</Badge>
-            {selected === "saved" && state.saved_requires_validation && (
-              <> Saved values have not passed startup validation.</>
-            )}
-            {selected === "saved" && !state.saved_requires_validation && state.restart_required && (
-              <>
-                {" "}
-                Saved values passed passive validation. They are not active. Startup checks remain
-                required.
-              </>
-            )}
+            <a href={destination} rel="noreferrer">
+              Open saved browser address
+            </a>
+            . Expected revision: <code>{state?.saved_revision}</code>.
           </p>
-          <dl className="properties">
-            <dt>Environment</dt>
-            <dd>{configuration.environment}</dd>
-            <dt>Listen address</dt>
-            <dd>{configuration.listen}</dd>
-            <dt>Browser origin</dt>
-            <dd>{configuration.origin}</dd>
-            <dt>Local database</dt>
-            <dd>{configuration.database}</dd>
-            <dt>Browser assets</dt>
-            <dd>{configuration.browser_assets ?? "Not configured"}</dd>
-            <dt>System settings access</dt>
-            <dd>
-              {configuration.system_settings_read_only
-                ? "View only"
-                : "Library policy can be edited"}
-            </dd>
-            <dt>Discovery providers</dt>
-            <dd>{configuration.services.discovery.join(", ") || "Disabled"}</dd>
-            <dt>Metadata providers</dt>
-            <dd>{configuration.services.metadata.join(", ") || "Disabled"}</dd>
-            <dt>Artwork providers</dt>
-            <dd>{configuration.services.artwork.join(", ") || "Disabled"}</dd>
-            <dt>Acquisition providers</dt>
-            <dd>{configuration.services.acquisition.join(", ") || "Disabled"}</dd>
-            <dt>Entra tenant</dt>
-            <dd>{configured(configuration.tenant_id_configured)}</dd>
-            <dt>Authorized Entra object</dt>
-            <dd>{configured(configuration.object_id_configured)}</dd>
-            <dt>Entra client</dt>
-            <dd>{configured(configuration.client_id_configured)}</dd>
-            <dt>Entra secret file</dt>
-            <dd>{configured(configuration.client_secret_file_configured)}</dd>
-            <dt>TLS certificate file</dt>
-            <dd>{configuration.certificate_file}</dd>
-            <dt>TLS private-key file</dt>
-            <dd>{configured(configuration.private_key_file_configured)}</dd>
-            <dt>Provider cache</dt>
-            <dd>{configuration.cache ? "Shared private file cache" : "Legacy SQLite cache"}</dd>
-            {configuration.cache && (
-              <>
-                <dt>Cache root</dt>
-                <dd>{configuration.cache.root}</dd>
-                <dt>Maximum cache item</dt>
-                <dd>{configuration.cache.item_bytes.toLocaleString()} bytes</dd>
-                <dt>Maximum cache storage</dt>
-                <dd>{configuration.cache.total_bytes.toLocaleString()} bytes</dd>
-                <dt>Maximum cache entries</dt>
-                <dd>{configuration.cache.entries.toLocaleString()}</dd>
-              </>
-            )}
-            <dt>Development acquisition</dt>
-            <dd>
-              {configuration.local_acquisition ? "Configured · development only" : "Disabled"}
-            </dd>
-            {configuration.local_acquisition && (
-              <>
-                <dt>Private staging root</dt>
-                <dd>{configuration.local_acquisition.staging_root}</dd>
-                <dt>Soulseek credential file</dt>
-                <dd>{configured(configuration.local_acquisition.credentials_file_configured)}</dd>
-                <dt>Soulseek server</dt>
-                <dd>{configuration.local_acquisition.server}</dd>
-                <dt>Plaintext login acknowledgement</dt>
-                <dd>
-                  {configuration.local_acquisition.acknowledge_plaintext_login
-                    ? "Acknowledged"
-                    : "Not acknowledged"}
-                </dd>
-              </>
-            )}
-          </dl>
-          <details>
-            <summary>Configuration revisions</summary>
-            <dl className="properties">
-              <dt>Active revision</dt>
-              <dd>
-                <code>{state.active_revision}</code>
-              </dd>
-              <dt>Saved revision</dt>
-              <dd>
-                <code>{state.saved_revision}</code>
-              </dd>
-            </dl>
-          </details>
-        </>
-      )}
-    </Card>
+        )}
+        {state && readOnly && (
+          <p role="status">
+            These settings are read-only. The operator must enable editing outside the UI.
+          </p>
+        )}
+        {Boolean(resource.error) && state && (
+          <p role="status">
+            The saved settings could not be checked. The last loaded values are shown.
+          </p>
+        )}
+        {resource.loading && state && (
+          <p role="status">Refreshing settings. The last loaded values are shown.</p>
+        )}
+      </div>
+      <div className="configuration-layout">
+        <label className="configuration-section-picker">
+          Settings section
+          <select
+            value={section}
+            onChange={(event) => {
+              const value = event.target.value;
+              const target = configurationSections.find(({ id }) => id === value);
+              if (target) setSection(target.id);
+              else if (value === "music_output" || value === "music_roots") setSection(value);
+            }}
+          >
+            <optgroup label="Core application">
+              {configurationSections
+                .filter(({ group }) => group === "Core application")
+                .map(({ id, title }) => (
+                  <option key={id} value={id}>
+                    {title}
+                    {changed.includes(id) ? " (unsaved)" : ""}
+                  </option>
+                ))}
+            </optgroup>
+            <optgroup label="Media · Music">
+              {configurationSections
+                .filter(({ group }) => group === "Media · Music")
+                .map(({ id, title }) => (
+                  <option key={id} value={id}>
+                    {title}
+                    {changed.includes(id) ? " (unsaved)" : ""}
+                  </option>
+                ))}
+              {output && <option value="music_output">Output policy</option>}
+              {roots && <option value="music_roots">Library roots</option>}
+            </optgroup>
+          </select>
+        </label>
+        <nav className="configuration-navigation" aria-label="Configuration sections">
+          <div className="configuration-group">
+            <div className="configuration-group-label">
+              <Icon name="settings" />
+              Core application
+            </div>
+            {configurationSections
+              .filter(({ group }) => group === "Core application")
+              .map(({ id, title: label }) => navigation(id, label))}
+          </div>
+          <div className="configuration-group">
+            <div className="configuration-group-label">
+              <Icon name="music" />
+              Media
+            </div>
+            <div className="configuration-subgroup">Music</div>
+            {configurationSections
+              .filter(({ group }) => group === "Media · Music")
+              .map(({ id, title: label }) => navigation(id, label))}
+            {output && navigation("music_output", "Output policy")}
+            {roots && navigation("music_roots", "Library roots")}
+          </div>
+        </nav>
+        <div className="configuration-content">
+          <div hidden={!backendSection}>
+            <ConfigurationCard title={currentSection?.title ?? "Settings"}>
+              <p className="muted">{currentSection?.description}</p>
+              {!state && !resource.error && <p role="status">Loading settings…</p>}
+              {state && readOnly && backendSection && (
+                <SectionSummary configuration={state.saved} section={backendSection} />
+              )}
+              {state && editor && !readOnly && backendSection && (
+                <BackendConfigurationForm
+                  editor={editor}
+                  saved={state.saved}
+                  section={backendSection}
+                  changed={changed.includes(backendSection)}
+                  disabled={command.busy || !fresh || readOnly || reloading || uncertain}
+                  busy={command.busy}
+                  onChange={(draft) => setEditor(changeConfigurationDraft(editor, draft))}
+                  onValidate={() => void submit("validate", [backendSection])}
+                  onSave={() => void submit("save", [backendSection])}
+                  onSaveAll={changed.length > 1 ? () => void submit("save", changed) : undefined}
+                  onDiscard={() =>
+                    setEditor(
+                      editor.conflict
+                        ? undefined
+                        : discardConfigurationSection(editor, backendSection),
+                    )
+                  }
+                />
+              )}
+              {state && backendSection && (
+                <details className="configuration-details">
+                  <summary>Advanced</summary>
+                  {editor && (
+                    <Button
+                      variant="secondary"
+                      disabled={
+                        command.busy ||
+                        !fresh ||
+                        readOnly ||
+                        reloading ||
+                        uncertain ||
+                        editor.conflict
+                      }
+                      onClick={() => void submit("validate", [backendSection])}
+                    >
+                      Check changes before saving
+                    </Button>
+                  )}
+                  {state.saved_requires_validation && (
+                    <p>Saved settings need full validation when the API reloads.</p>
+                  )}
+                  <h3>Currently running</h3>
+                  <SectionSummary configuration={state.active} section={backendSection} />
+                  <dl className="properties">
+                    <dt>Active revision</dt>
+                    <dd>
+                      <code>{state.active_revision}</code>
+                    </dd>
+                    <dt>Saved revision</dt>
+                    <dd>
+                      <code>{state.saved_revision}</code>
+                    </dd>
+                  </dl>
+                </details>
+              )}
+            </ConfigurationCard>
+          </div>
+          <div hidden={section !== "music_output"}>{output}</div>
+          <div hidden={section !== "music_roots"}>{roots}</div>
+        </div>
+      </div>
+    </RefreshContext.Provider>
+  );
+}
+
+function SectionSummary({
+  configuration: value,
+  section,
+}: {
+  configuration: BackendConfigurationState["active"];
+  section: ConfigurationSection;
+}) {
+  const rows: [string, ReactNode][] =
+    section === "general"
+      ? [
+          ["Environment", value.environment],
+          ["Listen address", value.listen],
+          ["Browser origin", value.origin],
+          ["Browser assets", value.browser_assets ?? "Not configured"],
+        ]
+      : section === "identity"
+        ? [
+            ["Entra tenant", configured(value.tenant_id_configured)],
+            ["Authorized Entra object", configured(value.object_id_configured)],
+            ["Entra client", configured(value.client_id_configured)],
+            ["Entra secret file", configured(value.client_secret_file_configured)],
+          ]
+        : section === "tls"
+          ? [
+              ["TLS certificate file", value.certificate_file],
+              ["TLS private-key file", configured(value.private_key_file_configured)],
+            ]
+          : section === "storage"
+            ? [
+                ["Local database", value.database],
+                [
+                  "Provider cache",
+                  value.cache ? "Shared private file cache" : "Legacy SQLite cache",
+                ],
+                ...(value.cache
+                  ? ([
+                      ["Cache root", value.cache.root],
+                      ["Maximum cache item", `${value.cache.item_bytes} bytes`],
+                      ["Maximum cache storage", `${value.cache.total_bytes} bytes`],
+                      ["Maximum cache entries", value.cache.entries],
+                    ] satisfies [string, ReactNode][])
+                  : []),
+              ]
+            : section === "music_providers"
+              ? [
+                  ["Discovery providers", value.services.discovery.join(", ") || "Disabled"],
+                  ["Metadata providers", value.services.metadata.join(", ") || "Disabled"],
+                  ["Artwork providers", value.services.artwork.join(", ") || "Disabled"],
+                  ["Acquisition providers", value.services.acquisition.join(", ") || "Disabled"],
+                ]
+              : [
+                  [
+                    "Development acquisition",
+                    value.local_acquisition ? "Configured · development only" : "Disabled",
+                  ],
+                  ...(value.local_acquisition
+                    ? ([
+                        ["Private staging root", value.local_acquisition.staging_root],
+                        [
+                          "Soulseek credential file",
+                          configured(value.local_acquisition.credentials_file_configured),
+                        ],
+                        ["Soulseek server", value.local_acquisition.server],
+                        [
+                          "Plaintext login acknowledgement",
+                          value.local_acquisition.acknowledge_plaintext_login
+                            ? "Acknowledged"
+                            : "Not acknowledged",
+                        ],
+                      ] satisfies [string, ReactNode][])
+                    : []),
+                ];
+  return (
+    <dl className="properties">
+      {rows.map(([name, content]) => (
+        <div className="configuration-property" key={name}>
+          <dt>{name}</dt>
+          <dd>{content}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }

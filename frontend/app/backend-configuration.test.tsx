@@ -1,13 +1,18 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
-import { BackendConfiguration } from "./BackendConfiguration";
+import { BackendConfiguration, confirmConfigurationReload } from "./BackendConfiguration";
+import { ApiError } from "./api";
 import { useResource } from "./hooks";
 import { BackendConfigurationForm } from "./BackendConfigurationForm";
 import {
   beginConfigurationEdit,
   changeConfigurationDraft,
   configurationErrors,
+  acceptConfigurationSave,
+  dirtySections,
+  sectionUpdate,
+  discardConfigurationSection,
 } from "./backend-configuration-state";
 
 vi.mock("./hooks", async (importOriginal) => ({
@@ -50,6 +55,8 @@ const state: BackendConfigurationState = {
   saved_revision: "a".repeat(64),
   restart_required: false,
   saved_requires_validation: false,
+  changed_sections: [],
+  reload: { status: "idle" },
 };
 
 function render(data: BackendConfigurationState | undefined, error?: Error, loading = false) {
@@ -60,22 +67,28 @@ function render(data: BackendConfigurationState | undefined, error?: Error, load
 beforeEach(() => vi.mocked(useResource).mockReset());
 
 describe("backend configuration inspection", () => {
-  it("shows all configured groups and offers explicit editing without secret values", () => {
+  it("shows section navigation and the selected group without exposing other fields", () => {
     const markup = render(state);
-    expect(markup).toContain("Saved JSON matches the active configuration.");
-    expect(markup).toContain("generated-database");
+    expect(markup).not.toContain("Configuration state");
+    expect(markup).not.toContain("Configuration version");
     expect(markup).toContain("generated-browser");
-    expect(markup).toContain("generated-cache");
-    expect(markup).toContain("generated-staging");
-    expect(markup).toContain("cover-art-archive");
-    expect(markup).toContain("Entra secret file");
-    expect(markup).toContain("TLS private-key file");
-    expect(markup).toContain("Configured · value hidden");
-    expect(markup).toContain("Library policy can be edited");
-    expect(markup).toContain("Saving does not activate them.");
-    expect(markup).toContain("Edit backend configuration");
-    expect(markup).not.toContain("<form");
-    expect(markup).not.toContain("<input");
+    expect(markup).toContain("<fieldset><legend>General</legend>");
+    expect(markup).toContain('<fieldset disabled="" hidden=""><legend>Providers</legend>');
+    expect(markup).toContain("Core application");
+    expect(markup).toContain("Media");
+    expect(markup).toContain("Music");
+    expect(markup).toContain("Identity");
+    expect(markup).toContain("TLS");
+    expect(markup).toContain("Providers");
+    expect(markup).toContain("Acquisition");
+    expect(markup).toContain('aria-label="Refresh settings"');
+    expect(markup).toContain('class="design-card-header"');
+    expect(markup).toContain("Save changes");
+    expect(markup).toContain("<form");
+    expect(markup).toContain('name="listen"');
+    expect(markup).not.toContain(">Edit backend configuration</button>");
+    expect(markup).not.toContain("Saved changes need a reload");
+    expect(markup).toContain("<summary>Advanced</summary>");
     expect(markup).not.toContain("Save backend");
   });
 
@@ -87,10 +100,11 @@ describe("backend configuration inspection", () => {
     ]) {
       const markup = render(value);
       expect(markup).not.toContain("Edit backend configuration");
+      expect(markup).not.toContain("<form");
       expect(markup).toContain("operator must enable editing");
     }
     expect(render(state, new Error("Refresh failed"))).toMatch(
-      /<button[^>]*disabled[^>]*>Edit backend configuration/,
+      /<button[^>]*type="submit"[^>]*disabled[^>]*>Save changes/,
     );
   });
 
@@ -102,11 +116,12 @@ describe("backend configuration inspection", () => {
       restart_required: true,
       saved_requires_validation: true,
     });
-    expect(markup).toContain("It is not active.");
-    expect(markup).toContain("full startup validation");
+    expect(markup).toContain("Saved changes need a reload");
+    expect(markup).toContain("Reload the API to apply saved settings");
+    expect(markup).toContain("full validation");
     expect(markup).toContain("https://localhost:8443");
-    expect(markup).not.toContain("https://localhost:9443");
-    expect(markup).not.toContain("matches the active");
+    expect(markup).toMatch(/name="origin"[^>]*value="https:\/\/localhost:9443"/);
+    expect(markup).toContain("Currently running");
   });
 
   describe("backend configuration draft", () => {
@@ -180,7 +195,7 @@ describe("backend configuration inspection", () => {
         expect(markup).toContain(label);
       expect(markup).toContain("Use HTTPS.");
       expect(markup).toContain('aria-invalid="true"');
-      expect(markup).toContain("All changes require an API restart");
+      expect(markup).toContain("Saving does not activate settings");
       expect(markup).not.toContain('name="system_settings_read_only"');
       expect(markup).not.toContain('type="password"');
     });
@@ -193,23 +208,130 @@ describe("backend configuration inspection", () => {
     expect(failed).not.toContain("Legacy SQLite cache");
     expect(failed).not.toContain("matches the active");
     const stale = render(state, new Error("Saved file unavailable."));
-    expect(stale).toContain("Last loaded configuration.");
+    expect(stale).toContain("The last loaded values are shown.");
     expect(stale).toContain("could not be checked");
-    expect(stale).toContain("generated-database");
+    expect(stale).toContain("generated-browser");
     expect(stale).not.toContain("matches the active");
     const reloading = render(state, undefined, true);
-    expect(reloading).toContain("Values from the last successful read remain below.");
+    expect(reloading).toContain("Refreshing settings. The last loaded values are shown.");
     expect(reloading).not.toContain("matches the active");
-    expect(render(undefined, undefined, true)).toContain("Loading backend configuration");
+    expect(render(undefined, undefined, true)).toContain("Loading settings");
   });
 
   it("shows omitted optional services without inventing cache or acquisition state", () => {
     const value = { ...configuration, cache: null, browser_assets: null, local_acquisition: null };
     const markup = render({ ...state, active: value, saved: value });
-    expect(markup).toContain("Legacy SQLite cache");
-    expect(markup).toContain("Development acquisition");
-    expect(markup).not.toContain("Private staging root");
-    expect(markup).not.toContain("Maximum cache item");
-    expect(markup).toContain("Not configured");
+    expect(markup).toContain("Storage/cache");
+    expect(markup).toContain("Acquisition");
+    expect(markup).not.toContain('name="local_acquisition.staging_root"');
+    expect(markup).not.toContain('name="cache.item_bytes"');
+    expect(markup).toContain('name="browser_assets"');
+  });
+
+  describe("section save state", () => {
+    it("sends only owned fields and retains other section drafts after save", () => {
+      const initial = beginConfigurationEdit(state);
+      const editor = changeConfigurationDraft(initial, {
+        ...initial.draft,
+        origin: "https://localhost:9443",
+        listen: "127.0.0.1:9443",
+        private_key_file: { action: "replace", value: "retained-hidden-reference" },
+      });
+      expect(dirtySections(editor)).toEqual(["general", "tls"]);
+      const update = sectionUpdate(editor.draft, "general");
+      expect(update).not.toHaveProperty("private_key_file");
+      expect(update).not.toHaveProperty("services");
+      const saved = {
+        ...state,
+        saved_revision: "b".repeat(64),
+        saved: { ...configuration, origin: editor.draft.origin, listen: editor.draft.listen },
+      };
+      const next = acceptConfigurationSave(editor, saved, ["general"]);
+      expect(next.expectedRevision).toBe(saved.saved_revision);
+      expect(dirtySections(next)).toEqual(["tls"]);
+      expect(next.draft.private_key_file).toEqual(editor.draft.private_key_file);
+      expect(next.draft.origin).toBe(editor.draft.origin);
+      const final = acceptConfigurationSave(next, saved, ["tls"]);
+      expect(dirtySections(final)).toEqual([]);
+      expect(final.draft.private_key_file).toEqual({ action: "keep" });
+    });
+
+    it("distinguishes explicit optional-group removal from omitted sections", () => {
+      const editor = beginConfigurationEdit(state);
+      editor.draft.local_acquisition = null;
+      expect(dirtySections(editor)).toEqual(["music_acquisition"]);
+      expect(sectionUpdate(editor.draft, "music_acquisition")).toEqual({
+        section: "music_acquisition",
+        local_acquisition: null,
+      });
+      expect(sectionUpdate(editor.draft, "tls")).not.toHaveProperty("local_acquisition");
+    });
+
+    it("keeps hidden unrelated controls disabled during a section save", () => {
+      const markup = renderToStaticMarkup(
+        <BackendConfigurationForm
+          editor={beginConfigurationEdit(state)}
+          section="tls"
+          disabled={false}
+          busy={false}
+          onChange={vi.fn()}
+          onValidate={vi.fn()}
+          onSave={vi.fn()}
+          onDiscard={vi.fn()}
+        />,
+      );
+      expect(markup).toMatch(/<fieldset disabled="" hidden="">/);
+      expect(markup).toContain("Save changes");
+      expect(markup).not.toContain("Validate section");
+    });
+
+    it("discards only the selected section and preserves other drafts", () => {
+      const editor = beginConfigurationEdit(state);
+      editor.draft.origin = "https://localhost:9443";
+      editor.draft.private_key_file = { action: "replace", value: "retained-reference" };
+      const next = discardConfigurationSection(editor, "general");
+      expect(next.draft.origin).toBe(state.saved.origin);
+      expect(next.expectedRevision).toBe(editor.expectedRevision);
+      expect(dirtySections(next)).toEqual(["tls"]);
+      expect(next.draft.private_key_file).toEqual(editor.draft.private_key_file);
+      expect(next.baseline).toBe(editor.baseline);
+    });
+  });
+
+  describe("reload confirmation", () => {
+    it("waits for the exact active revision instead of treating acceptance as success", async () => {
+      const next = { ...state, active_revision: "b".repeat(64) };
+      const load = vi.fn().mockResolvedValueOnce(state).mockResolvedValueOnce(next);
+      expect(await confirmConfigurationReload(next.active_revision, load, async () => {})).toBe(
+        next,
+      );
+      expect(load).toHaveBeenCalledTimes(2);
+    });
+
+    it("reports activation failure and login requirements without retries", async () => {
+      await expect(
+        confirmConfigurationReload(
+          "b",
+          async () => ({
+            ...state,
+            reload: { status: "failed", revision: "b", message: "Replacement listener failed." },
+          }),
+          async () => {},
+        ),
+      ).rejects.toThrow("Replacement listener failed");
+      const load = vi.fn().mockRejectedValue(new ApiError(401, "Sign in again."));
+      await expect(confirmConfigurationReload("b", load, async () => {})).rejects.toThrow(
+        "Sign in again",
+      );
+      expect(load).toHaveBeenCalledTimes(1);
+    });
+
+    it("bounds failed reads and never issues an activation command", async () => {
+      const load = vi.fn().mockRejectedValue(new Error("Connection lost."));
+      await expect(confirmConfigurationReload("b", load, async () => {})).rejects.toThrow(
+        "The reload command was not retried.",
+      );
+      expect(load).toHaveBeenCalledTimes(10);
+    });
   });
 });
