@@ -151,13 +151,21 @@ pub struct PreparedServer {
     secret: Option<ClientSecret>,
     tls: RustlsConfig,
     hostname: String,
-    configuration_source: configuration::ConfigurationService,
+    configuration_source: Arc<configuration::ConfigurationService>,
 }
 
 impl PreparedServer {
     pub fn load(path: &Path) -> Result<Self> {
         let (configuration_source, configuration, hostname) =
             configuration::ConfigurationService::load(path)?;
+        Self::from_source(Arc::new(configuration_source), configuration, hostname)
+    }
+
+    fn from_source(
+        configuration_source: Arc<configuration::ConfigurationService>,
+        configuration: Configuration,
+        hostname: String,
+    ) -> Result<Self> {
         let mut store = Store::open_existing(&configuration.database)?;
         let protected = configuration_source.protected(&configuration);
         let (secret, tls) = configuration_source.startup_material(&store, &hostname)?;
@@ -176,7 +184,7 @@ impl PreparedServer {
         })
     }
 
-    pub async fn run(self) -> Result<()> {
+    async fn prepare(self) -> Result<Host> {
         let Self {
             configuration,
             store,
@@ -221,7 +229,7 @@ impl PreparedServer {
             }
         };
         api = api.with_system_settings_read_only(configuration.system_settings_read_only)?;
-        api = api.with_backend_configuration(configuration_source)?;
+        api = api.with_shared_configuration(configuration_source.clone())?;
         if let Some(root) = &configuration.browser_assets {
             let root = root.clone();
             let browser =
@@ -243,36 +251,209 @@ impl PreparedServer {
             .map_err(|_| Error::Internal("local runtime task failed"))??;
             api = api.with_local_runtime(runtime)?;
         }
-        let listener = TcpListener::bind(configuration.listen)?;
-        let handle = axum_server::Handle::new();
-        let serving = serve_listener(listener, tls.clone(), api.router(), handle.clone());
-        tokio::pin!(serving);
+        Ok(Host {
+            configuration,
+            api,
+            tls,
+            hostname,
+            source: configuration_source,
+        })
+    }
+
+    pub async fn run(self) -> Result<()> {
+        let (sender, mut reloads) = tokio::sync::mpsc::channel(1);
+        self.configuration_source.attach_reload(sender)?;
+        let mut host = self.prepare().await?;
+        let mut listener = TcpListener::bind(host.configuration.listen)?;
+        let (mut handle, mut serving) = host.start(&listener).await?;
+        let mut shutdown = ShutdownOnDrop(handle.clone());
         eprintln!(
             "{} API preview listening on {}",
-            if matches!(configuration.environment, Environment::Development) {
+            if matches!(host.configuration.environment, Environment::Development) {
                 "WARNING: development _anonymous (authentication disabled)"
             } else {
                 "Authenticated production"
             },
-            configuration.listen,
+            host.configuration.listen,
         );
-        let result = tokio::select! {
-            result = &mut serving => result.map_err(Error::from),
-            result = shutdown_signal() => {
-                api.stop_local_operations();
-                handle.graceful_shutdown(Some(Duration::from_secs(10)));
-                let served = serving.await.map_err(Error::from);
-                result.map_err(Error::from).and(served)
-            },
-            _ = api.refresh_identity() => Err(Error::Internal("identity refresh stopped unexpectedly")),
-            _ = watch_tls(configuration, hostname, tls) => Err(Error::Internal("TLS refresh stopped unexpectedly")),
+        let result = loop {
+            enum Event {
+                Reload(String),
+                Stop(Result<()>),
+            }
+            let event = tokio::select! {
+                result = &mut serving => Event::Stop(join_listener(result)),
+                result = shutdown_signal() => Event::Stop(result.map_err(Error::from)),
+                _ = host.api.refresh_identity() => Event::Stop(Err(Error::Internal("identity refresh stopped unexpectedly"))),
+                _ = watch_tls(host.configuration.clone(), host.hostname.clone(), host.tls.clone()) => Event::Stop(Err(Error::Internal("TLS refresh stopped unexpectedly"))),
+                request = reloads.recv() => match request {
+                    Some(revision) => Event::Reload(revision),
+                    None => Event::Stop(Err(Error::Internal("configuration reload channel closed"))),
+                },
+            };
+            let revision = match event {
+                Event::Stop(result) => break result,
+                Event::Reload(revision) => revision,
+            };
+            let prepared = tokio::time::timeout(
+                Duration::from_secs(30),
+                host.replacement(&revision, &listener),
+            )
+            .await;
+            let (candidate, candidate_listener, _idle) = match prepared {
+                Ok(Ok(candidate)) => candidate,
+                Ok(Err(_)) | Err(_) => {
+                    eprintln!("API reload preparation failed; the previous host remains active");
+                    host.source.finish_reload(
+                        revision,
+                        Err(Error::Internal("reload preparation failed")),
+                    )?;
+                    continue;
+                }
+            };
+            // Keep a bound copy of the old socket until the new generation is
+            // listening. Failed handover can restore the immutable old host.
+            host.api.stop_local_operations();
+            drop(_idle);
+            handle.graceful_shutdown(Some(Duration::from_secs(10)));
+            if let Err(error) = join_listener((&mut serving).await) {
+                eprintln!("API listener drain failed during reload: {error}");
+            }
+            host.api.drain_local_operations().await?;
+            let source = host.source.clone();
+            let expected = revision.clone();
+            let verified = tokio::task::spawn_blocking(move || source.verify_reload(&expected))
+                .await
+                .unwrap_or(Err(Error::Internal("API activation revision task failed")));
+            let started = match verified {
+                Ok(()) => candidate.start(&candidate_listener).await,
+                Err(error) => Err(error),
+            };
+            match started {
+                Ok((next_handle, next_serving)) => {
+                    host = candidate;
+                    listener = candidate_listener;
+                    handle = next_handle;
+                    serving = next_serving;
+                    shutdown.0 = handle.clone();
+                    host.source.finish_reload(revision, Ok(()))?;
+                    eprintln!("API configuration reload activated");
+                }
+                Err(_) => {
+                    eprintln!("API reload handover failed; restoring the previous host");
+                    let source = host.source.clone();
+                    let configuration = host.configuration.clone();
+                    let hostname = host.hostname.clone();
+                    host = tokio::task::spawn_blocking(move || {
+                        Self::from_source(source, configuration, hostname)
+                    })
+                    .await
+                    .map_err(|_| Error::Internal("API restoration task failed"))??
+                    .prepare()
+                    .await?;
+                    (handle, serving) = host.start(&listener).await?;
+                    shutdown.0 = handle.clone();
+                    host.source
+                        .finish_reload(revision, Err(Error::Internal("reload handover failed")))?;
+                }
+            }
         };
-        api.stop_local_operations();
+        host.api.stop_local_operations();
         handle.shutdown();
         eprintln!("API stopped accepting work; waiting for local operations and saved results");
-        api.drain_local_operations().await?;
+        host.api.drain_local_operations().await?;
         result
     }
+}
+
+struct Host {
+    configuration: Configuration,
+    api: Api,
+    tls: RustlsConfig,
+    hostname: String,
+    source: Arc<configuration::ConfigurationService>,
+}
+
+type ListenerTask = tokio::task::JoinHandle<io::Result<()>>;
+
+impl Host {
+    async fn start(
+        &self,
+        listener: &TcpListener,
+    ) -> Result<(axum_server::Handle<SocketAddr>, ListenerTask)> {
+        let listener = listener.try_clone()?;
+        listener.set_nonblocking(true)?;
+        let handle = axum_server::Handle::new();
+        let serving_handle = handle.clone();
+        let tls = self.tls.clone();
+        let router = self.api.router();
+        let mut serving =
+            tokio::spawn(
+                async move { serve_listener(listener, tls, router, serving_handle).await },
+            );
+        tokio::select! {
+            ready = handle.listening() => {
+                if ready.is_none() {
+                    handle.shutdown();
+                    join_listener(serving.await)?;
+                    return Err(Error::Internal("API listener did not become ready"));
+                }
+            },
+            result = &mut serving => {
+                join_listener(result)?;
+                return Err(Error::Internal("API listener stopped before readiness"));
+            },
+        }
+        Ok((handle, serving))
+    }
+
+    async fn replacement(
+        &self,
+        revision: &str,
+        listener: &TcpListener,
+    ) -> Result<(Host, TcpListener, Option<tokio::sync::OwnedSemaphorePermit>)> {
+        let idle = self.api.reload_permit()?;
+        let source = self.source.clone();
+        let expected = revision.to_owned();
+        // Blocking resource preparation can outlive its timeout. Keep media
+        // operations excluded until that preparation actually finishes.
+        let (prepared, idle) = tokio::task::spawn_blocking(move || {
+            let candidate = source.reload_candidate(&expected)?;
+            let configuration = candidate.active.clone();
+            let hostname = reqwest::Url::parse(&configuration.origin)
+                .map_err(|_| Error::InvalidInput("service origin is invalid".into()))?
+                .host_str()
+                .ok_or(Error::Internal("hostname is missing"))?
+                .trim_matches(['[', ']'])
+                .to_owned();
+            let prepared =
+                PreparedServer::from_source(Arc::new(candidate), configuration, hostname)?;
+            Ok::<_, Error>((prepared, idle))
+        })
+        .await
+        .map_err(|_| Error::Internal("API reload preparation task failed"))??;
+        let candidate = prepared.prepare().await?;
+        let listener = if candidate.configuration.listen == self.configuration.listen {
+            listener.try_clone()?
+        } else {
+            TcpListener::bind(candidate.configuration.listen)?
+        };
+        listener.set_nonblocking(true)?;
+        let source = self.source.clone();
+        let expected = revision.to_owned();
+        tokio::task::spawn_blocking(move || source.verify_reload(&expected))
+            .await
+            .map_err(|_| Error::Internal("API reload revision task failed"))??;
+        Ok((candidate, listener, idle))
+    }
+}
+
+fn join_listener(
+    result: std::result::Result<io::Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    result
+        .map_err(|_| Error::Internal("API listener task failed"))?
+        .map_err(Error::from)
 }
 
 async fn shutdown_signal() -> io::Result<()> {

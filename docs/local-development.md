@@ -26,18 +26,20 @@ The application uses the real guarded API, not `frontend/local-test`.
 It serves the built browser files from `frontend/dist-app`.
 Rebuild and restart after frontend changes. The browser has a Component library.
 
-Open **System** to inspect **Backend configuration**. The real file-backed HTTPS
+Open **System** to inspect the Core application and Media > Music sections. The real file-backed HTTPS
 bootstrap supplies active and saved settings through
 `GET /api/system/configuration`. The active snapshot remains unchanged until
-restart. Changed saved JSON is explicitly unvalidated; reading it cannot change
+explicit API reload or restart. Changed saved JSON is explicitly unvalidated; reading it cannot change
 the running read-only policy. Secret-file paths and Entra identifiers remain
 hidden. Malformed, missing and oversized files return errors. A failed refresh
 retains the last values with a stale warning. Inspection creates no database,
 cache root or staging directory and starts no provider work.
 Set `system_settings_read_only: false` outside the UI to enable editing.
 Both the running configuration and saved file must permit a backend JSON save.
-Use **Edit backend configuration**, then **Validate backend configuration** or
-**Save backend configuration**. These commands retain the draft after failure.
+Use **Edit backend configuration**, then **Validate section** or
+**Save section**. These commands retain the draft after failure.
+Navigation retains unsaved sections. **Save changed backend sections** saves
+related backend edits together without changing other saved sections.
 A stale revision requires reload and review; the form never overwrites it.
 Secret-file references and Entra identifiers have write-only replacement controls.
 Blank replacements keep the existing values. Optional removals are explicit.
@@ -45,7 +47,13 @@ Blank replacements keep the existing values. Optional removals are explicit.
 Validation reads existing local inputs and checks TLS without provider requests,
 SQLite migration, root creation/binding, or activation. Cache and staging roots
 must already be set up. A successful save is passively validated and
-restart-required, not active. Restart is a separate operator action.
+reload-required, not active. **Refresh saved values** only reads JSON.
+**Reload** explicitly replaces the API host through ConfigurationService.
+It leaves separate workers unchanged and rejects busy local media operations.
+Save or discard drafts first. Same-origin reload checks the active revision
+before refreshing the browser. A different origin needs explicit navigation;
+identity changes can require login. Failed reload preparation keeps the old
+host active. Reload commands never retry automatically.
 Startup checks all inputs again. Do not use `PreparedServer::load` as a dry run.
 Stop the API before manual JSON edits, or follow the
 [shared writer lock protocol](agent-operations.md#backend-configuration-writers).
@@ -174,7 +182,7 @@ The generated setup directory is private. A file created there inherits its
 restricted access. On Unix, set the credential file mode to `0600`.
 Never put these values into the service JSON, browser, URL or logs.
 
-Add `local_acquisition` to `service.local.json` and restart the API:
+Add `local_acquisition` to `service.local.json` and explicitly reload or restart the API:
 
 ```json
 {

@@ -101,7 +101,7 @@ folders, move media, replace existing roots or rebind legacy roots.
 
 The system output-settings API uses the existing immutable version history and rejects
 stale versions. Existing plans keep their saved settings. Backend JSON changes
-require a process restart; no browser command activates them.
+remain inactive until an explicit API-host reload or operator restart.
 
 `ConfigurationService` owns backend JSON loading, inspection, validation, secret
 merging, revisions, and persistence. Startup and API handlers use that service.
@@ -117,7 +117,7 @@ Normal authentication and development loopback/origin guards apply. Commands
 require the exact Origin and CSRF header. A host without a configuration service
 returns an explicit unavailable error.
 
-Saved JSON remains inactive until restart. Changed external JSON is unvalidated.
+Saved JSON remains inactive until reload or restart. Changed external JSON is unvalidated.
 An exact revision saved through the service is passively validated, but startup
 checks remain required. Validation can read local files, verify TLS, and query a
 current-schema database. It does not migrate SQLite, create or bind roots, contact
@@ -152,6 +152,44 @@ Acceptance must cover complete supported-field coverage, valid and invalid edits
 secret redaction and replacement, stale-edit rejection, failed-save recovery and
 restart-required status. Verify that read-only mode rejects direct write requests
 as well as disabling form edits, and cannot be disabled from the UI.
+
+System configuration uses a sidebar within the normal application shell:
+**Core application** contains General, Identity, TLS, and Storage/cache.
+**Media > Music** contains Providers, Acquisition, Output policy, and Library
+roots. Other media categories can be added later; no Movies page is implemented.
+The JSON storage format remains unchanged.
+
+Open each section directly to its saved settings form. Use the shared Component
+library and a compact reload notice only when saved backend changes need
+activation. Keep running values, revision identifiers, and optional validation
+under Advanced. Do not present a configuration-state dashboard as the main task.
+Use a section picker on narrow screens. Discarding one section must retain drafts
+in other sections.
+
+Typed section commands use `POST /api/system/configuration/sections/validate`
+and `/sections/save`. They submit only selected changed sections. The service
+merges them with saved JSON under the existing writer lock and validates the
+complete candidate. Batched changes are atomic. A stale whole-file revision
+still fails, even when another writer changed a different section.
+Successful section saves retain drafts in other sections. Navigation keeps
+backend and Music policy drafts. Music output saves retain their existing
+immediate effect on new plans; existing plans retain frozen policy versions.
+Library registration and scanning remain separate explicit operations.
+
+**Refresh saved values** is passive. **Reload** sends a revision-bound command
+through ConfigurationService to replace the API host with saved backend JSON.
+It does not restart separate workers. The service reports pending, active, or
+failed reload state, separately from save/validation state. The runtime prepares
+the replacement host before listener handover and keeps the old listener bound
+for recovery. Preparation failure leaves the old host active. Busy host-owned
+media operations reject reload instead of interrupting effects or receipts.
+Reload retains the guarded TLS listener and command/authentication checks.
+
+Reload is disabled while configuration drafts remain. A same-origin browser
+checks the active revision with bounded reads before refreshing the application.
+A different origin requires an explicit navigation and can require login.
+A dropped response or failed confirmation never triggers an automatic activation
+retry. Operator recovery remains required if listener restoration itself fails.
 
 ## Future Conversational Workflow
 

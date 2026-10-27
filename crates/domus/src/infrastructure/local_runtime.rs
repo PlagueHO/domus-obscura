@@ -234,6 +234,10 @@ impl LocalRuntime {
         Ok(permit)
     }
 
+    pub(crate) fn reload_permit(&self) -> Result<OwnedSemaphorePermit> {
+        self.permit()
+    }
+
     /// Reject new local effects immediately. Never interrupt an active receive,
     /// publication copy or its durable result persistence.
     pub(crate) fn stop_accepting(&self) {

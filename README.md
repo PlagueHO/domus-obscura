@@ -1275,17 +1275,17 @@ Example development configuration:
 
 `system_settings_read_only` defaults to `true`. Set it to `false` only when the
 administrator wants the browser to update versioned shared-library output settings. The API also
-enforces this setting on every save. This does not enable editing of startup
-paths, credentials, TLS or providers.
+enforces this setting on every save. Backend paths, TLS references, and provider
+selections use the separate configuration service and its validation rules.
 `GET /api/system/settings-policy` reports this policy. A `PUT /api/settings`
 request returns `403 Forbidden` while read-only mode is active.
 The System settings page still shows saved shared-library settings in read-only mode.
 When editing is enabled, a failed save keeps the draft and never retries.
-If another writer changes the saved version, use **Reload system settings** to load
+If another writer changes the saved version, use **Refresh Music policy and roots** to load
 that version before saving again. Reloading a newer version replaces the draft.
 Setup read failures are reported separately from missing configuration.
 
-**Backend configuration** on the same System page shows active startup settings
+The **Core application** and **Media > Music** sections on the System page show active startup settings
 and saved JSON through the protected `GET /api/system/configuration` endpoint.
 It covers the environment, paths, listener, provider selections, cache limits,
 TLS references, Entra configured states and optional development acquisition.
@@ -1306,19 +1306,35 @@ Removing an optional hidden value requires **Remove saved value**.
 Disabling an optional group removes its configuration, not its files.
 The form never accepts credential contents or edits `system_settings_read_only`.
 
-**Validate backend configuration** runs passive checks through
-`POST /api/system/configuration/validate`. **Save backend configuration** repeats
-those checks and uses `POST /api/system/configuration/save`. Both use the existing
+**Validate section** runs passive checks through
+`POST /api/system/configuration/sections/validate`. **Save section** repeats
+those checks and uses `POST /api/system/configuration/sections/save`. Both use the existing
 authentication, loopback, exact Origin, and CSRF guards. Validation reads local
 inputs and checks TLS without contacting providers. It uses a current-schema
 read-only database connection; it cannot migrate SQLite, create or bind roots,
 activate TLS, or start work. New cache/staging roots need separate operator setup.
 
-All backend JSON edits are restart-only. Successful saves distinguish the
+Backend JSON saves do not activate changes. Successful saves distinguish the
 passively validated saved revision from the active startup snapshot.
 Startup must recheck the files; passive validation is not activation.
 The Configuration service owns every backend JSON read and write, including
 startup loading, redaction, revision checks, secret merging, and atomic saves.
+
+The sidebar separates General, Identity, TLS, and Storage/cache from Music
+Providers, Acquisition, Output policy, and Library roots. A section save sends
+only that section. **Save changed backend sections** saves related changes
+together. Unchanged saved sections and other browser drafts are preserved.
+The existing whole-draft validate/save routes remain supported.
+
+**Refresh saved values** reads saved JSON without activation. **Reload** calls
+`POST /api/system/configuration/reload` with the expected saved revision.
+It prepares a replacement API host and hands over the guarded HTTPS listener.
+Preparation failures retain the previous host and report a failed reload.
+Busy local media operations reject reload; separate workers are not restarted.
+Unsaved drafts block the button. Same-origin activation is confirmed against
+the active revision before the browser refreshes. Changed origins require an
+explicit link and can require login. Commands never retry automatically.
+Music output-policy saves still apply to new plans immediately.
 
 Saves reject stale revisions and use a shared native file lock. Failed commands
 retain the draft and never retry. After a conflict or uncertain result, reload

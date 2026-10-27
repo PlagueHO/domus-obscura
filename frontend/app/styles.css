@@ -149,6 +149,203 @@ small {
   color: var(--coral);
   margin-top: 6px;
 }
+
+.configuration-layout {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.configuration-navigation {
+  padding: 0 12px 16px;
+  background: var(--bg);
+  border-right: 1px solid var(--line);
+}
+.configuration-group + .configuration-group {
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.configuration-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 56px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.configuration-group-label svg {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+}
+.configuration-subgroup {
+  padding: 0 12px 4px 36px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.configuration-navigation button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px 8px 36px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+}
+.configuration-navigation button:hover {
+  background: rgb(185 140 255 / 8%);
+}
+.configuration-navigation button[aria-current="page"] {
+  background: rgb(185 140 255 / 13%);
+  color: var(--accent);
+}
+.configuration-navigation small {
+  color: var(--accent);
+  font-size: 12px;
+}
+.configuration-content {
+  min-width: 0;
+}
+.configuration-section.design-card {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.configuration-section .design-card-body {
+  padding: 20px 24px 24px;
+}
+.configuration-section .design-card-header .icon-button {
+  width: 36px;
+  min-height: 36px;
+}
+.configuration-section .design-card-body > .muted:first-child {
+  margin: 0 0 24px;
+}
+.configuration-messages {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.configuration-messages:empty {
+  display: none;
+}
+.configuration-messages p {
+  margin: 0;
+  color: var(--muted);
+}
+.configuration-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding: 16px 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.configuration-notice p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+.configuration-details {
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.configuration-details summary {
+  cursor: pointer;
+  padding: 4px 0;
+}
+.configuration-details[open] summary {
+  margin-bottom: 16px;
+}
+.configuration-details code {
+  overflow-wrap: anywhere;
+}
+.configuration-form > fieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px 24px;
+  border: 0;
+  padding: 0;
+  margin: 24px 0;
+}
+.configuration-form > fieldset > legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.configuration-form label,
+.configuration-form .configuration-secret {
+  margin: 0;
+}
+.configuration-form small {
+  font-size: 13px;
+  margin-top: 6px;
+}
+.configuration-section input,
+.configuration-section select {
+  font-weight: 400;
+}
+.configuration-form fieldset > p,
+.configuration-form fieldset > small,
+.configuration-form fieldset > .check {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.configuration-secret > label + label {
+  margin-top: 16px;
+}
+.configuration-form-actions {
+  border-top: 1px solid var(--line);
+  padding-top: 20px;
+  margin: 24px 0 0;
+}
+.configuration-section-picker {
+  display: none;
+}
+.configuration-property {
+  display: contents;
+}
+[hidden] {
+  display: none !important;
+}
+@media (max-width: 760px) {
+  .configuration-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .configuration-navigation {
+    display: none;
+  }
+  .configuration-section-picker {
+    display: block;
+    margin: 0;
+    padding: 12px 16px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--line);
+  }
+  .configuration-form > fieldset {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .configuration-secret {
   margin-block: 18px;
 }

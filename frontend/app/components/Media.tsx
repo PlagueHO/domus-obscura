@@ -20,6 +20,7 @@ export type IconName =
   | "bell"
   | "account"
   | "close"
+  | "refresh"
   | "agent";
 
 export function Icon({ name }: { name: IconName }) {
@@ -36,6 +37,7 @@ export function Icon({ name }: { name: IconName }) {
     bell: "M5 17h14l-2-3V9a5 5 0 0 0-10 0v5l-2 3m5 3h4",
     account: "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0M4 21v-3c0-5 16-5 16 0v3",
     close: "m6 6 12 12M6 18 18 6",
+    refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
     agent: "m9 3 2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6m10 11 1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3",
   };
   return (

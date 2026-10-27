@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{File, TryLockError};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const MAXIMUM: u64 = 16384;
 
@@ -101,6 +101,93 @@ pub struct BackendConfigurationState {
     pub restart_required: bool,
     /// False means this exact revision passed passive validation, not activation.
     pub saved_requires_validation: bool,
+    pub changed_sections: Vec<ConfigurationSection>,
+    pub reload: ConfigurationReloadState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationSection {
+    General,
+    Identity,
+    Tls,
+    Storage,
+    MusicProviders,
+    MusicAcquisition,
+}
+
+/// Each variant owns a complete section. Omitted sections are never replaced.
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(tag = "section", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfigurationSectionUpdate {
+    General {
+        environment: String,
+        listen: String,
+        origin: String,
+        browser_assets: Option<String>,
+    },
+    Identity {
+        tenant_id: ConfigurationReplacement,
+        object_id: ConfigurationReplacement,
+        client_id: ConfigurationReplacement,
+        client_secret_file: ConfigurationReplacement,
+    },
+    Tls {
+        certificate_file: String,
+        private_key_file: ConfigurationReplacement,
+    },
+    Storage {
+        database: String,
+        cache: Option<BackendCacheConfiguration>,
+    },
+    MusicProviders {
+        services: ServiceConfiguration,
+    },
+    MusicAcquisition {
+        local_acquisition: Option<BackendLocalAcquisitionDraft>,
+    },
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationSectionCommand {
+    pub expected_revision: String,
+    pub sections: Vec<ConfigurationSectionUpdate>,
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationReloadCommand {
+    pub expected_revision: String,
+}
+
+#[derive(Clone, Default, Serialize, ts_rs::TS)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ConfigurationReloadState {
+    #[default]
+    Idle,
+    Pending {
+        revision: String,
+        origin: String,
+    },
+    Active {
+        revision: String,
+    },
+    Failed {
+        revision: String,
+        message: String,
+    },
+}
+
+#[derive(Default)]
+struct ReloadControl {
+    sender: Option<tokio::sync::mpsc::Sender<String>>,
+    state: ConfigurationReloadState,
+}
+
+enum ConfigurationUpdate {
+    Full(Box<BackendConfigurationDraft>),
+    Sections(Vec<ConfigurationSectionUpdate>),
 }
 
 #[derive(Default, Deserialize, ts_rs::TS)]
@@ -171,10 +258,12 @@ pub struct BackendConfigurationResult {
 pub(crate) struct ConfigurationService {
     path: PathBuf,
     parent: NativeRoot,
-    active: Configuration,
+    pub(super) active: Configuration,
+    active_document: Configuration,
     active_revision: String,
     validated_revision: Mutex<Option<String>>,
-    writer: Mutex<Option<File>>,
+    writer: Arc<Mutex<Option<File>>>,
+    reload: Arc<Mutex<ReloadControl>>,
     #[cfg(test)]
     failure: Mutex<Option<SaveFailure>>,
 }
@@ -190,6 +279,56 @@ enum SaveFailure {
 }
 
 impl ConfigurationService {
+    pub(crate) fn output_settings(
+        store: &Store,
+    ) -> Result<Option<crate::infrastructure::store::SettingsVersion>> {
+        store.settings()
+    }
+
+    pub(crate) fn save_output_settings(
+        store: &mut Store,
+        expected: Option<i64>,
+        settings: &crate::domain::OutputSettings,
+    ) -> Result<i64> {
+        store.save_settings(expected, settings)
+    }
+
+    pub(crate) fn library_roots(
+        store: &Store,
+        page: crate::domain::Page,
+    ) -> Result<Vec<crate::infrastructure::store::Location>> {
+        store.locations(page)
+    }
+
+    pub(crate) fn register_library_root(
+        store: &mut Store,
+        root: &str,
+        kind: &str,
+    ) -> Result<crate::infrastructure::store::Location> {
+        if root.len() > 4096 || !Path::new(root).is_absolute() {
+            return Err(Error::InvalidInput(
+                "library root must be an absolute server path of at most 4096 bytes".into(),
+            ));
+        }
+        let id = crate::application::add_location(store, Path::new(root), kind)?;
+        store.location(id)
+    }
+
+    pub(crate) fn require_editable(&self) -> Result<()> {
+        let control = self
+            .reload
+            .lock()
+            .map_err(|_| Error::Internal("configuration reload lock failed"))?;
+        if matches!(control.state, ConfigurationReloadState::Pending { .. }) {
+            return Err(Error::Busy("configuration reload is pending"));
+        }
+        let (_, bytes) = self.read_file(&self.directory()?)?;
+        if self.active.system_settings_read_only || Self::parse(&bytes)?.system_settings_read_only {
+            return Err(Error::Conflict("system settings are read-only".into()));
+        }
+        Ok(())
+    }
+
     pub(super) fn load(path: &Path) -> Result<(Self, Configuration, String)> {
         valid_reference(path)?;
         let bytes = crate::infrastructure::local_file::read_local(path, MAXIMUM, false)?;
@@ -217,9 +356,11 @@ impl ConfigurationService {
             path: path.to_owned(),
             parent,
             active,
+            active_document: Self::parse(bytes)?,
             active_revision: digest(bytes),
             validated_revision: Mutex::new(None),
-            writer: Mutex::new(None),
+            writer: Arc::new(Mutex::new(None)),
+            reload: Arc::new(Mutex::new(ReloadControl::default())),
             #[cfg(test)]
             failure: Mutex::new(None),
         })
@@ -279,6 +420,13 @@ impl ConfigurationService {
             saved_requires_validation: revision != self.active_revision
                 && validated.as_ref() != Some(&revision),
             saved_revision: revision,
+            changed_sections: Self::changed_sections(&self.active_document, &saved)?,
+            reload: self
+                .reload
+                .lock()
+                .map_err(|_| Error::Internal("configuration reload lock failed"))?
+                .state
+                .clone(),
         })
     }
 
@@ -287,15 +435,36 @@ impl ConfigurationService {
         &self,
         command: BackendConfigurationCommand,
     ) -> Result<BackendConfigurationResult> {
+        self.validate_update(
+            command.expected_revision,
+            ConfigurationUpdate::Full(Box::new(command.draft)),
+        )
+    }
+
+    pub(crate) fn validate_sections(
+        &self,
+        command: ConfigurationSectionCommand,
+    ) -> Result<BackendConfigurationResult> {
+        self.validate_update(
+            command.expected_revision,
+            ConfigurationUpdate::Sections(command.sections),
+        )
+    }
+
+    fn validate_update(
+        &self,
+        expected: String,
+        update: ConfigurationUpdate,
+    ) -> Result<BackendConfigurationResult> {
         let (_, bytes) = self.read_file(&self.directory()?)?;
-        self.require_revision(&command.expected_revision, &bytes)?;
+        self.require_revision(&expected, &bytes)?;
         let errors = self
-            .proposed(command.draft, &bytes)
+            .proposed_update(update, &bytes)
             .err()
             .into_iter()
             .collect();
         let (_, current) = self.read_file(&self.directory()?)?;
-        self.require_revision(&command.expected_revision, &current)?;
+        self.require_revision(&expected, &current)?;
         Ok(BackendConfigurationResult {
             errors,
             state: None,
@@ -306,6 +475,34 @@ impl ConfigurationService {
         &self,
         command: BackendConfigurationCommand,
     ) -> Result<BackendConfigurationResult> {
+        self.save_update(
+            command.expected_revision,
+            ConfigurationUpdate::Full(Box::new(command.draft)),
+        )
+    }
+
+    pub(crate) fn save_sections(
+        &self,
+        command: ConfigurationSectionCommand,
+    ) -> Result<BackendConfigurationResult> {
+        self.save_update(
+            command.expected_revision,
+            ConfigurationUpdate::Sections(command.sections),
+        )
+    }
+
+    fn save_update(
+        &self,
+        expected: String,
+        update: ConfigurationUpdate,
+    ) -> Result<BackendConfigurationResult> {
+        let reload = self
+            .reload
+            .lock()
+            .map_err(|_| Error::Internal("configuration reload lock failed"))?;
+        if matches!(reload.state, ConfigurationReloadState::Pending { .. }) {
+            return Err(Error::Busy("configuration reload is pending"));
+        }
         if self.active.system_settings_read_only {
             return Err(Error::Conflict(
                 "system settings are read-only in active configuration".into(),
@@ -355,13 +552,13 @@ impl ConfigurationService {
         }
         let _lock = WriterLock(marker);
         let (original, bytes) = self.read_file(&self.directory()?)?;
-        self.require_revision(&command.expected_revision, &bytes)?;
+        self.require_revision(&expected, &bytes)?;
         if Self::parse(&bytes)?.system_settings_read_only {
             return Err(Error::Conflict(
                 "system settings are read-only in saved configuration".into(),
             ));
         }
-        let proposed = match self.proposed(command.draft, &bytes) {
+        let proposed = match self.proposed_update(update, &bytes) {
             Ok(proposed) => proposed,
             Err(error) => {
                 return Ok(BackendConfigurationResult {
@@ -392,7 +589,7 @@ impl ConfigurationService {
             #[cfg(test)]
             self.fail_save(SaveFailure::CrashAfterSync)?;
             let (current, current_bytes) = self.read_file(&self.directory()?)?;
-            self.require_revision(&command.expected_revision, &current_bytes)?;
+            self.require_revision(&expected, &current_bytes)?;
             if native_file_identity(&current)? != native_file_identity(&original)? {
                 return Err(Error::Conflict(
                     "configuration target identity changed".into(),
@@ -438,6 +635,7 @@ impl ConfigurationService {
             "backend configuration saved; changed fields: {}",
             changed.join(", ")
         );
+        drop(reload);
         Ok(BackendConfigurationResult {
             errors: Vec::new(),
             state: Some(self.state(&output)?),
@@ -467,6 +665,170 @@ impl ConfigurationService {
             ));
         }
         Ok(())
+    }
+
+    pub(super) fn attach_reload(&self, sender: tokio::sync::mpsc::Sender<String>) -> Result<()> {
+        self.reload
+            .lock()
+            .map_err(|_| Error::Internal("configuration reload lock failed"))?
+            .sender = Some(sender);
+        Ok(())
+    }
+
+    pub(crate) fn request_reload(
+        &self,
+        command: ConfigurationReloadCommand,
+    ) -> Result<ConfigurationReloadState> {
+        let mut control = self
+            .reload
+            .lock()
+            .map_err(|_| Error::Internal("configuration reload lock failed"))?;
+        if matches!(control.state, ConfigurationReloadState::Pending { .. }) {
+            return Err(Error::Busy("configuration reload is already pending"));
+        }
+        let (_, bytes) = self.read_file(&self.directory()?)?;
+        self.require_revision(&command.expected_revision, &bytes)?;
+        let saved = Self::parse(&bytes)?;
+        if self.active.system_settings_read_only || saved.system_settings_read_only {
+            return Err(Error::Conflict("system settings are read-only".into()));
+        }
+        self.proposed(Self::draft_from(summary(&saved)), &bytes)
+            .map_err(configuration_error)?;
+        let sender = control.sender.as_ref().ok_or(Error::Busy(
+            "configuration reload is not attached to this host",
+        ))?;
+        sender
+            .try_send(command.expected_revision.clone())
+            .map_err(|_| Error::Busy("configuration reload host is unavailable or busy"))?;
+        control.state = ConfigurationReloadState::Pending {
+            revision: command.expected_revision,
+            origin: saved.origin,
+        };
+        Ok(control.state.clone())
+    }
+
+    /// A new generation has its own immutable active snapshot and shares only
+    /// the lifecycle gate and stable writer identity with the previous host.
+    pub(super) fn reload_candidate(&self, revision: &str) -> Result<Self> {
+        let (_, bytes) = self.read_file(&self.directory()?)?;
+        self.require_revision(revision, &bytes)?;
+        let active = self
+            .proposed(Self::draft_from(summary(&Self::parse(&bytes)?)), &bytes)
+            .map_err(configuration_error)?;
+        let mut candidate = Self::new(&self.path, &bytes, active)?;
+        if candidate.parent != self.parent {
+            return Err(Error::Conflict(
+                "configuration parent identity changed".into(),
+            ));
+        }
+        candidate.reload = self.reload.clone();
+        candidate.writer = self.writer.clone();
+        Ok(candidate)
+    }
+
+    pub(super) fn verify_reload(&self, revision: &str) -> Result<()> {
+        let (_, bytes) = self.read_file(&self.directory()?)?;
+        self.require_revision(revision, &bytes)?;
+        if Self::parse(&bytes)?.system_settings_read_only {
+            return Err(Error::Conflict("saved configuration is read-only".into()));
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_reload(&self, revision: String, result: Result<()>) -> Result<()> {
+        self.reload.lock().map_err(|_| Error::Internal("configuration reload lock failed"))?.state = match result {
+            Ok(()) => ConfigurationReloadState::Active { revision },
+            Err(_) => ConfigurationReloadState::Failed { revision, message: "API reload failed. The previous host remains active. Review server diagnostics and saved configuration before retrying.".into() },
+        };
+        Ok(())
+    }
+
+    fn proposed_update(
+        &self,
+        update: ConfigurationUpdate,
+        bytes: &[u8],
+    ) -> std::result::Result<Configuration, BackendConfigurationIssue> {
+        let mut retained_origin = None;
+        let draft = match update {
+            ConfigurationUpdate::Full(draft) => *draft,
+            ConfigurationUpdate::Sections(sections) => {
+                if sections.is_empty() || sections.len() > 6 {
+                    return Err(issue(
+                        "sections",
+                        "Select one through six changed sections.",
+                    ));
+                }
+                let saved = Self::parse(bytes)
+                    .map_err(|_| issue("configuration", "Saved JSON is invalid."))?;
+                if !sections
+                    .iter()
+                    .any(|section| matches!(section, ConfigurationSectionUpdate::General { .. }))
+                {
+                    retained_origin = Some(saved.origin.clone());
+                }
+                let mut draft = Self::draft_from(summary(&saved));
+                let mut seen = Vec::new();
+                for update in sections {
+                    let section = match update {
+                        ConfigurationSectionUpdate::General {
+                            environment,
+                            listen,
+                            origin,
+                            browser_assets,
+                        } => {
+                            draft.environment = environment;
+                            draft.listen = listen;
+                            draft.origin = origin;
+                            draft.browser_assets = browser_assets;
+                            ConfigurationSection::General
+                        }
+                        ConfigurationSectionUpdate::Identity {
+                            tenant_id,
+                            object_id,
+                            client_id,
+                            client_secret_file,
+                        } => {
+                            draft.tenant_id = tenant_id;
+                            draft.object_id = object_id;
+                            draft.client_id = client_id;
+                            draft.client_secret_file = client_secret_file;
+                            ConfigurationSection::Identity
+                        }
+                        ConfigurationSectionUpdate::Tls {
+                            certificate_file,
+                            private_key_file,
+                        } => {
+                            draft.certificate_file = certificate_file;
+                            draft.private_key_file = private_key_file;
+                            ConfigurationSection::Tls
+                        }
+                        ConfigurationSectionUpdate::Storage { database, cache } => {
+                            draft.database = database;
+                            draft.cache = cache;
+                            ConfigurationSection::Storage
+                        }
+                        ConfigurationSectionUpdate::MusicProviders { services } => {
+                            draft.services = services;
+                            ConfigurationSection::MusicProviders
+                        }
+                        ConfigurationSectionUpdate::MusicAcquisition { local_acquisition } => {
+                            draft.local_acquisition = local_acquisition;
+                            ConfigurationSection::MusicAcquisition
+                        }
+                    };
+                    if seen.contains(&section) {
+                        return Err(issue("sections", "Each section can appear only once."));
+                    }
+                    seen.push(section);
+                }
+                draft
+            }
+        };
+        let mut proposed = self.proposed(draft, bytes)?;
+        if let Some(origin) = retained_origin {
+            proposed.origin = origin;
+        }
+        Ok(proposed)
     }
 
     fn proposed(
@@ -556,6 +918,70 @@ impl ConfigurationService {
             cache.inspect(&store, &self.protected(&saved), true).map_err(|_| issue("cache", "Cache limits, permissions, overlap or native binding are invalid. Set up the cache separately."))?;
         }
         Ok(saved)
+    }
+
+    fn draft_from(value: BackendConfiguration) -> BackendConfigurationDraft {
+        BackendConfigurationDraft {
+            environment: value.environment,
+            services: value.services,
+            cache: value.cache,
+            database: value.database,
+            listen: value.listen,
+            origin: value.origin,
+            tenant_id: ConfigurationReplacement::Keep,
+            object_id: ConfigurationReplacement::Keep,
+            client_id: ConfigurationReplacement::Keep,
+            client_secret_file: ConfigurationReplacement::Keep,
+            certificate_file: value.certificate_file,
+            private_key_file: ConfigurationReplacement::Keep,
+            browser_assets: value.browser_assets,
+            local_acquisition: value
+                .local_acquisition
+                .map(|local| BackendLocalAcquisitionDraft {
+                    staging_root: local.staging_root,
+                    credentials_file: ConfigurationReplacement::Keep,
+                    server: local.server,
+                    acknowledge_plaintext_login: local.acknowledge_plaintext_login,
+                }),
+        }
+    }
+
+    fn changed_sections(
+        active: &Configuration,
+        saved: &Configuration,
+    ) -> Result<Vec<ConfigurationSection>> {
+        let active = serde_json::to_value(active)
+            .map_err(|_| Error::Internal("configuration comparison failed"))?;
+        let saved = serde_json::to_value(saved)
+            .map_err(|_| Error::Internal("configuration comparison failed"))?;
+        Ok([
+            (
+                ConfigurationSection::General,
+                &["environment", "listen", "origin", "browser_assets"][..],
+            ),
+            (
+                ConfigurationSection::Identity,
+                &["tenant_id", "object_id", "client_id", "client_secret_file"][..],
+            ),
+            (
+                ConfigurationSection::Tls,
+                &["certificate_file", "private_key_file"][..],
+            ),
+            (ConfigurationSection::Storage, &["database", "cache"][..]),
+            (ConfigurationSection::MusicProviders, &["services"][..]),
+            (
+                ConfigurationSection::MusicAcquisition,
+                &["local_acquisition"][..],
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(section, fields)| {
+            fields
+                .iter()
+                .any(|field| active[*field] != saved[*field])
+                .then_some(section)
+        })
+        .collect())
     }
 
     fn normalize(
