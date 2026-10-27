@@ -105,7 +105,7 @@ impl SoulseekSession {
             .ok_or_else(|| Error::Conflict("Soulseek server session is closed".into()))?;
         let mut body = token.to_le_bytes().to_vec();
         string(&mut body, query);
-        send(&mut server, 26, &body)?;
+        server.send(26, &body)?;
         let mut report = SearchReport {
             query: query.into(),
             peers: Vec::new(),
@@ -123,32 +123,22 @@ impl SoulseekSession {
             if message + 1 == MAX_SEARCH_MESSAGES {
                 report.limit_reached = true;
             }
-            // An idle search is normal. Do not discard a partially read frame:
-            // only a timeout before its first byte can end this wait.
-            server.set_read_timeout(Some(Duration::from_millis(500)))?;
-            match server.peek(&mut [0; 1]) {
-                Ok(0) => return Err(Error::Remote("Soulseek server closed during search")),
-                Ok(_) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-            }
-            let (code, body) = frame(&mut server, deadline)?;
-            if code == 41 {
-                return Err(Error::Remote(
-                    "Soulseek account signed in elsewhere; session closed",
-                ));
-            }
-            if code != 18 {
-                continue;
-            }
-            let (peer, connection_token) = search_request(&body)?;
+            let event = match server.receive(deadline, &mut || Ok(()), |event| {
+                matches!(event, Event::Server(ServerEvent::Connect { .. }))
+            }) {
+                Err(Error::Remote("Soulseek operation exceeded its time limit")) => break,
+                other => other?,
+            };
+            let Event::Server(ServerEvent::Connect {
+                username,
+                kind,
+                address,
+                token: connection_token,
+            }) = event
+            else {
+                return Err(protocol());
+            };
+            let peer = search_address(username, kind, address)?;
             if !seen.insert(peer.username.clone()) {
                 continue;
             }
@@ -157,7 +147,7 @@ impl SoulseekSession {
                 break;
             }
             let peer_deadline = deadline.min(Instant::now() + PEER_WINDOW);
-            match search_peer(&peer, connection_token, token, peer_deadline) {
+            match search_peer_on(&server, &peer, connection_token, token, peer_deadline) {
                 Ok(result) => report.peers.push(result),
                 Err(error) => report.issues.push(SearchIssue {
                     peer: peer.username,
@@ -169,6 +159,7 @@ impl SoulseekSession {
     }
 }
 
+#[cfg(test)]
 fn search_request(body: &[u8]) -> Result<(PeerAddress, u32)> {
     let mut fields = Fields(body);
     let name = fields.text(30)?;
@@ -199,6 +190,22 @@ fn search_request(body: &[u8]) -> Result<(PeerAddress, u32)> {
     ))
 }
 
+fn search_address(name: String, kind: String, address: SocketAddrV4) -> Result<PeerAddress> {
+    if kind != "P" {
+        return Err(protocol());
+    }
+    if !public_peer_ip(*address.ip()) || address.port() == 0 {
+        return Err(Error::Remote(
+            "Soulseek search peer is not a public unicast IPv4 destination",
+        ));
+    }
+    Ok(PeerAddress {
+        username: name,
+        address,
+    })
+}
+
+#[cfg(test)]
 fn search_peer(
     peer: &PeerAddress,
     connection_token: u32,
@@ -208,18 +215,48 @@ fn search_peer(
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .ok_or_else(protocol)?;
-    let mut stream = TcpStream::connect_timeout(&peer.address.into(), remaining)?;
-    stream.set_write_timeout(Some(
-        deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(protocol)?,
-    ))?;
-    send_init(&mut stream, 0, &connection_token.to_le_bytes())?;
-    let (code, body) = frame(&mut stream, deadline)?;
-    if code != 9 {
-        return Err(protocol());
+    let stream = TcpStream::connect_timeout(&peer.address.into(), remaining)?;
+    search_channel(
+        Channel::isolated_peer(stream)?,
+        peer,
+        connection_token,
+        token,
+        deadline,
+    )
+}
+
+fn search_peer_on(
+    server: &Channel,
+    peer: &PeerAddress,
+    connection_token: u32,
+    token: u32,
+    deadline: Instant,
+) -> Result<SearchPeer> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(protocol)?;
+    let stream = TcpStream::connect_timeout(&peer.address.into(), remaining)?;
+    search_channel(
+        server.peer(stream)?,
+        peer,
+        connection_token,
+        token,
+        deadline,
+    )
+}
+
+fn search_channel(
+    mut stream: Channel,
+    peer: &PeerAddress,
+    connection_token: u32,
+    token: u32,
+    deadline: Instant,
+) -> Result<SearchPeer> {
+    stream.init(0, &connection_token.to_le_bytes())?;
+    match stream.receive(deadline, &mut || Ok(()), |_| true)? {
+        Event::Peer(PeerEvent::Search(body)) => parse_response(&body, &peer.username, token),
+        _ => Err(protocol()),
     }
-    parse_response(&body, &peer.username, token)
 }
 
 #[cfg(test)]

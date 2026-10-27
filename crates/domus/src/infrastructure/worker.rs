@@ -522,6 +522,7 @@ pub struct PreparedWorker {
     claim: JobClaim,
     staging: StagingRoot,
     credentials: Credentials,
+    credentials_file: PathBuf,
     server: SocketAddrV4,
     peer: String,
     export_for_playback: bool,
@@ -689,17 +690,19 @@ impl PreparedWorker {
             return Err(Error::ArtworkRequired(decision.question_id));
         }
         let claimed = store
-            .claim_approved_plan(
+            .claim_acquisition_recovery(
                 configuration.job_id,
                 configuration.plan_version,
                 &format!("worker-once-{}", std::process::id()),
                 300,
             )?
             .ok_or_else(|| Error::Conflict("job is already owned by a live worker".into()))?;
-        store.job_work_boundary(&claimed.claim)?;
         let normalize_only = matches!(state.as_str(), "validating" | "normalizing");
+        if source.is_some() || normalize_only {
+            store.job_work_boundary(&claimed.claim)?;
+        }
         if source.is_none() && !normalize_only {
-            store.acquisition_files(&claimed.claim)?;
+            store.reconciliation_files(&claimed.claim)?;
         }
         let staging = StagingRoot::open(&mut store, &configuration.staging_root)?;
         if let Some((peer, files)) = source {
@@ -715,7 +718,7 @@ impl PreparedWorker {
         let files = if normalize_only {
             store.acquisition_preview(configuration.job_id, configuration.plan_version)?
         } else {
-            store.acquisition_files(&claimed.claim)?
+            store.reconciliation_files(&claimed.claim)?
         };
         let peer = files
             .first()
@@ -733,6 +736,7 @@ impl PreparedWorker {
             claim: claimed.claim,
             staging,
             credentials,
+            credentials_file: configuration.credentials_file,
             server: configuration.server,
             peer,
             export_for_playback: configuration.export_for_playback,
@@ -744,13 +748,40 @@ impl PreparedWorker {
         self.execute(false)
     }
 
-    fn execute(mut self, publish: bool) -> Result<WorkerOutcome> {
+    fn execute(self, publish: bool) -> Result<WorkerOutcome> {
+        self.execute_with_login(publish, &mut |server, username, password| {
+            let socket = TcpStream::connect_timeout(&server.into(), Duration::from_secs(10))
+                .map_err(Error::SoulseekTransport)?;
+            SoulseekSession::login(socket, username, password)
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_with_test_login(
+        self,
+        login: &mut impl FnMut(SocketAddrV4, &str, &str) -> Result<SoulseekSession>,
+    ) -> Result<WorkerOutcome> {
+        self.execute_with_login(false, login)
+    }
+
+    fn execute_with_login(
+        mut self,
+        publish: bool,
+        login: &mut impl FnMut(SocketAddrV4, &str, &str) -> Result<SoulseekSession>,
+    ) -> Result<WorkerOutcome> {
         self.store.renew_claim(&self.claim, 300)?;
+        if !self.normalize_only {
+            crate::application::reconcile_local_inputs(
+                &mut self.store,
+                &self.claim,
+                &self.staging,
+            )?;
+        }
         self.store.job_work_boundary(&self.claim)?;
         if !self.normalize_only
             && self
                 .store
-                .acquisition_files(&self.claim)?
+                .reconciliation_files(&self.claim)?
                 .iter()
                 .all(|file| file.state == "received")
         {
@@ -771,29 +802,61 @@ impl PreparedWorker {
                 &cover,
             )?
         } else {
-            self.store.acquisition_files(&self.claim)?;
+            self.store.reconciliation_files(&self.claim)?;
             self.store.job_work_boundary(&self.claim)?;
-            let socket = TcpStream::connect_timeout(&self.server.into(), Duration::from_secs(10))?;
-            let session = SoulseekSession::login(
-                socket,
-                &self.credentials.username,
-                &self.credentials.password,
-            )?;
-            // Do not keep the password through the album receive/normalization.
+            let account = self.credentials.username.clone();
             self.credentials.password.clear();
             drop(self.credentials);
-            self.store.renew_claim(&self.claim, 300)?;
-            let mut provider = super::services::SoulseekAcquisition {
-                session,
-                peer: self.peer,
-            };
-            crate::application::services::acquisition::acquire(
-                &self.services,
-                &mut provider,
-                &mut self.store,
-                &self.claim,
-                &self.staging,
-            )?
+            let mut budget = super::soulseek::ReconnectBudget::default();
+            loop {
+                self.store.renew_claim(&self.claim, 300)?;
+                crate::application::reconcile_local_inputs(
+                    &mut self.store,
+                    &self.claim,
+                    &self.staging,
+                )?;
+                self.store.job_work_boundary(&self.claim)?;
+                self.store.submission_approval(&self.claim)?;
+                let result = (|| {
+                    protect_files(&self.store, &[&self.credentials_file])?;
+                    let mut credentials = read_credentials(&self.credentials_file)?;
+                    if credentials.username != account {
+                        return Err(Error::Conflict(
+                            "Soulseek account changed during worker reconnect".into(),
+                        ));
+                    }
+                    let connected =
+                        login(self.server, &credentials.username, &credentials.password);
+                    credentials.password.clear();
+                    drop(credentials);
+                    let session = connected?;
+                    let mut provider = super::services::SoulseekAcquisition {
+                        session,
+                        peer: self.peer.clone(),
+                    };
+                    crate::application::services::acquisition::acquire(
+                        &self.services,
+                        &mut provider,
+                        &mut self.store,
+                        &self.claim,
+                        &self.staging,
+                    )
+                })();
+                match result {
+                    Ok(run) => break run,
+                    Err(error) => match budget.next(&error) {
+                        Some(delay) => std::thread::sleep(delay),
+                        None if budget.exhausted()
+                            && matches!(error, Error::SoulseekTransport(_)) =>
+                        {
+                            return Err(Error::Remote(
+                                "Soulseek reconnect budget exhausted; reconcile retained transfers before further work",
+                            ));
+                        }
+                        None => return Err(error),
+                    },
+                }
+            }
         };
         let playback_folder = if self.export_for_playback {
             Some(export_playback_album(

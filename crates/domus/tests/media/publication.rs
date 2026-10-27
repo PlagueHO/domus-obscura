@@ -786,11 +786,11 @@ fn schema_fifteen_upgrade_preserves_completed_normalization_and_approval() -> Te
         [run],
         |row| row.get(0),
     )?;
-    raw.execute_batch("DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; PRAGMA user_version=15; UPDATE jobs SET lease_until=0;")?;
+    raw.execute_batch("DROP TABLE transfer_evidence; DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; PRAGMA user_version=15; UPDATE jobs SET lease_until=0;")?;
     fixture.store = Store::open(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        21
+        22
     );
     assert_eq!(
         raw.query_row(

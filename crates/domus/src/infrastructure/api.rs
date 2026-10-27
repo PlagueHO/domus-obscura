@@ -113,6 +113,9 @@ impl From<Error> for ApiError {
                 eprintln!("{message}");
                 Self::new(StatusCode::INTERNAL_SERVER_ERROR, "server operation failed")
             }
+            Error::SoulseekTransport(_) => {
+                Self::new(StatusCode::BAD_GATEWAY, "Soulseek connection failed")
+            }
             Error::Database(_) | Error::Io(_) | Error::Json(_) => {
                 eprintln!("API storage operation failed");
                 Self::new(

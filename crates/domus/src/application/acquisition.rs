@@ -1,7 +1,7 @@
 use crate::domain::JobState;
-use crate::infrastructure::soulseek::PeerControl;
+use crate::infrastructure::soulseek::{PeerControl, QueueObservation};
 use crate::infrastructure::staging::{ReceivedInput, StagingRoot};
-use crate::infrastructure::store::{JobClaim, Store};
+use crate::infrastructure::store::{JobClaim, Store, TransferObservation};
 use crate::{Error, Result};
 use std::cell::Cell;
 use std::io::{self, Read, Write};
@@ -22,8 +22,8 @@ pub fn acquire_album(
 ) -> Result<i64> {
     staging.check_store(store)?;
     store.renew_claim(claim, 300)?;
-    store.job_work_boundary(claim)?;
-    let files = store.acquisition_files(claim)?;
+    reconcile_local_inputs(store, claim, staging)?;
+    let files = store.reconciliation_files(claim)?;
     let first = files
         .first()
         .ok_or(Error::Internal("selected source is empty"))?;
@@ -39,6 +39,13 @@ pub fn acquire_album(
             staging.received(file)?;
         }
     }
+    // Reconcile all uncertain work before submitting any remaining planned file.
+    for file in &files {
+        if matches!(file.state.as_str(), "submitting" | "active") {
+            recover_transfer(store, claim, staging, file, peer)?;
+        }
+    }
+    let files = store.acquisition_files(claim)?;
     for file in files {
         store.renew_claim(claim, 300)?;
         store.job_work_boundary(claim)?;
@@ -67,18 +74,159 @@ pub fn negotiate_transfer(
             "peer connection differs from the selected source".into(),
         ));
     }
+    let binding = peer.binding()?;
     store.start_transfer(claim, transfer_id)?;
-    let token = peer.queue_upload(
+    store.observe_transfer(claim, transfer_id, binding, TransferObservation::Submitted)?;
+    let renewed = Cell::new(Instant::now());
+    let offered = peer.wait_upload(
         &transfer.remote_path,
         transfer.expected_bytes as u64,
-        || {
+        true,
+        |observation| {
+            if renewed.get().elapsed() >= Duration::from_secs(30) {
+                store.renew_claim(claim, 300)?;
+                renewed.set(Instant::now());
+            }
             store.submitting_transfer(claim, transfer_id)?;
+            store.require_job_running(claim.job(), claim.plan_version())?;
+            record_queue_observation(store, claim, transfer_id, binding, observation)?;
             Ok(())
         },
-    )?;
+    );
+    let token = match offered {
+        Ok(token) => token,
+        Err(error) => {
+            store.observe_transfer(
+                claim,
+                transfer_id,
+                binding,
+                TransferObservation::Interrupted,
+            )?;
+            return Err(error);
+        }
+    };
     store.accept_transfer(claim, transfer_id, token)?;
     store.active_transfer(claim, transfer_id)?;
+    store.submission_approval(claim)?;
     peer.accept_upload(token)?;
+    Ok(())
+}
+
+fn record_queue_observation(
+    store: &mut Store,
+    claim: &JobClaim,
+    file: i64,
+    binding: (u64, u64),
+    observation: Option<QueueObservation>,
+) -> Result<()> {
+    if let Some(observation) = observation {
+        let observation = match observation {
+            QueueObservation::Position(place) => TransferObservation::Queued(place),
+            QueueObservation::Offer(token) => TransferObservation::Offered(token),
+            QueueObservation::Denied => TransferObservation::Denied,
+        };
+        store.observe_transfer(claim, file, binding, observation)?;
+    }
+    Ok(())
+}
+
+/// Recover a sealed stream whose database commit was interrupted. Verify the
+/// whole source before new effects. Missing or partial files never become input.
+pub(crate) fn reconcile_local_inputs(
+    store: &mut Store,
+    claim: &JobClaim,
+    staging: &StagingRoot,
+) -> Result<()> {
+    staging.check_store(store)?;
+    let files = store.reconciliation_files(claim)?;
+    for file in files {
+        store.renew_claim(claim, 300)?;
+        let renewed = Cell::new(Instant::now());
+        let input = staging.retained_input(&file, &|| {
+            store
+                .check_transfer_owner(claim)
+                .map_err(io::Error::other)?;
+            if renewed.get().elapsed() >= Duration::from_secs(30) {
+                store.renew_claim(claim, 300).map_err(io::Error::other)?;
+                renewed.set(Instant::now());
+            }
+            Ok(())
+        })?;
+        match (file.state.as_str(), input) {
+            ("active", Some(input)) => {
+                store.observe_transfer(claim, file.id, (0, 0), TransferObservation::Sealed)?;
+                store.receive_transfer(
+                    claim,
+                    file.id,
+                    input.byte_length() as i64,
+                    input.sha256(),
+                )?;
+            }
+            ("active", None) if file.received_bytes > 0 => {
+                return Err(Error::Conflict(
+                    "interrupted transfer has byte progress but no sealed input; operator review required".into(),
+                ));
+            }
+            ("received", Some(_)) | ("planned" | "submitting" | "active", None) => {}
+            _ => {
+                return Err(Error::Conflict(
+                    "transfer journal and retained input disagree; operator review required".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn recover_transfer(
+    store: &mut Store,
+    claim: &JobClaim,
+    staging: &StagingRoot,
+    transfer: &crate::infrastructure::store::TransferFile,
+    peer: &mut PeerControl<'_>,
+) -> Result<()> {
+    if transfer.peer != peer.username() {
+        return Err(Error::Conflict(
+            "recovery peer differs from the frozen source".into(),
+        ));
+    }
+    if staging.retained_input(transfer, &|| Ok(()))?.is_some() {
+        return Err(Error::Conflict(
+            "reconcile the sealed input before remote recovery".into(),
+        ));
+    }
+    // This is a new wire effect, unlike completing a sealed local receipt.
+    store.job_work_boundary(claim)?;
+    store.submission_approval(claim)?;
+    let binding = peer.binding()?;
+    let renewed = Cell::new(Instant::now());
+    let token = peer.wait_upload(
+        &transfer.remote_path,
+        transfer.expected_bytes as u64,
+        false,
+        |observation| {
+            if renewed.get().elapsed() >= Duration::from_secs(30) {
+                store.renew_claim(claim, 300)?;
+                renewed.set(Instant::now());
+            }
+            store.check_transfer_owner(claim)?;
+            store.submission_approval(claim)?;
+            record_queue_observation(store, claim, transfer.id, binding, observation)
+        },
+    )?;
+    if transfer.state == "active" {
+        if transfer.remote_token != Some(token) {
+            return Err(Error::Conflict(
+                "recovery offer changed the accepted transfer token".into(),
+            ));
+        }
+    } else {
+        store.accept_transfer(claim, transfer.id, token)?;
+    }
+    store.active_transfer(claim, transfer.id)?;
+    store.submission_approval(claim)?;
+    peer.accept_upload(token)?;
+    receive_accepted(store, claim, staging, transfer.id, peer)?;
     Ok(())
 }
 
@@ -93,22 +241,62 @@ pub fn acquire_transfer(
     peer: &mut PeerControl<'_>,
 ) -> Result<ReceivedInput> {
     staging.check_store(store)?;
+    let planned = store.planned_transfer(claim, transfer_id)?;
+    if staging.retained_input(&planned, &|| Ok(()))?.is_some() {
+        return Err(Error::Conflict(
+            "planned transfer has retained input".into(),
+        ));
+    }
     negotiate_transfer(store, claim, transfer_id, peer)?;
+    receive_accepted(store, claim, staging, transfer_id, peer)
+}
+
+fn receive_accepted(
+    store: &mut Store,
+    claim: &JobClaim,
+    staging: &StagingRoot,
+    transfer_id: i64,
+    peer: &mut PeerControl<'_>,
+) -> Result<ReceivedInput> {
     let transfer = store.active_transfer(claim, transfer_id)?;
     let token = transfer
         .remote_token
         .ok_or_else(|| Error::Conflict("active transfer has no accepted token".into()))?;
-    let file = peer.file_connection(token, || {
+    let binding = peer.binding()?;
+    let result = peer.file_connection(token, || {
         store.active_transfer(claim, transfer_id)?;
         Ok(())
-    })?;
+    });
+    let file = match result {
+        Ok(file) => file,
+        Err(error) => {
+            store.observe_transfer(
+                claim,
+                transfer_id,
+                binding,
+                TransferObservation::Interrupted,
+            )?;
+            return Err(error);
+        }
+    };
     let (name, bound_token, stream) = file.into_parts();
     if name != transfer.peer || bound_token != token {
         return Err(Error::Conflict(
             "file channel differs from the accepted source".into(),
         ));
     }
-    receive_transfer_file(store, claim, staging, transfer_id, &name, stream)
+    match receive_transfer_file(store, claim, staging, transfer_id, &name, stream) {
+        Ok(input) => Ok(input),
+        Err(error) => {
+            store.observe_transfer(
+                claim,
+                transfer_id,
+                binding,
+                TransferObservation::Interrupted,
+            )?;
+            Err(error)
+        }
+    }
 }
 
 /// Receive one already-negotiated Soulseek F connection on a blocking worker.

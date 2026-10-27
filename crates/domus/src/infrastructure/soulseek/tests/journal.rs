@@ -23,6 +23,7 @@ struct Fixture {
 }
 
 mod files;
+mod reconciliation;
 mod worker;
 
 impl Fixture {
@@ -319,6 +320,48 @@ fn stale_claim_observation_or_wrong_peer_stops_before_queue_submission() -> Test
             .pop()
             .ok_or("missing transfer")?;
         assert_eq!(transfer.state, "planned");
+        join(task)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn pending_control_after_intent_stops_before_the_first_queue_command() -> TestResult {
+    for action in ["pause", "cancel"] {
+        let mut fixture = Fixture::new()?;
+        Connection::open(&fixture.database)?.execute_batch(&format!(
+            "CREATE TRIGGER control_after_intent AFTER INSERT ON events
+             WHEN NEW.event_type='transfer_submitting'
+             BEGIN INSERT INTO job_controls(job_id,plan_version,action)
+             VALUES(NEW.job_id,NEW.plan_version,'{action}'); END;"
+        ))?;
+        let (listener, address) = listener()?;
+        let task = std::thread::spawn(move || -> TestResultSend {
+            let mut stream = handshake(listener)?;
+            assert_eq!(
+                stream.read(&mut [0])?,
+                0,
+                "queue command ignored pending control"
+            );
+            Ok(())
+        });
+        let mut session = SoulseekSession {
+            stream: None,
+            username: "fixture-user".into(),
+        };
+        let mut peer = session.connect_address(address)?;
+        let error = negotiate_transfer(&mut fixture.store, &fixture.claim, fixture.file, &mut peer)
+            .err()
+            .ok_or("pending control was ignored")?;
+        assert!(error.to_string().contains("pending pause or cancel"));
+        assert!(
+            fixture
+                .store
+                .submitting_transfer(&fixture.claim, fixture.file)?
+                .remote_token
+                .is_none()
+        );
+        drop(peer);
         join(task)?;
     }
     Ok(())

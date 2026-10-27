@@ -130,7 +130,7 @@ fn queue_upgrade_retains_legacy_completion_times_and_unknown_age() -> TestResult
     drop(store);
     let raw = Connection::open(&database)?;
     raw.execute_batch(
-        "DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update;
+        "DROP TABLE transfer_evidence; DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update;
          DROP TABLE queue_presentations; PRAGMA user_version=18;
          UPDATE jobs SET state='complete';
          INSERT INTO events(job_id,plan_version,event_type,created_at)

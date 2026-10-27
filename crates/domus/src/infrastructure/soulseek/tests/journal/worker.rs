@@ -340,7 +340,6 @@ fn worker_rejects_credentials_in_media_roots_or_unreadable_private_credentials()
         "password",
         "oversize",
         "unapproved",
-        "active",
     ] {
         let fixture = Fixture::album(AudioFormat::Flac, 1000, 1, fault != "unapproved")?;
         let scratch = tempdir()?;
@@ -362,12 +361,6 @@ fn worker_rejects_credentials_in_media_roots_or_unreadable_private_credentials()
             &config,
             serde_json::to_vec(&configuration(&fixture, scratch.path(), &secret))?,
         )?;
-        if fault == "active" {
-            // Preserve the existing uncertain submission through worker load.
-            let mut store = Store::open_existing(&fixture.database)?;
-            store.start_transfer(&fixture.claim, fixture.file)?;
-            store.accept_transfer(&fixture.claim, fixture.file, 17)?;
-        }
         Connection::open(&fixture.database)?.execute("UPDATE jobs SET lease_until=0", [])?;
         let error = PreparedWorker::load(&config)
             .err()
@@ -376,14 +369,103 @@ fn worker_rejects_credentials_in_media_roots_or_unreadable_private_credentials()
         let files = fixture
             .store
             .transfers(fixture.job, fixture.version, Page::new(0, 1)?)?;
-        assert_eq!(
-            files[0].state,
-            if fault == "active" {
-                "active"
-            } else {
-                "planned"
-            }
-        );
+        assert_eq!(files[0].state, "planned");
+    }
+    Ok(())
+}
+
+#[test]
+fn worker_loads_uncertainty_for_reconciliation_and_sealed_input_needs_no_login() -> TestResult {
+    let source = media::flac();
+    let mut fixture = Fixture::album(AudioFormat::Flac, source.len() as i64, 1, true)?;
+    let scratch = tempdir()?;
+    let secret = fixture._state.path().join("credentials.json");
+    let config = fixture._state.path().join("worker.json");
+    credentials(
+        &secret,
+        br#"{"username":"fixture-user","password":"fixture-password"}"#,
+    )?;
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&configuration(&fixture, scratch.path(), &secret))?,
+    )?;
+    fixture.store.start_transfer(&fixture.claim, fixture.file)?;
+    fixture
+        .store
+        .accept_transfer(&fixture.claim, fixture.file, 17)?;
+    let staging =
+        crate::infrastructure::staging::StagingRoot::open(&mut fixture.store, scratch.path())?;
+    let transfer = fixture
+        .store
+        .active_transfer(&fixture.claim, fixture.file)?;
+    staging.receive(&transfer, &mut std::io::Cursor::new(source))?;
+    drop(staging);
+    Connection::open(&fixture.database)?.execute("UPDATE jobs SET lease_until=0", [])?;
+    let worker = PreparedWorker::load(&config)?;
+    assert_eq!(
+        fixture
+            .store
+            .transfers(fixture.job, fixture.version, Page::new(0, 1)?)?[0]
+            .state,
+        "active"
+    );
+    let outcome = worker.run_with_test_login(&mut |_, _, _| {
+        Err(Error::Internal(
+            "sealed input recovery attempted a network login",
+        ))
+    })?;
+    assert!(outcome.normalization_run > 0);
+    assert!(outcome.publication_pending);
+    assert!(
+        fixture
+            .store
+            .transfer_summary(fixture.job, fixture.version)?
+            .all_received
+    );
+    Ok(())
+}
+
+#[test]
+fn worker_reconnect_attempts_are_bounded_and_terminal_login_errors_are_not_retried() -> TestResult {
+    for transient in [false, true] {
+        let fixture = Fixture::album(AudioFormat::Flac, 1000, 1, true)?;
+        let scratch = tempdir()?;
+        let secret = fixture._state.path().join("credentials.json");
+        let config = fixture._state.path().join("worker.json");
+        credentials(
+            &secret,
+            br#"{"username":"fixture-user","password":"fixture-password"}"#,
+        )?;
+        std::fs::write(
+            &config,
+            serde_json::to_vec(&configuration(&fixture, scratch.path(), &secret))?,
+        )?;
+        Connection::open(&fixture.database)?.execute("UPDATE jobs SET lease_until=0", [])?;
+        let worker = PreparedWorker::load(&config)?;
+        let mut attempts = 0;
+        let error = worker
+            .run_with_test_login(&mut |_, username, _| {
+                attempts += 1;
+                assert_eq!(username, "fixture-user");
+                if transient {
+                    Err(Error::SoulseekTransport(
+                        std::io::ErrorKind::ConnectionReset.into(),
+                    ))
+                } else {
+                    Err(Error::Remote("Soulseek rejected the account password"))
+                }
+            })
+            .err()
+            .ok_or("worker unexpectedly succeeded")?;
+        assert_eq!(attempts, if transient { 4 } else { 1 });
+        if transient {
+            assert!(error.to_string().contains("reconnect budget exhausted"));
+        }
+        let transfers =
+            fixture
+                .store
+                .transfers(fixture.job, fixture.version, Page::new(0, 200)?)?;
+        assert!(transfers.iter().all(|transfer| transfer.state == "planned"));
     }
     Ok(())
 }

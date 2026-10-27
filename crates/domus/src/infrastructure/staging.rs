@@ -433,25 +433,93 @@ impl StagingRoot {
         Ok(input)
     }
 
+    /// Inspect only through no-follow handles while the staging lock is held.
+    /// None means both names are absent, never that a read or receipt failed.
+    pub(crate) fn retained_input(
+        &self,
+        transfer: &TransferFile,
+        heartbeat: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Option<ReceivedInput>> {
+        fn optional(
+            directory: &Dir,
+            name: &str,
+            permissions: &FilePermissions,
+        ) -> Result<Option<File>> {
+            match open_file(directory, name, permissions) {
+                Ok(file) => Ok(Some(file)),
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+        let input = optional(
+            &self.directory,
+            &format!("transfer-{}.input", transfer.id),
+            &self.permissions,
+        )?;
+        let receipt = optional(
+            &self.directory,
+            &format!("transfer-{}.receipt", transfer.id),
+            &self.permissions,
+        )?;
+        match (input, receipt) {
+            (None, None) => Ok(None),
+            _ if matches!(transfer.state.as_str(), "planned" | "submitting") => Err(Error::Conflict(
+                "unaccepted transfer has retained staging data; operator review required".into(),
+            )),
+            (Some(file), Some(receipt)) => {
+                let input = self.verify_received(
+                    transfer.id, transfer.expected_bytes as u64, file, receipt, heartbeat,
+                )?;
+                if transfer.payload_sha256.as_ref().is_some_and(|hash| hash != input.sha256()) {
+                    return Err(conflict());
+                }
+                Ok(Some(input))
+            }
+            (Some(_), None) => Err(Error::Conflict(
+                "retained transfer input has no sealed receipt; leave the file unchanged for operator review".into(),
+            )),
+            (None, Some(_)) => Err(Error::Conflict(
+                "sealed transfer receipt has no input file; operator review required".into(),
+            )),
+        }
+    }
+
     fn read_received(
         &self,
         transfer_id: i64,
         bytes: u64,
         heartbeat: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<ReceivedInput> {
-        let receipt: InputReceipt = serde_json::from_slice(&read_record(
-            &self.directory,
-            &format!("transfer-{transfer_id}.receipt"),
-            &self.permissions,
-        )?)?;
-        if receipt.profile != 1 || receipt.transfer_id != transfer_id || receipt.bytes != bytes {
-            return Err(conflict());
-        }
-        let mut file = open_file(
+        let file = open_file(
             &self.directory,
             &format!("transfer-{transfer_id}.input"),
             &self.permissions,
         )?;
+        let receipt = open_file(
+            &self.directory,
+            &format!("transfer-{transfer_id}.receipt"),
+            &self.permissions,
+        )?;
+        self.verify_received(transfer_id, bytes, file, receipt, heartbeat)
+    }
+
+    fn verify_received(
+        &self,
+        transfer_id: i64,
+        bytes: u64,
+        mut file: File,
+        receipt: File,
+        heartbeat: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<ReceivedInput> {
+        let mut record = Vec::new();
+        receipt.take(4097).read_to_end(&mut record)?;
+        if record.len() > 4096 {
+            return Err(Error::InvalidInput("staging record exceeds 4 KiB".into()));
+        }
+        let receipt: InputReceipt = serde_json::from_slice(&record)?;
+        if receipt.profile != 1 || receipt.transfer_id != transfer_id || receipt.bytes != bytes {
+            return Err(conflict());
+        }
         let sha256 = hash_file_with_progress(&mut file, bytes, heartbeat)?;
         if hex(&sha256) != receipt.sha256 {
             return Err(conflict());

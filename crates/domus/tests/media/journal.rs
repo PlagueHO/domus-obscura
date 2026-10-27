@@ -454,7 +454,7 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
     drop(fixture.store);
     let raw = Connection::open(&fixture.database)?;
     raw.execute_batch(
-        "DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots;
+        "DROP TABLE transfer_evidence; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots;
          DROP TABLE artwork_approvals;
          DROP TABLE artwork_candidates;
          DROP TABLE private_roots;
@@ -468,7 +468,7 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
     fixture.store = Store::open_existing(&fixture.database)?;
     fixture.bind_roots()?;
     let version: i64 = raw.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 21);
+    assert_eq!(version, 22);
     let selected = fixture.store.prepare_artwork(
         fixture.job,
         fixture.version,
@@ -496,7 +496,7 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
         .record_normalized_audio(&fixture.claim, run.id, 1, &proof)?;
     drop(fixture.store);
     raw.execute_batch(
-        "DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots;
+        "DROP TABLE transfer_evidence; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots;
          DROP TABLE artwork_approvals;
          DROP TABLE artwork_candidates;
          DROP TABLE private_roots;

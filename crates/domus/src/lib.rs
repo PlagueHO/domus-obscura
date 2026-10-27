@@ -35,6 +35,8 @@ pub enum Error {
     Database(#[from] rusqlite::Error),
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Soulseek transport error: {0}")]
+    SoulseekTransport(std::io::Error),
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
 }

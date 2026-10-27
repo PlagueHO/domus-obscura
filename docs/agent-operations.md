@@ -97,7 +97,12 @@ playback export stays inside private staging and leaves the job in `publishing`.
 Its optional `source` configuration maps every frozen release track to one
 user-selected peer before network access. Require explicit edition/permitted-use
 acknowledgement. Do not treat that acknowledgement as independent edition proof.
-Never replace a committed source or retry uncertain submissions.
+Never replace a committed source or retry uncertain submissions. The worker can
+make at most three server reconnect attempts with 1-, 2- and 4-second backoff.
+Reconnect does not reset that budget or resend `QueueUpload`. Reconcile sealed
+local inputs and retained exact-peer queue/offer evidence before further effects.
+Keep incomplete files unchanged and require operator review when evidence cannot
+resolve uncertainty.
 It is not production publication, peer search or a complete setup workflow.
 
 `domus publish-new-once <absolute-configuration-file>` is a separate, explicit
@@ -217,12 +222,19 @@ The Rust Soulseek client must support later extension to common client
 operations. Follow the "Soulseek client extension contract" in README.md.
 Keep wire codecs independent of sockets, SQLite, catalogs, worker state and
 filesystem paths. Keep operation modules separate from application approvals.
-The current blocking, single-peer adapter is not a concurrent dispatcher.
-Before concurrent search/browse/chat/transfer support, add one reader per
-connection with bounded typed routing and session/token correlation.
-Do not copy operation-local message-skipping loops into a persistent client.
+The session-owned nonblocking I/O loop supplies one reader and one controlled
+write path per framed connection. Keep its bounded typed routing and
+session/connection/token correlation. Public operations still use one borrowed
+peer channel; this is not a concurrent search/chat API. Do not add a competing
+reader or operation-local message-skipping loop. Keep raw file reception outside
+the framed loop with a single ownership handoff.
 Do not enable uploads, shares, listeners, port mapping or transfer retries
 as a side effect of extension work. Preserve uncertainty and approval checks.
+The append-only transfer evidence journal is not permission to submit again.
+A queue reply has no request token; never treat silence or position zero as
+confirmed absence. Reconciliation may commit a verified sealed input receipt
+after observations change, but new wire or media effects retain current approval
+checks. Keep filesystem and network I/O outside evidence transactions.
 
 Core services are in-process Rust modules, not separate servers.
 Keep discovery, metadata, artwork retrieval and acquisition behind the contracts
