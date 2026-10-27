@@ -101,6 +101,55 @@ fn direct_peer_init_queue_and_upload_response_use_exact_wire_variants() -> TestR
 
 type TestResultSend = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+#[test]
+fn server_requested_reverse_control_uses_its_independent_init_token() -> TestResult {
+    let (listener, address) = listener()?;
+    let task = std::thread::spawn(move || -> TestResultSend {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        assert_eq!(
+            packet(&mut stream)?,
+            [vec![0], 999u32.to_le_bytes().to_vec()].concat()
+        );
+        queued(&mut stream)?;
+        send(&mut stream, 40, &offer(PATH, 1000, 1))?;
+        assert_eq!(
+            packet(&mut stream)?,
+            [41u32.to_le_bytes().as_slice(), &17u32.to_le_bytes(), &[1]].concat()
+        );
+        Ok(())
+    });
+    let mut session = SoulseekSession {
+        stream: None,
+        username: "fixture-user".into(),
+    };
+    let socket = TcpStream::connect(address.address)?;
+    let mut peer = session.control_from_socket(address, socket, Some(999))?;
+    let token = peer.queue_upload(PATH, 1000, || Ok(()))?;
+    peer.accept_upload(token)?;
+    join(task)
+}
+
+#[test]
+fn login_disconnect_remains_a_transient_transport_error() -> TestResult {
+    let (listener, address) = listener()?;
+    let task = std::thread::spawn(move || -> TestResultSend {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        assert_eq!(&packet(&mut stream)?[..4], &1u32.to_le_bytes());
+        Ok(())
+    });
+    assert!(matches!(
+        SoulseekSession::login(
+            TcpStream::connect(address.address)?,
+            "fixture-user",
+            "generated-only"
+        ),
+        Err(Error::SoulseekTransport(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+    ));
+    join(task)
+}
+
 fn join(task: std::thread::JoinHandle<TestResultSend>) -> TestResult {
     task.join()
         .map_err(|_| "peer fixture panicked")?
@@ -212,4 +261,71 @@ fn expired_deadline_rejects_even_an_already_buffered_message() -> TestResult {
     send(&mut sender, 3, &[])?;
     assert!(frame(&mut receiver, Instant::now() - Duration::from_millis(1)).is_err());
     Ok(())
+}
+
+#[test]
+fn reconnect_budget_is_finite_and_never_retries_protocol_storage_or_approval_errors() {
+    let mut budget = ReconnectBudget::default();
+    for (index, seconds) in [1, 2, 4].into_iter().enumerate() {
+        assert_eq!(
+            budget.next(&Error::SoulseekTransport(
+                std::io::ErrorKind::ConnectionReset.into()
+            )),
+            Some(Duration::from_secs(seconds))
+        );
+        assert_eq!(usize::from(budget.attempts), index + 1);
+        assert_eq!(budget.next(&Error::Remote("Soulseek rejected login")), None);
+        assert_eq!(
+            budget.next(&Error::Io(std::io::ErrorKind::ConnectionReset.into())),
+            None
+        );
+        assert_eq!(
+            budget.next(&Error::Conflict("approval changed".into())),
+            None
+        );
+    }
+
+    assert_eq!(
+        budget.next(&Error::SoulseekTransport(
+            std::io::ErrorKind::UnexpectedEof.into()
+        )),
+        None
+    );
+}
+
+#[test]
+fn queue_timeout_never_resubmits_or_treats_no_reply_as_absence() -> TestResult {
+    let (listener, address) = listener()?;
+    let task = std::thread::spawn(move || -> TestResultSend {
+        let mut peer = handshake(listener)?;
+        let mut expected = 51u32.to_le_bytes().to_vec();
+        string(&mut expected, PATH);
+        assert_eq!(packet(&mut peer)?, expected);
+        assert_eq!(
+            peer.read(&mut [0])?,
+            0,
+            "queue timeout sent another command"
+        );
+        Ok(())
+    });
+    let mut session = SoulseekSession {
+        stream: None,
+        username: "fixture-user".into(),
+    };
+    let mut peer = session.connect_address(address)?;
+    let error = peer
+        .wait_upload_until(
+            PATH,
+            1000,
+            false,
+            |_| Ok(()),
+            Instant::now() + Duration::from_millis(100),
+            Duration::from_secs(60),
+        )
+        .err()
+        .ok_or("silent queue unexpectedly accepted")?;
+    assert!(error.to_string().contains("time limit"));
+    assert_eq!(QUEUE_TIMEOUT, Duration::from_secs(1800));
+    assert_eq!(QUEUE_POLL, Duration::from_secs(60));
+    join(task)
 }

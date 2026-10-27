@@ -22,6 +22,7 @@ mod queries;
 mod queue;
 mod sessions;
 mod source_candidates;
+mod transfer_evidence;
 mod transfers;
 pub use artwork::ArtworkCandidate;
 pub use artwork_questions::ArtworkDecision;
@@ -40,6 +41,7 @@ pub use queries::{JobEvent, JobSummary};
 pub use queue::QueueSelection;
 pub use sessions::{CreatedSession, SessionCredential, SessionIdentity};
 pub use source_candidates::SourceCandidate;
+pub use transfer_evidence::{TransferEvidence, TransferObservation};
 pub use transfers::{SourceFile, TransferFile, TransferSummary};
 
 const MIGRATIONS: &[&str] = &[
@@ -64,6 +66,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/019_queue_presentation.sql"),
     include_str!("../../migrations/020_plan_events.sql"),
     include_str!("../../migrations/021_cache_roots.sql"),
+    include_str!("../../migrations/022_transfer_evidence.sql"),
 ];
 
 pub struct Store {

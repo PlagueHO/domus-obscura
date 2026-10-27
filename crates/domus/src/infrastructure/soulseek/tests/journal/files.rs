@@ -3,7 +3,7 @@ use crate::application::acquire_album;
 use crate::application::acquire_transfer;
 use crate::infrastructure::staging::StagingRoot;
 
-fn server_pair() -> std::io::Result<(TcpStream, TcpStream)> {
+pub(super) fn server_pair() -> std::io::Result<(TcpStream, TcpStream)> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let client = TcpStream::connect(listener.local_addr()?)?;
     let (server, _) = listener.accept()?;
@@ -12,13 +12,17 @@ fn server_pair() -> std::io::Result<(TcpStream, TcpStream)> {
     Ok((client, server))
 }
 
-fn request(address: SocketAddrV4) -> Vec<u8> {
+pub(super) fn request(address: SocketAddrV4) -> Vec<u8> {
+    request_token(address, 999)
+}
+
+fn request_token(address: SocketAddrV4, token: u32) -> Vec<u8> {
     let mut body = Vec::new();
     string(&mut body, "fixture-peer");
     string(&mut body, "F");
     body.extend_from_slice(&u32::from(*address.ip()).to_le_bytes());
     body.extend_from_slice(&u32::from(address.port()).to_le_bytes());
-    body.extend_from_slice(&999u32.to_le_bytes());
+    body.extend_from_slice(&token.to_le_bytes());
     body.push(0);
     body.extend_from_slice(&0u32.to_le_bytes());
     body.extend_from_slice(&0u32.to_le_bytes());
@@ -37,6 +41,13 @@ fn accept(stream: &mut TcpStream) -> TestResultSend {
 
 #[test]
 fn server_bound_file_channel_receives_through_real_journal_and_sealed_staging() -> TestResult {
+    for disconnect_server in [false, true] {
+        receive_bound_file(disconnect_server)?;
+    }
+    Ok(())
+}
+
+fn receive_bound_file(disconnect_server: bool) -> TestResult {
     let mut fixture = Fixture::new()?;
     let scratch = tempdir()?;
     let staging = StagingRoot::open(&mut fixture.store, scratch.path())?;
@@ -65,6 +76,10 @@ fn server_bound_file_channel_receives_through_real_journal_and_sealed_staging() 
         let mut offset = [0; 8];
         file.read_exact(&mut offset)?;
         assert_eq!(offset, [0; 8]);
+        if disconnect_server {
+            drop(server);
+            std::thread::sleep(Duration::from_millis(100));
+        }
         file.write_all(&source)?;
         assert_eq!(file.read(&mut [0; 1])?, 0);
         // No additional queue request after the first file is complete.
@@ -72,7 +87,7 @@ fn server_bound_file_channel_receives_through_real_journal_and_sealed_staging() 
         Ok(())
     });
     let mut session = SoulseekSession {
-        stream: Some(client),
+        stream: Some(Channel::server(client)?),
         username: "fixture-user".into(),
     };
     let mut peer = session.connect_address(address)?;
@@ -174,7 +189,7 @@ fn wrong_reverse_requests_never_connect_or_reset_the_accepted_transfer() -> Test
                 body.push(0);
             }
             let sent = if fault == "count" {
-                (0..128).try_for_each(|_| send(&mut server, 104, &[]))
+                (0..128).try_for_each(|_| send(&mut server, 104, &0u32.to_le_bytes()))
             } else {
                 send(
                     &mut server,
@@ -197,7 +212,7 @@ fn wrong_reverse_requests_never_connect_or_reset_the_accepted_transfer() -> Test
             Ok(())
         });
         let mut session = SoulseekSession {
-            stream: Some(client),
+            stream: Some(Channel::server(client)?),
             username: "fixture-user".into(),
         };
         let mut peer = session.connect_address(address)?;
@@ -260,7 +275,7 @@ fn wrong_file_token_or_short_payload_never_seals_a_bound_file_channel() -> TestR
             Ok(())
         });
         let mut session = SoulseekSession {
-            stream: Some(client),
+            stream: Some(Channel::server(client)?),
             username: "fixture-user".into(),
         };
         let mut peer = session.connect_address(address)?;
@@ -317,7 +332,8 @@ fn complete_mp3_and_flac_albums_queue_receive_and_normalize_via_bound_channels()
                     packet(&mut control)?,
                     [41u32.to_le_bytes().as_slice(), &token.to_le_bytes(), &[1]].concat()
                 );
-                send(&mut server, 18, &request(endpoint))?;
+                let connection_token = 1000 + token;
+                send(&mut server, 18, &request_token(endpoint, connection_token))?;
                 let (mut file, _) = listener.accept()?;
                 file.set_read_timeout(Some(Duration::from_secs(3)))?;
                 file.set_write_timeout(Some(Duration::from_secs(3)))?;
@@ -325,7 +341,7 @@ fn complete_mp3_and_flac_albums_queue_receive_and_normalize_via_bound_channels()
                     packet(&mut file)?,
                     [0u8]
                         .into_iter()
-                        .chain(999u32.to_le_bytes())
+                        .chain(connection_token.to_le_bytes())
                         .collect::<Vec<_>>()
                 );
                 file.write_all(&token.to_le_bytes())?;
@@ -338,7 +354,7 @@ fn complete_mp3_and_flac_albums_queue_receive_and_normalize_via_bound_channels()
             Ok(())
         });
         let mut session = SoulseekSession {
-            stream: Some(client),
+            stream: Some(Channel::server(client)?),
             username: "fixture-user".into(),
         };
         let mut peer = session.connect_address(address)?;
@@ -411,8 +427,8 @@ fn complete_mp3_and_flac_albums_queue_receive_and_normalize_via_bound_channels()
 }
 
 #[test]
-fn album_preflight_rejects_missing_cover_uncertainty_or_bad_retained_receipts_before_queue()
--> TestResult {
+fn album_preflight_rejects_invalid_inputs_and_queries_uncertainty_without_submission() -> TestResult
+{
     for fault in ["cover", "uncertain", "receipt", "peer"] {
         let mut fixture = Fixture::album(AudioFormat::Flac, 1000, 3, fault != "cover")?;
         let scratch = tempdir()?;
@@ -434,6 +450,15 @@ fn album_preflight_rejects_missing_cover_uncertainty_or_bad_retained_receipts_be
         }
         let task = std::thread::spawn(move || -> TestResultSend {
             let mut control = handshake(listener)?;
+            if fault == "uncertain" {
+                let mut expected = 51u32.to_le_bytes().to_vec();
+                string(&mut expected, "Peer\\Album\\1.flac");
+                assert_eq!(packet(&mut control)?, expected);
+                let mut body = Vec::new();
+                string(&mut body, "Peer\\Album\\1.flac");
+                string(&mut body, "File not shared.");
+                send(&mut control, 50, &body)?;
+            }
             assert_eq!(control.read(&mut [0; 1])?, 0);
             Ok(())
         });

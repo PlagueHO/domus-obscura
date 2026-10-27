@@ -174,7 +174,7 @@ fn schema_fourteen_upgrade_keeps_generic_questions_without_inventing_artwork_con
     )?;
     drop(store);
     let raw = rusqlite::Connection::open(&database)?;
-    raw.execute_batch("DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations;")?;
+    raw.execute_batch("DROP TABLE transfer_evidence; DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations;")?;
     raw.execute_batch("DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; PRAGMA user_version=14;")?;
     let mut store = Store::open_existing(&database)?;
     assert_eq!(store.question(id)?.prompt, "Choose format");
@@ -183,7 +183,7 @@ fn schema_fourteen_upgrade_keeps_generic_questions_without_inventing_artwork_con
     assert!(store.claim(job, "other", 60)?.is_some());
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        21
+        22
     );
     Ok(())
 }

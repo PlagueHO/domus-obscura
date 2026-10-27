@@ -225,7 +225,7 @@ fn search_sends_exact_server_request_and_stops_on_relogin_or_invalid_reverse_req
             Ok(())
         });
         let session = SoulseekSession {
-            stream: Some(stream),
+            stream: Some(Channel::server(stream)?),
             username: "fixture-user".into(),
         };
         let error = session
@@ -256,7 +256,7 @@ fn search_rejects_invalid_query_or_token_before_any_server_message() -> TestResu
         let (mut server, _) = listener.accept()?;
         server.set_read_timeout(Some(Duration::from_secs(3)))?;
         let session = SoulseekSession {
-            stream: Some(stream),
+            stream: Some(Channel::server(stream)?),
             username: "fixture-user".into(),
         };
         assert!(session.search(query, token).is_err());

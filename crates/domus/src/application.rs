@@ -10,6 +10,7 @@ mod normalization;
 pub mod services;
 pub use normalization::normalize_album;
 mod acquisition;
+pub(crate) use acquisition::reconcile_local_inputs;
 pub use acquisition::{acquire_album, acquire_transfer, negotiate_transfer, receive_transfer_file};
 mod playback;
 pub use playback::export_playback_album;

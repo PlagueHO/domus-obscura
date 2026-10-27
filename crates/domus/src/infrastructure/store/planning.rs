@@ -327,11 +327,53 @@ impl Store {
         owner: &str,
         lease_seconds: u16,
     ) -> Result<Option<ClaimedPlan>> {
+        self.claim_plan_inner(job, version, owner, lease_seconds, false)
+    }
+
+    /// Recovery may record already-submitted receipts after observations change.
+    /// This capability is not authority for another queue or normalization.
+    pub(crate) fn claim_acquisition_recovery(
+        &mut self,
+        job: i64,
+        version: i64,
+        owner: &str,
+        lease_seconds: u16,
+    ) -> Result<Option<ClaimedPlan>> {
+        self.claim_plan_inner(job, version, owner, lease_seconds, true)
+    }
+
+    fn claim_plan_inner(
+        &mut self,
+        job: i64,
+        version: i64,
+        owner: &str,
+        lease_seconds: u16,
+        recovery: bool,
+    ) -> Result<Option<ClaimedPlan>> {
         validate_claim(owner, lease_seconds)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let stored = approved_plan(&transaction, job, version)?;
+        let uncertain: bool = recovery
+            && transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM jobs j JOIN transfer_files f ON f.job_id=j.id
+             AND f.plan_version=j.plan_version WHERE j.id=?1 AND j.plan_version=?2
+             AND j.state='downloading' AND f.state IN ('submitting','active'))",
+                params![job, version],
+                |row| row.get(0),
+            )?;
+        let stored = if uncertain {
+            let stored = read_plan(&transaction, job, version)?;
+            if stored.approved_at.is_none() {
+                return Err(Error::Conflict(
+                    "recovery requires the approved source plan".into(),
+                ));
+            }
+            check_catalog_plan(&stored)?;
+            stored
+        } else {
+            approved_plan(&transaction, job, version)?
+        };
         let generation: Option<i64> = transaction
             .query_row(
                 "UPDATE jobs SET owner = ?3, lease_until = unixepoch() + ?4,

@@ -698,7 +698,7 @@ fn schema_eleven_upgrade_retains_receipts_but_requires_approval_of_the_exact_old
     drop(fixture.store);
     let raw = Connection::open(&fixture.database)?;
     raw.execute_batch(
-        "DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; DROP TABLE artwork_approvals; DROP TABLE artwork_candidates; PRAGMA user_version = 11;",
+        "DROP TABLE transfer_evidence; DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; DROP TABLE artwork_approvals; DROP TABLE artwork_candidates; PRAGMA user_version = 11;",
     )?;
     fixture.store = super::Store::open_existing(&fixture.database)?;
     fixture.bind_roots()?;

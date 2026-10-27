@@ -1,7 +1,5 @@
-//! Narrow blocking Soulseek server session. No listeners, shares, automatic
-//! retries, generated accounts or filesystem access are enabled here.
-//! Wire codecs are separate from connection and operation state. This adapter
-//! is a short-lived subset, not a persistent concurrent client/event dispatcher.
+//! Bounded outgoing Soulseek sessions. One I/O owner routes every framed
+//! connection; raw file sockets pass exclusively to the application receiver.
 use crate::{Error, Result};
 use std::io::Read;
 #[cfg(test)]
@@ -13,13 +11,19 @@ use symphonia::core::io::Monitor;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const QUEUE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const QUEUE_POLL: Duration = Duration::from_secs(60);
 
 mod folder;
+mod messages;
 mod protocol;
 pub mod search;
+mod transport;
+use messages::{Event, PeerEvent, ServerEvent};
 #[cfg(test)]
 use protocol::MAX_FRAME;
 use protocol::{Fields, protocol, read_frame, send, send_init, string};
+use transport::Channel;
 
 fn md5(parts: &[&[u8]]) -> String {
     let mut hash = Md5::default();
@@ -68,8 +72,8 @@ fn read_checked(
         stream.set_read_timeout(Some(remaining.min(IO_TIMEOUT)))?;
         let read = stream.read(&mut buffer[position..])?;
         if read == 0 {
-            return Err(Error::Remote(
-                "Soulseek closed the connection before the complete message arrived",
+            return Err(Error::SoulseekTransport(
+                std::io::ErrorKind::UnexpectedEof.into(),
             ));
         }
         position += read;
@@ -114,7 +118,7 @@ impl PeerAddress {
 /// already connected server socket after explicit network authorization.
 /// Soulseek's legacy login sends the password over plaintext TCP.
 pub struct SoulseekSession {
-    stream: Option<TcpStream>,
+    stream: Option<Channel>,
     username: String,
 }
 
@@ -131,8 +135,9 @@ impl SoulseekSession {
         body.extend_from_slice(&1u32.to_le_bytes());
         let sent = send(&mut stream, 1, &body);
         body.fill(0);
-        sent?;
-        let (code, body) = frame(&mut stream, Instant::now() + OPERATION_TIMEOUT)?;
+        sent.map_err(network_error)?;
+        let (code, body) =
+            frame(&mut stream, Instant::now() + OPERATION_TIMEOUT).map_err(network_error)?;
         if code != 1 {
             return Err(protocol());
         }
@@ -159,11 +164,11 @@ impl SoulseekSession {
         fields.boolean()?;
         fields.end()?;
         // No share tree, upload slots or distributed child acceptance.
-        send(&mut stream, 28, &2u32.to_le_bytes())?;
-        send(&mut stream, 35, &[0; 8])?;
-        send(&mut stream, 100, &[0])?;
+        send(&mut stream, 28, &2u32.to_le_bytes()).map_err(network_error)?;
+        send(&mut stream, 35, &[0; 8]).map_err(network_error)?;
+        send(&mut stream, 100, &[0]).map_err(network_error)?;
         Ok(Self {
-            stream: Some(stream),
+            stream: Some(Channel::server(stream)?),
             username: user.into(),
         })
     }
@@ -173,21 +178,86 @@ impl SoulseekSession {
     }
 
     /// Only one control connection can borrow this session at a time.
-    /// Direct connection only: no listener or indirect fallback is created.
+    /// Connections are outgoing only. A matching server-requested reverse
+    /// control connection can follow a failed direct connection.
     pub fn connect_peer(&mut self, peer: &str) -> Result<PeerControl<'_>> {
         let address = self.peer_address(peer)?;
-        self.connect_address(address)
+        let socket = match TcpStream::connect_timeout(&address.address.into(), IO_TIMEOUT) {
+            Ok(socket) => (socket, None),
+            Err(error) => {
+                let server = self
+                    .stream
+                    .as_mut()
+                    .ok_or_else(|| Error::Conflict("Soulseek server session is closed".into()))?;
+                let event = server.receive(
+                    Instant::now() + OPERATION_TIMEOUT,
+                    &mut || Ok(()),
+                    |event| matches!(event, Event::Server(ServerEvent::Connect { .. })),
+                );
+                let event = match event {
+                    Err(Error::Remote("Soulseek operation exceeded its time limit")) => {
+                        return Err(Error::SoulseekTransport(error));
+                    }
+                    other => other?,
+                };
+                match event {
+                    Event::Server(ServerEvent::Connect {
+                        username,
+                        kind,
+                        address: reverse,
+                        token,
+                    }) if username == address.username
+                        && kind == "P"
+                        && reverse == address.address =>
+                    {
+                        server.check()?;
+                        (
+                            TcpStream::connect_timeout(&reverse.into(), IO_TIMEOUT)
+                                .map_err(Error::SoulseekTransport)?,
+                            Some(token),
+                        )
+                    }
+                    _ => {
+                        return Err(Error::Remote(
+                            "Soulseek reverse control request differs from the selected peer",
+                        ));
+                    }
+                }
+            }
+        };
+        self.control_from_socket(address, socket.0, socket.1)
     }
 
+    #[cfg(test)]
     fn connect_address(&mut self, peer: PeerAddress) -> Result<PeerControl<'_>> {
-        let mut stream = TcpStream::connect_timeout(&peer.address.into(), IO_TIMEOUT)?;
-        stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        let socket = TcpStream::connect_timeout(&peer.address.into(), IO_TIMEOUT)
+            .map_err(Error::SoulseekTransport)?;
+        self.control_from_socket(peer, socket, None)
+    }
+
+    fn control_from_socket(
+        &mut self,
+        peer: PeerAddress,
+        socket: TcpStream,
+        reverse_token: Option<u32>,
+    ) -> Result<PeerControl<'_>> {
+        let stream = match self.stream.as_ref() {
+            Some(server) => server.peer(socket)?,
+            #[cfg(test)]
+            None => Channel::isolated_peer(socket)?,
+            #[cfg(not(test))]
+            None => return Err(Error::Conflict("Soulseek server session is closed".into())),
+        };
         let mut body = Vec::new();
         string(&mut body, &self.username);
         string(&mut body, "P");
         body.extend_from_slice(&0u32.to_le_bytes());
         // Init codes occupy one byte, not the normal four-byte message code.
-        send_init(&mut stream, 1, &body)?;
+        if let Some(token) = reverse_token {
+            stream.init(0, &token.to_le_bytes())?;
+        } else {
+            stream.init(1, &body)?;
+        }
         Ok(PeerControl {
             session: self,
             peer,
@@ -219,7 +289,7 @@ impl SoulseekSession {
 pub struct PeerControl<'a> {
     session: &'a mut SoulseekSession,
     peer: PeerAddress,
-    stream: Option<TcpStream>,
+    stream: Option<Channel>,
     pending: Option<u32>,
     accepted: Option<u32>,
 }
@@ -252,6 +322,37 @@ impl PeerControl<'_> {
         expected_bytes: u64,
         mut check: impl FnMut() -> Result<()>,
     ) -> Result<u32> {
+        self.wait_upload(path, expected_bytes, true, |_| check())
+    }
+
+    /// Observe an existing queue without re-submission. Queue observations are
+    /// not absence proof. The callback fences ownership and persists evidence.
+    pub(crate) fn wait_upload(
+        &mut self,
+        path: &str,
+        expected_bytes: u64,
+        submit: bool,
+        observe: impl FnMut(Option<QueueObservation>) -> Result<()>,
+    ) -> Result<u32> {
+        self.wait_upload_until(
+            path,
+            expected_bytes,
+            submit,
+            observe,
+            Instant::now() + QUEUE_TIMEOUT,
+            QUEUE_POLL,
+        )
+    }
+
+    fn wait_upload_until(
+        &mut self,
+        path: &str,
+        expected_bytes: u64,
+        submit: bool,
+        mut observe: impl FnMut(Option<QueueObservation>) -> Result<()>,
+        deadline: Instant,
+        query_interval: Duration,
+    ) -> Result<u32> {
         if path.is_empty()
             || path.len() > 4096
             || path.chars().any(char::is_control)
@@ -269,60 +370,64 @@ impl PeerControl<'_> {
         let mut stream = self.stream.take().ok_or_else(|| {
             Error::Conflict("Soulseek peer connection closed after an earlier failure".into())
         })?;
-        check()?;
+        observe(None)?;
         let mut body = Vec::new();
         string(&mut body, path);
-        send(&mut stream, 43, &body)?;
-        let deadline = Instant::now() + OPERATION_TIMEOUT;
-        for _ in 0..128 {
-            let (code, body) = checked_frame(&mut stream, deadline, &mut check)?;
-            let mut fields = Fields(&body);
-            match code {
-                40 => {
-                    if fields.u32()? != 1 {
-                        return Err(protocol());
-                    }
-                    let token = fields.u32()?;
-                    if fields.text(4096)? != path || fields.u64()? != expected_bytes {
+        stream.send(if submit { 43 } else { 51 }, &body)?;
+        let mut queried = Instant::now();
+        loop {
+            let until = deadline.min(queried + query_interval);
+            let event = stream.receive(until, &mut || observe(None), |_| true);
+            let event = match event {
+                Err(Error::Remote("Soulseek operation exceeded its time limit"))
+                    if Instant::now() < deadline =>
+                {
+                    observe(None)?;
+                    stream.send(51, &body)?;
+                    queried = Instant::now();
+                    continue;
+                }
+                other => other?,
+            };
+            match event {
+                Event::Peer(PeerEvent::Offer {
+                    token,
+                    path: offered,
+                    bytes,
+                }) => {
+                    if offered != path || bytes != expected_bytes {
                         return Err(Error::Remote(
                             "Soulseek upload offer differs from the selected file or size",
                         ));
                     }
-                    fields.end()?;
-                    check()?;
+                    observe(Some(QueueObservation::Offer(token)))?;
                     self.pending = Some(token);
                     self.stream = Some(stream);
                     return Ok(token);
                 }
-                46 | 50 => {
-                    if fields.text(4096)? != path {
+                Event::Peer(
+                    PeerEvent::Denied { path: denied } | PeerEvent::Failed { path: denied },
+                ) => {
+                    if denied != path {
                         return Err(protocol());
                     }
-                    if code == 50 {
-                        fields.text(4096)?;
-                    }
-                    fields.end()?;
+                    observe(Some(QueueObservation::Denied))?;
                     return Err(Error::Remote(
                         "Soulseek peer rejected or failed the selected upload",
                     ));
                 }
-                44 => {
-                    if fields.text(4096)? != path {
+                Event::Peer(PeerEvent::Position {
+                    path: queued,
+                    place,
+                }) => {
+                    if queued != path {
                         return Err(protocol());
                     }
-                    fields.u32()?;
-                    fields.end()?;
+                    observe(Some(QueueObservation::Position(place)))?;
                 }
-                _ => {
-                    return Err(Error::Remote(
-                        "Soulseek peer sent an unsupported message while queuing",
-                    ));
-                }
+                _ => return Err(protocol()),
             }
         }
-        Err(Error::Remote(
-            "Soulseek upload offer exceeded its message limit",
-        ))
     }
 
     /// Call only after durable acceptance. On a failed write, keep that record
@@ -333,13 +438,13 @@ impl PeerControl<'_> {
                 "Soulseek upload token has no pending offer".into(),
             ));
         }
-        let mut stream = self
+        let stream = self
             .stream
             .take()
             .ok_or_else(|| Error::Conflict("Soulseek peer connection is closed".into()))?;
         let mut body = token.to_le_bytes().to_vec();
         body.push(1);
-        send(&mut stream, 41, &body)?;
+        stream.send(41, &body)?;
         self.pending = None;
         self.accepted = Some(token);
         self.stream = Some(stream);
@@ -380,109 +485,155 @@ impl PeerControl<'_> {
 
     fn connect_file(
         &self,
-        server: &mut TcpStream,
+        server: &mut Channel,
         token: u32,
         check: &mut impl FnMut() -> Result<()>,
     ) -> Result<PeerFile> {
         let deadline = Instant::now() + OPERATION_TIMEOUT;
-        for _ in 0..128 {
-            let (code, body) = checked_frame(server, deadline, check)?;
-            if code == 41 {
-                return Err(Error::Remote(
-                    "Soulseek account signed in elsewhere; session closed",
-                ));
+        let event = server.receive(deadline, check, |event| {
+            matches!(
+                event,
+                Event::Server(ServerEvent::Connect { .. } | ServerEvent::CannotConnect(_))
+            )
+        })?;
+        match event {
+            Event::Server(ServerEvent::Connect {
+                username,
+                kind,
+                address,
+                token: indirect_token,
+            }) => {
+                if username != self.peer.username || kind != "F" {
+                    return Err(Error::Remote(
+                        "Soulseek file connection request differs from the selected peer or type",
+                    ));
+                }
+                if address != self.peer.address {
+                    return Err(Error::Remote(
+                        "Soulseek file connection address changed after peer selection",
+                    ));
+                }
+                check()?;
+                server.check()?;
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or(Error::Remote("Soulseek operation exceeded its time limit"))?;
+                let mut stream = TcpStream::connect_timeout(
+                    &self.peer.address.into(),
+                    remaining.min(IO_TIMEOUT),
+                )
+                .map_err(Error::SoulseekTransport)?;
+                check()?;
+                stream.set_write_timeout(Some(IO_TIMEOUT))?;
+                send_init(&mut stream, 0, &indirect_token.to_le_bytes()).map_err(network_error)?;
+                check()?;
+                Ok(PeerFile {
+                    peer: self.peer.username.clone(),
+                    token,
+                    stream,
+                })
             }
-            if code != 18 {
-                continue;
+            Event::Server(ServerEvent::CannotConnect(connection_token)) => {
+                let _ = connection_token;
+                Err(Error::Remote(
+                    "Soulseek sent an unsolicited connection failure token",
+                ))
             }
-            let mut fields = Fields(&body);
-            if fields.text(30)? != self.peer.username || fields.text(1)? != "F" {
-                return Err(Error::Remote(
-                    "Soulseek file connection request differs from the selected peer or type",
-                ));
-            }
-            let ip = Ipv4Addr::from(fields.u32()?);
-            let port = u16::try_from(fields.u32()?).map_err(|_| protocol())?;
-            if SocketAddrV4::new(ip, port) != self.peer.address {
-                return Err(Error::Remote(
-                    "Soulseek file connection address changed after peer selection",
-                ));
-            }
-            let indirect_token = fields.u32()?;
-            fields.boolean()?;
-            if !fields.0.is_empty() {
-                fields.u32()?;
-                fields.u32()?;
-            }
-            fields.end()?;
-            check()?;
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or(Error::Remote("Soulseek operation exceeded its time limit"))?;
-            let mut stream =
-                TcpStream::connect_timeout(&self.peer.address.into(), remaining.min(IO_TIMEOUT))?;
-            check()?;
-            stream.set_write_timeout(Some(IO_TIMEOUT))?;
-            send_init(&mut stream, 0, &indirect_token.to_le_bytes())?;
-            check()?;
-            return Ok(PeerFile {
-                peer: self.peer.username.clone(),
-                token,
-                stream,
-            });
+            _ => Err(protocol()),
         }
-        Err(Error::Remote(
-            "Soulseek file connection exceeded its message limit",
-        ))
     }
 }
 
 impl SoulseekSession {
-    fn query_address(stream: &mut TcpStream, peer: &str) -> Result<PeerAddress> {
+    fn query_address(stream: &mut Channel, peer: &str) -> Result<PeerAddress> {
         let mut body = Vec::new();
         string(&mut body, peer);
-        send(stream, 3, &body)?;
+        stream.send(3, &body)?;
         let deadline = Instant::now() + OPERATION_TIMEOUT;
-        for _ in 0..128 {
-            let (code, body) = frame(stream, deadline)?;
-            if code == 41 {
-                return Err(Error::Remote(
-                    "Soulseek account signed in elsewhere; session closed",
-                ));
-            }
-            if code != 3 {
-                continue;
-            }
-            let mut fields = Fields(&body);
-            if fields.text(30)? != peer {
+        let event = stream.receive(deadline, &mut || Ok(()), |event| {
+            matches!(event, Event::Server(ServerEvent::Address { .. }))
+        })?;
+        if let Event::Server(ServerEvent::Address { username, address }) = event {
+            if username != peer {
                 return Err(protocol());
             }
-            let ip = Ipv4Addr::from(fields.u32()?);
-            let port = fields.u32()?;
-            if !fields.0.is_empty() {
-                fields.u32()?;
-                fields.take(2)?;
-            }
-            fields.end()?;
-            if ip.is_unspecified() || port == 0 {
+            if address.ip().is_unspecified() || address.port() == 0 {
                 return Err(Error::Remote(
                     "Soulseek peer is offline or has no reachable port",
                 ));
             }
-            let port = u16::try_from(port).map_err(|_| protocol())?;
-            if !public_peer_ip(ip) {
+            if !public_peer_ip(*address.ip()) {
                 return Err(Error::Remote(
                     "Soulseek peer address is not a public unicast IPv4 address",
                 ));
             }
-            return Ok(PeerAddress {
+            Ok(PeerAddress {
                 username: peer.into(),
-                address: SocketAddrV4::new(ip, port),
-            });
+                address,
+            })
+        } else {
+            Err(protocol())
         }
-        Err(Error::Remote(
-            "Soulseek peer lookup exceeded its message limit",
-        ))
+    }
+}
+
+pub(crate) enum QueueObservation {
+    Position(u32),
+    Offer(u32),
+    Denied,
+}
+
+pub(crate) fn network_error(error: Error) -> Error {
+    match error {
+        Error::Io(error) => Error::SoulseekTransport(error),
+        other => other,
+    }
+}
+
+/// A worker-run budget, not permission to replay any operation. Authentication,
+/// protocol, storage and approval failures are never transient network failures.
+#[derive(Default)]
+pub(crate) struct ReconnectBudget {
+    attempts: u8,
+}
+
+impl ReconnectBudget {
+    pub(crate) fn exhausted(&self) -> bool {
+        self.attempts == 3
+    }
+
+    pub(crate) fn next(&mut self, error: &Error) -> Option<Duration> {
+        let Error::SoulseekTransport(error) = error else {
+            return None;
+        };
+        if self.attempts >= 3
+            || !matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::NotConnected
+            )
+        {
+            return None;
+        }
+        let delay = Duration::from_secs(1 << self.attempts);
+        self.attempts += 1;
+        Some(delay)
+    }
+}
+
+impl PeerControl<'_> {
+    pub(crate) fn binding(&self) -> Result<(u64, u64)> {
+        let channel = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| Error::Conflict("Soulseek peer connection is closed".into()))?;
+        channel.check()?;
+        Ok((channel.generation(), channel.identity()))
     }
 }
 

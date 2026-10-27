@@ -77,14 +77,13 @@ impl PeerControl<'_> {
             .ok_or_else(|| Error::Conflict("Soulseek peer channel is closed".into()))?;
         let mut body = token.to_le_bytes().to_vec();
         string(&mut body, &folder);
-        send(&mut stream, 36, &body)?;
-        let (code, body) = frame(&mut stream, Instant::now() + OPERATION_TIMEOUT)?;
-        if code != 37 {
-            return Err(Error::Remote(
-                "Soulseek sent an unexpected response to the folder query",
-            ));
+        stream.send(36, &body)?;
+        match stream.receive(Instant::now() + OPERATION_TIMEOUT, &mut || Ok(()), |_| true)? {
+            Event::Peer(PeerEvent::Folder(body)) => {
+                parse_response(&body, self.username(), &folder, token)
+            }
+            _ => Err(protocol()),
         }
-        parse_response(&body, self.username(), &folder, token)
     }
 }
 
