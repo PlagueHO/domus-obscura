@@ -52,6 +52,7 @@ approval, recovery and external-service rules.
 - Visible unsafe-link observations without junction/symlink traversal.
 - Rust-generated TypeScript contracts and a neutral React output-preview component.
 - One shared task interface, editor tasks, and configured Windows/Linux CI.
+- A separate foreground production worker with bounded durable handoff, one acquisition pipeline, one independent scan, and safe stop/recovery boundaries.
 
 An experimental one-shot acquisition worker can process an already-selected,
 approved source through private normalization and new-only publication. The
@@ -62,8 +63,89 @@ design. Its Orbit navigation, Home queue, shared status pills, fixed-size media
 cards, download preparation drawer and safe-cancellation confirmation now use
 shared components. Browser answers and safe recovery remain separate actions.
 Atomic album publication, replacement/restore management, automated source
-selection, long-running worker supervision, sharing, the remaining UI port,
+selection, native worker service supervision, sharing, the remaining UI port,
 native services and production packages remain incomplete.
+
+## Separate production worker
+
+`domus worker <absolute-configuration-file>` runs accepted background work in a
+separate foreground process. It uses the same local SQLite state as the guarded
+API. It opens no listener. Native Windows service and systemd installation remain
+separate work in issues #17 and #18. Do not treat foreground checks as service,
+reboot, Linux, or live-account acceptance.
+
+Add a `production_worker` section to the normal backend configuration. The
+smallest section enables read-only scans:
+
+```json
+{
+  "production_worker": {
+    "queue_capacity": 64,
+    "acquisition": null
+  }
+}
+```
+
+For approved acquisition and new-only publication, set `acquisition` to an object
+with `staging_root`, `credentials_file`, `server`, and
+`acknowledge_plaintext_login`. These have the same trusted local-file and native
+root requirements as the explicit one-shot worker. Initialize staging separately
+with `staging-init`. The credentials file contains `username` and `password`;
+keep it private and outside Git and media roots. Live-account operation still
+requires separate approval.
+
+Production API configuration still requires Entra and loopback HTTPS preview.
+Do not set `local_acquisition` together with `production_worker`.
+Source search and folder inspection remain development-only. This worker accepts
+existing separately approved source candidates; it does not discover or approve
+them. Keep plan, permitted-source, and exact-JPEG approvals separate.
+
+Queue capacity defaults to 64 and accepts 1 through 1024 unfinished requests.
+Waiting and failed requests count. Lowering the limit never discards work.
+Equivalent duplicate commands return the saved request. Conflicting commands
+and full queues fail explicitly. Requests can be queued while the worker is
+offline. The browser shows offline state, active worker configuration revision,
+saved requests, and bounded progress. Configuration saves and API reloads do not
+restart the worker; restart it separately at a safe boundary.
+
+The worker runs one transfer/normalization/publication pipeline and one separate
+scan. Waiting albums release the pipeline slot. Scheduling selects the oldest
+eligible request. Scans can change observation bindings; normal approval rechecks
+still apply to new media effects.
+
+Acquisition/publication commands retain their existing guarded routes and return
+HTTP 202 after durable admission. Production library scans also return HTTP 202,
+not scan completion. Read worker requests through
+`GET /api/worker/requests?after=0&limit=50`; `job_id` filters one album.
+The browser uses `unfinished_only=true` so old completed history cannot hide
+pending work. Completed album progress remains in the normal queue and history.
+`POST /api/worker/requests/{id}/retry` explicitly retries the same saved work.
+Resolve any saved decision and apply its recovery action first.
+`POST /api/worker/requests/{id}/dismiss` releases an idle failed/waiting request's
+queue place without cancelling the album or deleting media, questions, or receipts.
+All browser commands retain authentication, Origin, and CSRF guards. Scan admission
+and scan retry also retain the system-settings edit policy.
+
+Provider selections and acquisition references are bound to each accepted request
+by an immutable digest. A changed worker configuration cannot silently apply a
+new provider/account-reference/staging choice. Restore the accepted configuration,
+or dismiss and explicitly submit again after review. Existing committed transfers
+remain subject to their normal reconciliation rules.
+
+Ctrl+C, or SIGTERM on Linux, stops admission to execution and drains current work
+at safe file/transfer boundaries. No new file operation starts after its stop
+boundary. Active receives/copies retain their receipts. Native locks stay held
+until operation and session threads finish. A forced exit releases OS locks;
+expired fenced database leases then permit recovery of interrupted accepted work.
+The scheduler does not automatically retry failed requests, answer questions,
+reset uncertain intent, resend `QueueUpload`, or overwrite partial/different files.
+The existing finite reconnect policy within an operation is unchanged.
+
+Use one local state directory per deployment. Stable `.domus-*.lock` files
+coordinate the worker and account use by the one-shot/development entry points
+sharing that directory. Never replace or delete these files while processes can
+use them. Separate deployments must not use the same live Soulseek account.
+The worker requires the current schema and never migrates state during loading.
 
 ## Try the local test harness
 
@@ -685,7 +767,7 @@ the candidate before reading credentials, then rechecks it under the live claim
 inside the source-intent transaction. It does not select another candidate or
 fall back to a manual source when that check fails.
 
-Loading checks local state, acquires a fenced five-minute worker claim and locks private staging. For a new source, it commits all selected files in one transaction and advances the job to `downloading`. It can load an existing uncertain source for reconciliation; this does not authorize another submission. Loading does not open a network socket. `run` first checks retained local inputs, then opens an outgoing session only if remote work remains. Invalid credentials and missing artwork approval are rejected before claiming the job. A later preparation or run failure can retain the lease until expiry. Never clear it or reset a transfer to force a retry. Reconcile uncertain remote effects first.
+Loading checks local state, acquires a fenced five-minute worker claim and locks private staging. For a new source, it commits all selected files in one transaction and advances the job to `downloading`. It can load an existing uncertain source for reconciliation; this does not authorize another submission. Loading does not open a network socket. `run` first checks retained local inputs, then opens an outgoing session only if remote work remains. Invalid credentials and missing artwork approval are rejected before claiming the job. Normal preparation failures and run exits release only their own fenced claim. A dropped prepared worker, forced exit, or failed claim release can retain the lease until expiry. Never clear it or reset a transfer to force a retry. Reconcile uncertain remote effects first.
 
 After a source commits, remove `source` and `source_candidate` from the configuration before a later run. Repeating or changing a selection on a `downloading` job fails; it cannot replace the journal or repeat a submission. A failure before the source transaction commits can leave the job in `searching` without files. After the lease expires, the same explicit selection can prepare that job. These rules do not provide automatic remote retry or resume.
 

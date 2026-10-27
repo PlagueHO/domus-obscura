@@ -68,6 +68,42 @@ Never delete the configuration or lock file as automatic recovery.
 
 ## Commands
 
+`domus worker <absolute-configuration-file>` is the separate foreground production
+worker. Its explicit `production_worker` section is distinct from development-only
+`local_acquisition`; never relax production Entra or loopback API guards to start
+it. Load through ConfigurationService without starting an API host or migrating
+SQLite. Keep paths and credentials in host configuration, not operation requests.
+
+The durable queue accepts offline submissions. Validate capacity from 1 through
+1024, default 64. Admission, duplicate checks, and capacity checks are atomic.
+Failed/waiting requests retain capacity until explicit retry or dismissal.
+Persist the provider/acquisition configuration digest with immutable requests.
+Configuration save or API reload never activates a new worker configuration.
+
+Keep one acquisition pipeline and one independent scan. The native process lock
+excludes another daemon in the same state directory. Account locks also cover
+the existing worker/search/folder entry points in that deployment. Hold all
+native ownership through thread/session draining. Never unlink the stable lock
+files or run the same account in another deployment.
+
+Keep returned JobClaim and ScanClaim authority separate from request ownership.
+Renew request leases while operations run. Stop new effects at safe boundaries,
+not by aborting a blocking thread. Preserve active receive/copy receipts and an
+incomplete scan frontier. Forced-exit recovery waits for fenced lease expiry.
+Do not finalize interrupted coverage as confirmed absence.
+
+Only interrupted accepted requests recover automatically. Failed work and saved
+questions need explicit action. Resolving a decision and applying recovery still
+do not submit work; retry the saved request separately. Dismissal releases only
+an idle failed/waiting worker request, never album state or media. Publication
+continues to reject user cancellation. Never convert uncertain submissions into
+fresh queue commands. Preserve the existing finite per-operation reconnect budget.
+
+See the [production worker guide](../README.md#separate-production-worker).
+Native service installation and reboot acceptance remain issues #17 and #18.
+Tokio documents that started [blocking tasks cannot be aborted](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html);
+the long-lived scheduler and its bounded operation lanes use dedicated threads.
+
 Use the pinned tools from rust-toolchain.toml, .node-version, and package.json.
 
 On Windows, use the launcher. It finds a complete installed MSVC environment. It accepts the installed stable Rust alias only when its exact version matches the pin.

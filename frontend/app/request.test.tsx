@@ -7,6 +7,7 @@ import type { TransferSummary } from "../src/generated/TransferSummary";
 import type { ArtworkCandidate } from "../src/generated/ArtworkCandidate";
 import { useResource } from "./hooks";
 import { RequestPage, RequestProgress } from "./Request";
+import { WorkerRequests } from "./WorkerRequests";
 
 vi.mock("./hooks", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./hooks")>()),
@@ -96,6 +97,53 @@ function renderRequest({
 }
 
 beforeEach(() => vi.mocked(useResource).mockReset());
+
+describe("production worker request status", () => {
+  const worker = {
+    online: false,
+    stopping: false,
+    active_revision: null,
+    capacity: 64,
+    unfinished: 1,
+    active: 0,
+  };
+  const saved = [
+    {
+      id: 7,
+      state: "waiting",
+      last_error: "Resolve the saved decision",
+      configuration_binding: "a".repeat(64),
+      operation: { operation: "scan", location_id: 1 },
+    },
+  ];
+  it("shows offline admission and explicit recovery without claiming completion", () => {
+    vi.mocked(useResource).mockReturnValue({
+      data: saved,
+      error: undefined,
+      loading: false,
+      refresh: vi.fn(),
+    });
+    const markup = renderToStaticMarkup(<WorkerRequests status={worker} />);
+    expect(markup).toContain("Worker offline; accepted requests stay queued.");
+    expect(markup).toContain("scan · waiting");
+    expect(markup).toContain("Retry this saved request");
+    expect(markup).toContain("Dismiss worker request");
+    expect(markup).toContain("does not cancel the album or delete files");
+  });
+  it("marks retained data stale and disables recovery after a failed refresh", () => {
+    vi.mocked(useResource).mockReturnValue({
+      data: saved,
+      error: new Error("Refresh failed"),
+      loading: false,
+      refresh: vi.fn(),
+    });
+    const markup = renderToStaticMarkup(<WorkerRequests status={{ ...worker, stopping: true }} />);
+    expect(markup).toContain("Worker stopping; active work is draining.");
+    expect(markup).toContain("Request data is stale");
+    expect(markup).toMatch(/<button[^>]*disabled[^>]*>Retry this saved request/);
+    expect(markup).toMatch(/<button[^>]*disabled[^>]*>Dismiss worker request/);
+  });
+});
 
 describe("request approval progress", () => {
   const summary: TransferSummary = {

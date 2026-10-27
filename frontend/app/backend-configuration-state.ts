@@ -39,7 +39,7 @@ export const configurationSections = [
     id: "music_acquisition",
     title: "Acquisition",
     group: "Media · Music",
-    description: "Manage the optional development download service.",
+    description: "Manage the production worker or the development download service.",
   },
 ] as const satisfies readonly {
   id: ConfigurationSection;
@@ -54,7 +54,7 @@ const sectionFields = {
   tls: ["certificate_file", "private_key_file"],
   storage: ["database", "cache"],
   music_providers: ["services"],
-  music_acquisition: ["local_acquisition"],
+  music_acquisition: ["local_acquisition", "production_worker"],
 } as const satisfies Record<ConfigurationSection, readonly (keyof BackendConfigurationDraft)[]>;
 
 export type ConfigurationEditor = {
@@ -88,6 +88,20 @@ export function beginConfigurationEdit(state: BackendConfigurationState): Config
           credentials_file: { action: "keep" },
           server: value.local_acquisition.server,
           acknowledge_plaintext_login: value.local_acquisition.acknowledge_plaintext_login,
+        }
+      : null,
+    production_worker: value.production_worker
+      ? {
+          queue_capacity: value.production_worker.queue_capacity,
+          acquisition: value.production_worker.acquisition
+            ? {
+                staging_root: value.production_worker.acquisition.staging_root,
+                credentials_file: { action: "keep" },
+                server: value.production_worker.acquisition.server,
+                acknowledge_plaintext_login:
+                  value.production_worker.acquisition.acknowledge_plaintext_login,
+              }
+            : null,
         }
       : null,
   };
@@ -133,7 +147,11 @@ export function sectionUpdate(
     case "music_providers":
       return { section, services: draft.services };
     case "music_acquisition":
-      return { section, local_acquisition: draft.local_acquisition };
+      return {
+        section,
+        local_acquisition: draft.local_acquisition,
+        production_worker: draft.production_worker,
+      };
   }
 }
 

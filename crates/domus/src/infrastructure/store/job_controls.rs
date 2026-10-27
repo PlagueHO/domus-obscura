@@ -179,6 +179,7 @@ fn apply(connection: &Connection, id: i64, current_state: &str) -> Result<()> {
 
 impl Store {
     pub(crate) fn require_job_running(&self, job: i64, version: i64) -> Result<()> {
+        self.check_worker_stop()?;
         require_running(&self.connection, job, version)
     }
 
@@ -256,6 +257,7 @@ impl Store {
     /// Called between effects, never inside an active peer transfer. A durable
     /// request releases/fences the claim and returns an explicit stopped error.
     pub fn job_work_boundary(&mut self, claim: &JobClaim) -> Result<()> {
+        self.check_worker_stop()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

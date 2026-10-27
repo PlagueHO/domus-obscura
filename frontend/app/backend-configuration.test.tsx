@@ -21,6 +21,7 @@ vi.mock("./hooks", async (importOriginal) => ({
 }));
 
 const configuration: BackendConfigurationState["active"] = {
+  production_worker: null,
   environment: "development",
   system_settings_read_only: false,
   services: {
@@ -263,6 +264,7 @@ describe("backend configuration inspection", () => {
       expect(sectionUpdate(editor.draft, "music_acquisition")).toEqual({
         section: "music_acquisition",
         local_acquisition: null,
+        production_worker: null,
       });
       expect(sectionUpdate(editor.draft, "tls")).not.toHaveProperty("local_acquisition");
     });

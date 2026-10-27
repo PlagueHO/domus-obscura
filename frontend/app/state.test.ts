@@ -98,6 +98,31 @@ describe("download action eligibility", () => {
     expect(canStart(job, plan, source, cover, { ...status, enabled: false }, true)).toBe(false);
     expect(canStart(job, plan, source, cover, { ...status, busy: true }, true)).toBe(false);
   });
+  it("allows bounded production admission while the worker is active or offline", () => {
+    const queued: LocalStatus = {
+      ...status,
+      worker: {
+        online: false,
+        stopping: false,
+        active_revision: null,
+        capacity: 64,
+        unfinished: 1,
+        active: 1,
+      },
+    };
+    expect(canStart(job, plan, source, cover, queued, true)).toBe(true);
+    expect(
+      canStart(
+        job,
+        plan,
+        source,
+        cover,
+        { ...queued, worker: { ...queued.worker!, online: true } },
+        true,
+      ),
+    ).toBe(true);
+    expect(canStart(job, plan, source, cover, { ...queued, busy: true }, true)).toBe(false);
+  });
   it("rejects missing, stale, different-job and incomplete candidates", () => {
     expect(canStart(job, plan, undefined, cover, status, true)).toBe(false);
     expect(canStart(job, plan, source, undefined, status, true)).toBe(false);

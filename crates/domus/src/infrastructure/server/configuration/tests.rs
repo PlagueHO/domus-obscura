@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::{Value, json};
 
+mod worker;
+
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn section_command(

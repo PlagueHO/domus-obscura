@@ -2,6 +2,64 @@ use domus::domain::{LibraryPath, Page};
 use domus::infrastructure::store::{Observation, Store};
 use tempfile::tempdir;
 
+/// Generated worker-history/query evidence, not execution or process-memory evidence.
+#[test]
+#[ignore = "separate million-record scale check: cargo task scale"]
+fn million_worker_requests_keep_filtering_and_eligible_selection_indexed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let data = tempdir()?;
+    let database = data.path().join("worker-scale.db");
+    let store = Store::open(&database)?;
+    let raw = rusqlite::Connection::open(&database)?;
+    raw.execute_batch(
+        "WITH RECURSIVE sequence(value) AS (
+             SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<1000000
+         )
+         INSERT INTO worker_requests(lane,target,body,configuration_binding,state)
+         SELECT 'acquisition','job-'||value,
+                json_object('operation','acquire','job_id',value,'plan_version',1,
+                    'source_candidate',NULL,'acknowledge_new_only_publication',json('true')),
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                CASE WHEN value<=999900 THEN 'complete' ELSE 'queued' END
+         FROM sequence;",
+    )?;
+    let status = store.worker_status(1024)?;
+    assert_eq!(status.unfinished, 100);
+    assert_eq!(status.active, 0);
+    assert!(!status.online);
+    let rows = store.worker_requests(Page::new(999900, 50)?)?;
+    assert_eq!(rows.len(), 50);
+    assert_eq!(rows[0].id, 999901);
+    assert_eq!(rows[49].id, 999950);
+    let one = store.worker_requests_for_job(Page::new(0, 50)?, Some(1000000))?;
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].id, 1000000);
+    for (sql, index) in [
+        (
+            "EXPLAIN QUERY PLAN SELECT id FROM worker_requests WHERE target='job-1000000' AND id>0 ORDER BY id LIMIT 50",
+            "worker_request_job_history",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT id FROM worker_requests WHERE lane='acquisition' AND state IN ('queued','interrupted','running') AND (state IN ('queued','interrupted') OR (state='running' AND lease_until<=unixepoch())) AND (lease_until IS NULL OR lease_until<=unixepoch()) ORDER BY id LIMIT 1",
+            "worker_request_eligible",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT id FROM worker_requests WHERE id>0 AND state!='complete' ORDER BY id LIMIT 50",
+            "worker_request_unfinished_history",
+        ),
+    ] {
+        let details = raw
+            .prepare(sql)?
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            details.iter().any(|detail| detail.contains(index)),
+            "missing bounded query index: {details:?}"
+        );
+    }
+    Ok(())
+}
+
 /// Generated plan-history/query evidence only, not worker or memory evidence.
 #[test]
 #[ignore = "separate million-record scale check: cargo task scale"]

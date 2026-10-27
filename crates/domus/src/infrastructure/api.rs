@@ -29,6 +29,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 const SESSION_COOKIE: &str = "__Host-domus-session";
+#[cfg(test)]
+mod worker_tests;
 const LOGIN_COOKIE: &str = "__Host-domus-login";
 
 #[derive(Clone)]
@@ -37,7 +39,9 @@ pub struct Api(Arc<Shared>);
 struct Shared {
     browser: Option<super::browser::BrowserAssets>,
     local: Option<super::local_runtime::LocalRuntime>,
+    production_worker: Option<super::production_worker::WorkerConfiguration>,
     services: super::services::ServiceHost,
+    service_configuration: crate::application::services::ServiceConfiguration,
     system_settings_read_only: bool,
     backend_configuration: Option<Arc<super::server::configuration::ConfigurationService>>,
     request_slots: Semaphore,
@@ -91,6 +95,13 @@ impl From<Error> for ApiError {
             ),
             Error::Conflict(message) => Self::new(StatusCode::CONFLICT, message),
             Error::Busy(message) => Self::new(StatusCode::SERVICE_UNAVAILABLE, message),
+            Error::WorkerStopping => {
+                Self::new(StatusCode::SERVICE_UNAVAILABLE, "worker is stopping")
+            }
+            Error::WorkerWaiting => Self::new(
+                StatusCode::CONFLICT,
+                "worker request is waiting for an explicit decision",
+            ),
             Error::Database(rusqlite::Error::QueryReturnedNoRows) => {
                 Self::new(StatusCode::NOT_FOUND, "record not found")
             }
@@ -241,6 +252,8 @@ impl Api {
         Ok(Self(Arc::new(Shared {
             browser: None,
             local: None,
+            production_worker: None,
+            service_configuration: configuration.clone(),
             services: super::services::ServiceHost::with_catalog(store, configuration, catalog)?,
             system_settings_read_only: false,
             backend_configuration: None,
@@ -259,6 +272,15 @@ impl Api {
             .route("/", get(browser_index))
             .route("/assets/{name}", get(browser_asset))
             .route("/api/local/status", get(local_status))
+            .route("/api/worker/requests", get(worker_requests))
+            .route(
+                "/api/worker/requests/{id}/retry",
+                post(worker_retry).layer(DefaultBodyLimit::max(64)),
+            )
+            .route(
+                "/api/worker/requests/{id}/dismiss",
+                post(worker_dismiss).layer(DefaultBodyLimit::max(64)),
+            )
             .route(
                 "/api/local/source-search",
                 post(local_search).layer(DefaultBodyLimit::max(512)),
@@ -475,9 +497,24 @@ impl Api {
                 "local acquisition is development-only".into(),
             ));
         }
+
         Arc::get_mut(&mut self.0)
             .ok_or(Error::Internal("API already shared"))?
             .local = Some(local);
+        Ok(self)
+    }
+
+    pub(crate) fn with_production_worker(
+        mut self,
+        configuration: super::production_worker::WorkerConfiguration,
+    ) -> Result<Self> {
+        let shared = Arc::get_mut(&mut self.0).ok_or(Error::Internal("API is already shared"))?;
+        if shared.local.is_some() {
+            return Err(Error::Conflict(
+                "local and production workers are mutually exclusive".into(),
+            ));
+        }
+        shared.production_worker = Some(configuration);
         Ok(self)
     }
 
@@ -1219,12 +1256,25 @@ async fn browser_asset(State(api): State<Api>, Path(name): Path<String>) -> Resp
 async fn local_status(
     State(api): State<Api>,
 ) -> ApiResult<Json<super::local_runtime::LocalStatus>> {
+    if let Some(worker) = &api.0.production_worker {
+        let capacity = worker.queue_capacity;
+        let status = api
+            .database(move |store| store.worker_status(capacity))
+            .await?;
+        return Ok(Json(super::local_runtime::LocalStatus {
+            enabled: worker.acquisition.is_some(),
+            busy: status.unfinished >= capacity,
+            last_error: None,
+            worker: Some(status),
+        }));
+    }
     Ok(Json(match &api.0.local {
         Some(local) => local.status()?,
         None => super::local_runtime::LocalStatus {
             enabled: false,
             busy: false,
             last_error: None,
+            worker: None,
         },
     }))
 }
@@ -1248,6 +1298,27 @@ async fn local_run(
     Path((job, version)): Path<(i64, i64)>,
     Json(request): Json<super::worker::StartLocalDownload>,
 ) -> ApiResult<StatusCode> {
+    if let Some(worker) = &api.0.production_worker {
+        if worker.acquisition.is_none() {
+            return Err(Error::Conflict("worker acquisition is not configured".into()).into());
+        }
+        let capacity = worker.queue_capacity;
+        let binding = worker.binding(&api.0.service_configuration)?;
+        api.database(move |store| {
+            store.enqueue_worker(
+                super::production_worker::WorkerOperation::Acquire {
+                    job_id: job,
+                    plan_version: version,
+                    source_candidate: request.source_candidate,
+                    acknowledge_new_only_publication: request.acknowledge_new_only_publication,
+                },
+                capacity,
+                &binding,
+            )
+        })
+        .await?;
+        return Ok(StatusCode::ACCEPTED);
+    }
     api.local()?.start(job, version, request)?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -1257,6 +1328,27 @@ async fn local_publication_resume(
     Path((job, version)): Path<(i64, i64)>,
     Json(request): Json<super::worker::ResumePublication>,
 ) -> ApiResult<StatusCode> {
+    if let Some(worker) = &api.0.production_worker {
+        if worker.acquisition.is_none() {
+            return Err(Error::Conflict("worker acquisition is not configured".into()).into());
+        }
+        let capacity = worker.queue_capacity;
+        let binding = worker.binding(&api.0.service_configuration)?;
+        api.database(move |store| {
+            store.enqueue_worker(
+                super::production_worker::WorkerOperation::Publish {
+                    job_id: job,
+                    plan_version: version,
+                    normalization_run: request.normalization_run,
+                    acknowledge_new_only_publication: request.acknowledge_new_only_publication,
+                },
+                capacity,
+                &binding,
+            )
+        })
+        .await?;
+        return Ok(StatusCode::ACCEPTED);
+    }
     api.local()?.resume_publication(job, version, request)?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -1378,15 +1470,93 @@ async fn scan_location(
     State(api): State<Api>,
     Path(id): Path<i64>,
     Json(_request): Json<ScanLocation>,
-) -> ApiResult<Json<Location>> {
+) -> ApiResult<(StatusCode, Json<Location>)> {
     api.require_configuration_write().await?;
+    if let Some(worker) = &api.0.production_worker {
+        let capacity = worker.queue_capacity;
+        let binding = worker.binding(&api.0.service_configuration)?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(
+                api.database(move |store| {
+                    store.enqueue_worker(
+                        super::production_worker::WorkerOperation::Scan { location_id: id },
+                        capacity,
+                        &binding,
+                    )?;
+                    store.location(id)
+                })
+                .await?,
+            ),
+        ));
+    }
+    Ok((
+        StatusCode::OK,
+        Json(
+            api.database(move |store| {
+                crate::application::scan_location(store, id)?;
+                store.location(id)
+            })
+            .await?,
+        ),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WorkerPageQuery {
+    after: i64,
+    limit: u16,
+    job_id: Option<i64>,
+    unfinished_only: bool,
+}
+
+impl Default for WorkerPageQuery {
+    fn default() -> Self {
+        Self {
+            after: 0,
+            limit: 50,
+            job_id: None,
+            unfinished_only: false,
+        }
+    }
+}
+
+async fn worker_requests(
+    State(api): State<Api>,
+    Query(query): Query<WorkerPageQuery>,
+) -> ApiResult<Json<Vec<super::production_worker::WorkerRequest>>> {
+    let page = Page::new(query.after, query.limit)?;
     Ok(Json(
         api.database(move |store| {
-            crate::application::scan_location(store, id)?;
-            store.location(id)
+            if query.unfinished_only {
+                store.unfinished_worker_requests(page, query.job_id)
+            } else {
+                store.worker_requests_for_job(page, query.job_id)
+            }
         })
         .await?,
     ))
+}
+
+async fn worker_retry(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+    if api.0.production_worker.is_none() {
+        return Err(Error::Conflict("production worker is not configured".into()).into());
+    }
+    let request = api.database(move |store| store.worker_request(id)).await?;
+    if matches!(
+        request.operation,
+        super::production_worker::WorkerOperation::Scan { .. }
+    ) {
+        api.require_configuration_write().await?;
+    }
+    api.database(move |store| store.retry_worker(id)).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn worker_dismiss(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+    api.database(move |store| store.dismiss_worker(id)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 #[derive(Deserialize, ts_rs::TS)]
 #[serde(default, deny_unknown_fields)]

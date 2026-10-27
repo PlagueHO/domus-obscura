@@ -47,6 +47,8 @@ export function BackendConfigurationForm({
     client_secret_file: saved?.client_secret_file_configured,
     private_key_file: saved?.private_key_file_configured,
     "local_acquisition.credentials_file": saved?.local_acquisition?.credentials_file_configured,
+    "production_worker.acquisition.credentials_file":
+      saved?.production_worker?.acquisition?.credentials_file_configured,
   };
   const visible = (value: ConfigurationSection) => section === undefined || section === value;
   const update = <K extends keyof BackendConfigurationDraft>(
@@ -398,6 +400,123 @@ export function BackendConfigurationForm({
             >
               I acknowledge that Soulseek login uses plaintext.
             </Check>
+          </>
+        )}
+      </fieldset>
+      <fieldset
+        disabled={disabled || !visible("music_acquisition")}
+        hidden={!visible("music_acquisition")}
+      >
+        <legend>Production worker</legend>
+        <Check
+          checked={draft.production_worker !== null}
+          onChange={(enabled) =>
+            update("production_worker", enabled ? { queue_capacity: 64, acquisition: null } : null)
+          }
+        >
+          Configure the separate production worker
+        </Check>
+        <p>
+          Saving does not restart the worker. Restart it separately at a safe boundary. Do not
+          enable development acquisition at the same time.
+        </p>
+        {draft.production_worker && (
+          <>
+            {field(
+              "production_worker.queue_capacity",
+              "Queue capacity",
+              "Allow 1 through 1024 unfinished requests. Waiting requests count. A lower limit never deletes saved requests.",
+              <input
+                type="number"
+                min={1}
+                max={1024}
+                step={1}
+                required
+                value={draft.production_worker.queue_capacity}
+                onChange={(event) =>
+                  draft.production_worker &&
+                  update("production_worker", {
+                    ...draft.production_worker,
+                    queue_capacity: Number(event.target.value),
+                  })
+                }
+              />,
+            )}
+            <Check
+              checked={draft.production_worker.acquisition !== null}
+              onChange={(enabled) =>
+                draft.production_worker &&
+                update("production_worker", {
+                  ...draft.production_worker,
+                  acquisition: enabled
+                    ? {
+                        staging_root: "",
+                        credentials_file: { action: "keep" },
+                        server: "",
+                        acknowledge_plaintext_login: false,
+                      }
+                    : null,
+                })
+              }
+            >
+              Configure approved acquisition and publication
+            </Check>
+            <p>Without acquisition settings, the worker can run read-only index scans only.</p>
+            {draft.production_worker.acquisition && (
+              <>
+                {text(
+                  "production_worker.acquisition.staging_root",
+                  "Worker staging root",
+                  draft.production_worker.acquisition.staging_root,
+                  (staging_root) =>
+                    draft.production_worker?.acquisition &&
+                    update("production_worker", {
+                      ...draft.production_worker,
+                      acquisition: { ...draft.production_worker.acquisition, staging_root },
+                    }),
+                  "Existing private staging root with its native binding.",
+                )}
+                {hidden(
+                  "production_worker.acquisition.credentials_file",
+                  "Worker Soulseek credential file",
+                  draft.production_worker.acquisition.credentials_file,
+                  (credentials_file) =>
+                    draft.production_worker?.acquisition &&
+                    update("production_worker", {
+                      ...draft.production_worker,
+                      acquisition: { ...draft.production_worker.acquisition, credentials_file },
+                    }),
+                  false,
+                )}
+                {text(
+                  "production_worker.acquisition.server",
+                  "Worker Soulseek server",
+                  draft.production_worker.acquisition.server,
+                  (server) =>
+                    draft.production_worker?.acquisition &&
+                    update("production_worker", {
+                      ...draft.production_worker,
+                      acquisition: { ...draft.production_worker.acquisition, server },
+                    }),
+                  "Public IPv4 address and port. Validation does not connect.",
+                )}
+                <Check
+                  checked={draft.production_worker.acquisition.acknowledge_plaintext_login}
+                  onChange={(acknowledge_plaintext_login) =>
+                    draft.production_worker?.acquisition &&
+                    update("production_worker", {
+                      ...draft.production_worker,
+                      acquisition: {
+                        ...draft.production_worker.acquisition,
+                        acknowledge_plaintext_login,
+                      },
+                    })
+                  }
+                >
+                  I acknowledge that the worker Soulseek login uses plaintext.
+                </Check>
+              </>
+            )}
           </>
         )}
       </fieldset>

@@ -29,6 +29,10 @@ pub fn scan_location(store: &mut Store, location_id: i64) -> Result<i64> {
     let location = store.location(location_id)?;
     let claim = store.begin_scan(location_id)?;
     if let Err(error) = observe(store, &claim, Path::new(&location.root)) {
+        if matches!(error, Error::WorkerStopping) {
+            store.release_scan(&claim)?;
+            return Err(error);
+        }
         store.scan_error(&claim, &error.to_string())?;
     }
     if !store.finish_scan(&claim)? {
@@ -79,8 +83,12 @@ fn observe(store: &mut Store, claim: &ScanClaim, root: &Path) -> Result<()> {
     store.check_native_root(&location.root, "media", root.native_root())?;
     let mut batch = Vec::with_capacity(128);
     while let Some(directory) = store.next_directory(claim)? {
+        store.check_worker_stop()?;
         let result = observe_directory(store, claim, &root, &directory, &mut batch);
         if let Err(error) = result {
+            if matches!(error, Error::WorkerStopping) {
+                return Err(error);
+            }
             store.scan_error(claim, &error.to_string())?;
         }
         flush(store, claim, &mut batch)?;
@@ -142,6 +150,7 @@ fn observe_directory(
         });
         if batch.len() == 128 {
             flush(store, claim, batch)?;
+            store.check_worker_stop()?;
         }
     }
     Ok(())

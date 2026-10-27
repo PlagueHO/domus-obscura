@@ -197,7 +197,7 @@ fn source_review_does_not_invent_receipts_for_manual_selection_or_legacy_upgrade
     )?)?;
     drop(fixture.store);
     let raw = Connection::open(&fixture.database)?;
-    raw.execute_batch("DROP TABLE transfer_evidence; DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; PRAGMA user_version=17;")?;
+    raw.execute_batch("DROP TABLE worker_requests; DROP TABLE worker_host; DROP TABLE transfer_evidence; DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; PRAGMA user_version=17;")?;
     assert!(Store::open_current_existing(&fixture.database).is_err());
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
@@ -206,7 +206,7 @@ fn source_review_does_not_invent_receipts_for_manual_selection_or_legacy_upgrade
     fixture.store = Store::open_existing(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        22
+        23
     );
     assert!(
         fixture

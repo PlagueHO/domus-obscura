@@ -4,6 +4,10 @@ This is an explicit local development workflow, not a complete V1 deployment.
 It uses the fixed `_anonymous` identity. It needs no Entra registration.
 Production remains the default and requires Entra. All listeners stay on loopback.
 
+The separate [production worker](../README.md#separate-production-worker) uses
+`production_worker`, not this guide's optional `local_acquisition` runtime.
+Do not enable both. Production source discovery is not part of that worker.
+
 ## Build and create a fresh Windows setup
 
 Use the pinned tools. Run these commands from the repository in PowerShell 7:

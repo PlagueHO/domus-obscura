@@ -16,6 +16,10 @@ pub enum Error {
     ArtworkRequired(i64),
     #[error("job stopped at a safe boundary; inspect job control {0}")]
     JobStopped(i64),
+    #[error("worker is stopping at a safe boundary")]
+    WorkerStopping,
+    #[error("worker request is waiting for its saved decision and explicit recovery action")]
+    WorkerWaiting,
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]

@@ -24,6 +24,7 @@ mod sessions;
 mod source_candidates;
 mod transfer_evidence;
 mod transfers;
+mod worker_requests;
 pub use artwork::ArtworkCandidate;
 pub use artwork_questions::ArtworkDecision;
 pub use caa::CaaArtworkEvidence;
@@ -43,6 +44,7 @@ pub use sessions::{CreatedSession, SessionCredential, SessionIdentity};
 pub use source_candidates::SourceCandidate;
 pub use transfer_evidence::{TransferEvidence, TransferObservation};
 pub use transfers::{SourceFile, TransferFile, TransferSummary};
+pub(crate) use worker_requests::RequestClaim;
 
 const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/001_initial.sql"),
@@ -67,12 +69,14 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/020_plan_events.sql"),
     include_str!("../../migrations/021_cache_roots.sql"),
     include_str!("../../migrations/022_transfer_evidence.sql"),
+    include_str!("../../migrations/023_worker_requests.sql"),
 ];
 
 pub struct Store {
     connection: Connection,
     path: PathBuf,
     cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
+    worker_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 pub struct ScanClaim {
@@ -232,6 +236,7 @@ impl Store {
             connection,
             path,
             cache: None,
+            worker_stop: None,
         })
     }
 
@@ -277,6 +282,7 @@ impl Store {
             connection,
             path: std::fs::canonicalize(path)?,
             cache: None,
+            worker_stop: None,
         })
     }
 
@@ -298,6 +304,53 @@ impl Store {
 
     pub fn database_path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn with_worker_stop(
+        mut self,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.worker_stop = Some(stop);
+        self
+    }
+
+    pub(crate) fn check_worker_stop(&self) -> Result<()> {
+        if self
+            .worker_stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Acquire))
+        {
+            return Err(Error::WorkerStopping);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn release_job_claim(&self, claim: &JobClaim) -> Result<()> {
+        self.connection.execute(
+            "UPDATE jobs SET owner=NULL,lease_until=NULL WHERE id=?1 AND owner=?2
+             AND plan_version=?3 AND claim_generation=?4",
+            params![claim.job, claim.owner, claim.plan_version, claim.generation],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn completed_worker_normalization(&self, job: i64, version: i64) -> Result<i64> {
+        self.connection.query_row(
+            "SELECT id FROM normalization_runs WHERE job_id=?1 AND plan_version=?2 AND completed_at IS NOT NULL
+             ORDER BY id DESC LIMIT 1", params![job,version], |row|row.get(0),
+        ).map_err(Error::from)
+    }
+
+    pub(crate) fn require_current_worker_plan(&self, job: i64, version: i64) -> Result<()> {
+        let current: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND plan_version=?2)",
+            params![job, version],
+            |row| row.get(0),
+        )?;
+        if !current {
+            return Err(Error::Conflict("worker plan version changed".into()));
+        }
+        Ok(())
     }
 
     pub fn add_location(&self, root: &str, kind: &str) -> Result<i64> {
@@ -456,6 +509,16 @@ impl Store {
         if changed != 1 {
             return Err(Error::Conflict("scan ownership expired or changed".into()));
         }
+
+        Ok(())
+    }
+
+    pub(crate) fn release_scan(&self, claim: &ScanClaim) -> Result<()> {
+        self.connection.execute(
+            "UPDATE scans SET lease_until=unixepoch()-1 WHERE id=?1 AND location_id=?2
+             AND owner=?3 AND status='running'",
+            params![claim.id, claim.location, claim.owner],
+        )?;
         Ok(())
     }
 
