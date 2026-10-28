@@ -160,9 +160,18 @@ as well as disabling form edits, and cannot be disabled from the UI.
 
 System configuration uses a sidebar within the normal application shell:
 **Core application** contains General, Identity, TLS, and Storage/cache.
-**Media > Music** contains Providers, Acquisition, Output policy, and Library
+**Media > Music** contains Providers, Acquisition, Sharing, Output policy, and Library
 roots. Other media categories can be added later; no Movies page is implemented.
 The JSON storage format remains unchanged.
+
+Sharing is a shared administrator policy. It defaults to None and also offers
+All and Specific allowlist. Select only explicitly bound registered library
+folders, with optional relative subfolders and public aliases. Sharing is
+read-only and initially permits MP3, FLAC and JPEG. It uses the same account
+session as acquisition. Resource limits are finite, validated and configurable.
+Saving settings never starts sharing or opens a listener. Restart the separate
+worker to activate the saved configuration. Listener address and port are
+explicit; automatic port mapping remains disabled.
 
 Open each section directly to its saved settings form. Use the shared Component
 library and a compact reload notice only when saved backend changes need

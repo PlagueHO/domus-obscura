@@ -1,6 +1,7 @@
 use super::*;
 use serde_json::{Value, json};
 
+mod sharing;
 mod worker;
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;

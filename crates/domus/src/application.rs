@@ -8,6 +8,7 @@ use std::time::UNIX_EPOCH;
 pub mod catalog;
 mod normalization;
 pub mod services;
+pub mod sharing;
 pub use normalization::normalize_album;
 mod acquisition;
 pub(crate) use acquisition::reconcile_local_inputs;

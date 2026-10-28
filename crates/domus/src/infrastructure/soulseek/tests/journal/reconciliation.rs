@@ -410,7 +410,21 @@ fn legacy_transfer_upgrade_keeps_source_tokens_and_bytes_without_inventing_evide
     drop(staging);
     drop(fixture.store);
     let raw = Connection::open(&fixture.database)?;
-    raw.execute_batch("DROP TABLE worker_requests; DROP TABLE worker_host; DROP TABLE transfer_evidence; PRAGMA user_version=21;")?;
+    raw.execute_batch(
+        "DROP TRIGGER sharing_publication_intent;
+         DROP TRIGGER sharing_publication_receipt;
+         DROP TRIGGER sharing_binding_insert;
+         DROP TRIGGER sharing_binding_immutable;
+         DROP TRIGGER sharing_scan_changed;
+         DROP TABLE share_catalog_paths;
+         DROP TABLE share_catalogs;
+         DROP TABLE share_bindings;
+         DROP TABLE share_visibility;
+         DROP TABLE worker_requests;
+         DROP TABLE worker_host;
+         DROP TABLE transfer_evidence;
+         PRAGMA user_version=21;",
+    )?;
     drop(raw);
     fixture.store = Store::open_existing(&fixture.database)?;
     assert!(

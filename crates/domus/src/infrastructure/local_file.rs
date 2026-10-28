@@ -11,6 +11,14 @@ pub(crate) struct ProcessLock {
 
 impl ProcessLock {
     pub(crate) fn acquire(database: &Path, purpose: &str) -> Result<Self> {
+        Self::acquire_mode(database, purpose, false)
+    }
+
+    pub(crate) fn acquire_shared(database: &Path, purpose: &str) -> Result<Self> {
+        Self::acquire_mode(database, purpose, true)
+    }
+
+    fn acquire_mode(database: &Path, purpose: &str, shared: bool) -> Result<Self> {
         use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
         use cap_std::fs::OpenOptions;
         if purpose.is_empty()
@@ -60,7 +68,12 @@ impl ProcessLock {
             ));
         }
         FilePermissions::current()?.check(&file, true)?;
-        match file.try_lock() {
+        let locked = if shared {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        };
+        match locked {
             Ok(()) => Ok(Self { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => {
                 Err(Error::Busy("another process owns this worker or account"))

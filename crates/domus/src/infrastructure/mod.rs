@@ -19,6 +19,8 @@ pub mod production_worker;
 pub(crate) mod publication;
 pub mod server;
 pub mod services;
+pub mod shares;
+pub mod sharing;
 pub mod soulseek;
 pub mod staging;
 pub mod store;

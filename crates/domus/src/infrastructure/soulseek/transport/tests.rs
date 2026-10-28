@@ -5,6 +5,271 @@ use std::net::TcpListener;
 
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn sharing_existing_control_is_reused_by_acquisition_without_another_peer_init() -> TestResult {
+    let (client, _server) = pair()?;
+    let owner = Channel::server(client)?;
+    let (client, mut remote) = pair()?;
+    let address = remote.local_addr()?.to_string().parse()?;
+    let mut sharing = owner.sharing_peer_for(client, "album-peer")?;
+    let writing = sharing
+        .writer
+        .lock()
+        .map_err(|_| "fixture writer poisoned")?;
+    assert!(matches!(
+        owner.reuse_peer("album-peer", address),
+        Err(Error::Busy(_))
+    ));
+    drop(writing);
+    assert!(
+        owner
+            .reuse_peer("album-peer", "8.8.8.8:1".parse()?)?
+            .is_none()
+    );
+    let mut acquisition = owner
+        .reuse_peer("album-peer", address)?
+        .ok_or("existing peer not reused")?;
+    assert_eq!(acquisition.identity(), sharing.identity());
+    assert!(sharing.acquisition_in_use());
+    assert!(owner.reuse_peer("album-peer", address)?.is_none());
+    let (duplicate, mut rejected) = pair()?;
+    assert!(matches!(
+        owner.sharing_peer_for(duplicate, "album-peer"),
+        Err(Error::Busy(_))
+    ));
+    assert_eq!(rejected.read(&mut [0])?, 0);
+    send(&mut remote, 4, &[])?;
+    let mut offer = 1u32.to_le_bytes().to_vec();
+    offer.extend_from_slice(&73u32.to_le_bytes());
+    string(&mut offer, "Music\\track.mp3");
+    offer.extend_from_slice(&91u64.to_le_bytes());
+    send(&mut remote, 40, &offer)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    assert!(matches!(
+        acquisition.receive(deadline, &mut || Ok(()), |_| true)?,
+        Event::Peer(super::super::messages::PeerEvent::Offer { token: 73, .. })
+    ));
+    assert!(matches!(
+        sharing.receive(deadline, &mut || Ok(()), |_| true)?,
+        Event::Peer(super::super::messages::PeerEvent::ShareList)
+    ));
+    acquisition.send(41, &[0; 5])?;
+    assert_eq!(
+        read_frame(|bytes| {
+            remote.read_exact(bytes)?;
+            Ok(())
+        })?
+        .0,
+        41
+    );
+    drop(acquisition);
+    owner.send(35, &[0; 8])?;
+    assert!(!sharing.acquisition_in_use());
+    sharing.send(5, &[0])?;
+    assert_eq!(
+        read_frame(|bytes| {
+            remote.read_exact(bytes)?;
+            Ok(())
+        })?
+        .0,
+        5
+    );
+    Ok(())
+}
+
+#[test]
+fn sharing_metadata_routes_leave_reserved_capacity_for_acquisition() -> TestResult {
+    let (client, _server) = pair()?;
+    let owner = Channel::server(client)?;
+    let mut metadata = Vec::new();
+    for index in 0..20 {
+        metadata.push(owner.metadata_subscription(&format!("peer-{index}"))?);
+    }
+    assert!(matches!(
+        owner.metadata_subscription("one-too-many"),
+        Err(Error::Busy(_))
+    ));
+    let acquisition = owner.subscribe("album-peer")?;
+    assert_eq!(acquisition.generation(), owner.generation());
+    Ok(())
+}
+
+#[test]
+fn sharing_and_acquisition_use_one_server_reader_without_consuming_each_others_events() -> TestResult
+{
+    let (client, mut server) = pair()?;
+    let mut owner = Channel::server(client)?;
+    owner.enable_sharing()?;
+    let mut acquisition = owner.subscribe("album-peer")?;
+    let mut search = Vec::new();
+    string(&mut search, "search-peer");
+    search.extend_from_slice(&7u32.to_le_bytes());
+    string(&mut search, "artist album");
+    send(&mut server, 26, &search)?;
+    let mut address = Vec::new();
+    string(&mut address, "album-peer");
+    address.extend_from_slice(&u32::from(std::net::Ipv4Addr::new(8, 8, 8, 8)).to_le_bytes());
+    address.extend_from_slice(&2234u32.to_le_bytes());
+    send(&mut server, 3, &address)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    assert!(
+        matches!(acquisition.receive(deadline, &mut || Ok(()), |_| true)?,
+        Event::Server(ServerEvent::Address { username, .. }) if username == "album-peer")
+    );
+    assert!(matches!(owner.receive(deadline, &mut || Ok(()), |_| true)?,
+        Event::Server(ServerEvent::Search { username, token: 7, .. }) if username == "search-peer"));
+    drop(acquisition);
+    owner.send(35, &[0; 8])?;
+    assert_eq!(
+        read_frame(|bytes| {
+            server.read_exact(bytes)?;
+            Ok(())
+        })?
+        .0,
+        35
+    );
+    Ok(())
+}
+
+#[test]
+fn sharing_large_output_streams_without_increasing_normal_frame_limits() -> TestResult {
+    let (client, mut server) = pair()?;
+    let channel = Channel::isolated_peer(client)?;
+    let bytes = 2 * MAX_FRAME + 17;
+    let reader = thread::spawn(move || -> std::io::Result<()> {
+        let mut header = [0; 8];
+        server.read_exact(&mut header)?;
+        assert_eq!(
+            u32::from_le_bytes(header[..4].try_into().map_err(std::io::Error::other)?),
+            bytes as u32 + 4
+        );
+        assert_eq!(
+            u32::from_le_bytes(header[4..].try_into().map_err(std::io::Error::other)?),
+            5
+        );
+        let mut left = bytes;
+        let mut buffer = [0; 4096];
+        while left > 0 {
+            let wanted = left.min(buffer.len());
+            server.read_exact(&mut buffer[..wanted])?;
+            assert!(buffer[..wanted].iter().all(|byte| *byte == 37));
+            left -= wanted;
+        }
+
+        Ok(())
+    });
+    channel.send_stream(
+        5,
+        bytes as u32,
+        &mut std::io::repeat(37),
+        65_536,
+        IO_TIMEOUT,
+        || Ok(()),
+    )?;
+    reader.join().map_err(|_| "stream fixture panicked")??;
+    assert!(send(&mut Vec::new(), 5, &vec![0; MAX_FRAME]).is_err());
+    Ok(())
+}
+
+#[test]
+fn sharing_requests_on_an_acquisition_control_socket_have_a_separate_route() -> TestResult {
+    let (client, _server) = pair()?;
+    let owner = Channel::server(client)?;
+    let (sent, received) = mpsc::sync_channel(4);
+    owner.share_connections(sent)?;
+    let (client, mut remote) = pair()?;
+    let mut acquisition = owner.peer(client)?;
+    send(&mut remote, 4, &[])?;
+    thread::sleep(Duration::from_millis(50));
+    acquisition.share_control("album-peer", "8.8.8.8:2234".parse()?)?;
+    let mut sharing = received.recv_timeout(Duration::from_secs(3))?.channel;
+    let mut body = 1u32.to_le_bytes().to_vec();
+    body.extend_from_slice(&73u32.to_le_bytes());
+    string(&mut body, "Music\\album\\track.mp3");
+    body.extend_from_slice(&91u64.to_le_bytes());
+    send(&mut remote, 40, &body)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    assert!(matches!(
+        acquisition.receive(deadline, &mut || Ok(()), |_| true)?,
+        Event::Peer(super::super::messages::PeerEvent::Offer { token: 73, .. })
+    ));
+    assert!(matches!(
+        sharing.receive(deadline, &mut || Ok(()), |_| true)?,
+        Event::Peer(super::super::messages::PeerEvent::ShareList)
+    ));
+    sharing.send(5, &[0])?;
+    acquisition.send(41, &[0; 5])?;
+    assert_eq!(
+        read_frame(|bytes| {
+            remote.read_exact(bytes)?;
+            Ok(())
+        })?
+        .0,
+        5
+    );
+    assert_eq!(
+        read_frame(|bytes| {
+            remote.read_exact(bytes)?;
+            Ok(())
+        })?
+        .0,
+        41
+    );
+    Ok(())
+}
+
+#[test]
+fn sharing_control_and_failure_tokens_do_not_poison_acquisition_file_setup() -> TestResult {
+    let (client, mut server) = pair()?;
+    let mut owner = Channel::server(client)?;
+    owner.enable_sharing()?;
+    let mut acquisition = owner.subscribe("fixture-peer")?;
+    let mut control = connection_request(91);
+    let kind = 4 + "fixture-peer".len() + 4;
+    control[kind] = b'P';
+    send(&mut server, 18, &control)?;
+    send(&mut server, 1001, &92u32.to_le_bytes())?;
+    send(&mut server, 18, &connection_request(93))?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    assert!(matches!(
+        owner.receive(deadline, &mut || Ok(()), |_| true)?,
+        Event::Server(ServerEvent::Connect { token: 91, .. })
+    ));
+    assert!(matches!(
+        owner.receive(deadline, &mut || Ok(()), |_| true)?,
+        Event::Server(ServerEvent::CannotConnect(92))
+    ));
+    assert!(matches!(
+        acquisition.receive(deadline, &mut || Ok(()), |_| true)?,
+        Event::Server(ServerEvent::Connect { token: 93, .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn sharing_partial_stream_failure_closes_the_socket_before_another_frame() -> TestResult {
+    let (client, mut remote) = pair()?;
+    let channel = Channel::isolated_peer(client)?;
+    let mut checks = 0;
+    assert!(
+        channel
+            .send_stream(5, 8000, &mut std::io::repeat(7), 4096, IO_TIMEOUT, || {
+                checks += 1;
+                if checks == 3 {
+                    Err(Error::WorkerStopping)
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+    );
+    let mut received = Vec::new();
+    remote.read_to_end(&mut received)?;
+    assert_eq!(received.len(), 8 + 4096);
+    assert!(channel.send(41, &[0; 5]).is_err());
+    Ok(())
+}
+
 fn pair() -> std::io::Result<(TcpStream, TcpStream)> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let client = TcpStream::connect(listener.local_addr()?)?;
@@ -210,6 +475,7 @@ fn failed_write_ack_preserves_the_terminal_connection_error() -> TestResult {
         let (commands, receiver) = mpsc::sync_channel(MAX_COMMANDS);
         let state = Arc::new(State {
             error: Mutex::new(None),
+            borrowers: AtomicUsize::new(0),
         });
         let failed = Arc::clone(&state);
         let failure = Arc::new(Mutex::new(None));
@@ -250,11 +516,14 @@ fn failed_write_ack_preserves_the_terminal_connection_error() -> TestResult {
                 thread: Some(owner),
                 generation: GENERATION.fetch_add(1, Ordering::Relaxed),
                 failure,
+                sharing: Mutex::new(None),
             }),
             id: 1,
             events,
             pending: VecDeque::new(),
             state,
+            route: None,
+            writer: Arc::new(Mutex::new(())),
         };
         let error = channel
             .send(51, &[])

@@ -453,6 +453,7 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
     let mut fixture = Fixture::new(AudioFormat::Flac)?;
     drop(fixture.store);
     let raw = Connection::open(&fixture.database)?;
+    raw.execute_batch(include_str!("../support/drop_sharing.sql"))?;
     raw.execute_batch(
         "DROP TABLE worker_requests; DROP TABLE worker_host; DROP TABLE transfer_evidence; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots;
          DROP TABLE artwork_approvals;
@@ -468,7 +469,7 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
     fixture.store = Store::open_existing(&fixture.database)?;
     fixture.bind_roots()?;
     let version: i64 = raw.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 23);
+    assert_eq!(version, 24);
     let selected = fixture.store.prepare_artwork(
         fixture.job,
         fixture.version,
@@ -495,6 +496,7 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
         .store
         .record_normalized_audio(&fixture.claim, run.id, 1, &proof)?;
     drop(fixture.store);
+    raw.execute_batch(include_str!("../support/drop_sharing.sql"))?;
     raw.execute_batch(
         "DROP TABLE worker_requests; DROP TABLE worker_host; DROP TABLE transfer_evidence; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots;
          DROP TABLE artwork_approvals;

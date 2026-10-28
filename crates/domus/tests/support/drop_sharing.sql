@@ -1,0 +1,9 @@
+DROP TRIGGER sharing_publication_intent;
+DROP TRIGGER sharing_publication_receipt;
+DROP TRIGGER sharing_binding_insert;
+DROP TRIGGER sharing_binding_immutable;
+DROP TRIGGER sharing_scan_changed;
+DROP TABLE share_catalog_paths;
+DROP TABLE share_catalogs;
+DROP TABLE share_bindings;
+DROP TABLE share_visibility;

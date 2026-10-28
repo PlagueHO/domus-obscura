@@ -70,6 +70,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/021_cache_roots.sql"),
     include_str!("../../migrations/022_transfer_evidence.sql"),
     include_str!("../../migrations/023_worker_requests.sql"),
+    include_str!("../../migrations/024_sharing.sql"),
 ];
 
 pub struct Store {
@@ -304,6 +305,10 @@ impl Store {
 
     pub fn database_path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn sharing_connection(&self) -> &Connection {
+        &self.connection
     }
 
     pub(crate) fn with_worker_stop(

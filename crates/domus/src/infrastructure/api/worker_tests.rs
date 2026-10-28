@@ -38,6 +38,7 @@ async fn worker_api_queues_offline_scans_without_running_them_and_preserves_comm
         WorkerConfiguration {
             queue_capacity: 1,
             acquisition: None,
+            sharing: None,
         },
     )?;
     let path = format!("/api/locations/{location}/scan");
@@ -102,6 +103,7 @@ async fn worker_api_scan_retry_rechecks_system_settings_read_only() -> TestResul
         .with_production_worker(WorkerConfiguration {
             queue_capacity: 1,
             acquisition: None,
+            sharing: None,
         })?;
     let router = api.router();
     for path in [

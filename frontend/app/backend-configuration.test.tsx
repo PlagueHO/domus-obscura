@@ -1,7 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
-import { BackendConfiguration, confirmConfigurationReload } from "./BackendConfiguration";
+import {
+  BackendConfiguration,
+  confirmConfigurationReload,
+  sharingWorkerEvidence,
+} from "./BackendConfiguration";
 import { ApiError } from "./api";
 import { useResource } from "./hooks";
 import { BackendConfigurationForm } from "./BackendConfigurationForm";
@@ -13,6 +17,8 @@ import {
   dirtySections,
   sectionUpdate,
   discardConfigurationSection,
+  newSharingDraft,
+  sectionHasErrors,
 } from "./backend-configuration-state";
 
 vi.mock("./hooks", async (importOriginal) => ({
@@ -68,6 +74,32 @@ function render(data: BackendConfigurationState | undefined, error?: Error, load
 beforeEach(() => vi.mocked(useResource).mockReset());
 
 describe("backend configuration inspection", () => {
+  it("uses a fresh matching worker heartbeat, never the API snapshot, as worker evidence", () => {
+    const worker = {
+      online: true,
+      stopping: false,
+      active_revision: state.saved_revision,
+      capacity: 64,
+      unfinished: 0,
+      active: 0,
+    };
+    expect(sharingWorkerEvidence(worker, state.saved_revision, true)).toContain(
+      "heartbeat confirms",
+    );
+    expect(sharingWorkerEvidence(worker, "another-revision", true)).toContain(
+      "different configuration revision",
+    );
+    expect(sharingWorkerEvidence(worker, state.saved_revision, false)).toContain("unknown");
+    expect(
+      sharingWorkerEvidence({ ...worker, online: false }, state.saved_revision, true),
+    ).toContain("offline");
+    expect(
+      sharingWorkerEvidence({ ...worker, stopping: true }, state.saved_revision, true),
+    ).toContain("stopping");
+    expect(sharingWorkerEvidence(undefined, state.saved_revision, true)).not.toContain(
+      "confirms this",
+    );
+  });
   it("shows section navigation and the selected group without exposing other fields", () => {
     const markup = render(state);
     expect(markup).not.toContain("Configuration state");
@@ -230,6 +262,155 @@ describe("backend configuration inspection", () => {
   });
 
   describe("section save state", () => {
+    it("creates a sharing-only worker without marking acquisition as changed", () => {
+      const editor = beginConfigurationEdit(state);
+      editor.draft.production_worker = {
+        queue_capacity: 64,
+        acquisition: null,
+        sharing: newSharingDraft(),
+      };
+      expect(dirtySections(editor)).toEqual(["music_sharing"]);
+      const discarded = discardConfigurationSection(editor, "music_sharing");
+      expect(discarded.draft.production_worker).toBeNull();
+      expect(dirtySections(discarded)).toEqual([]);
+    });
+    it("keeps sharing and acquisition section ownership separate", () => {
+      const withWorker = {
+        ...configuration,
+        local_acquisition: null,
+        production_worker: {
+          queue_capacity: 64,
+          acquisition: null,
+          sharing: {
+            ...newSharingDraft(),
+            account: null,
+          },
+        },
+      };
+      const editor = beginConfigurationEdit({ ...state, active: withWorker, saved: withWorker });
+      editor.draft.production_worker!.sharing!.policy.access = "all";
+      editor.draft.production_worker!.sharing!.policy.roots = [{ binding_id: 3, alias: "Music" }];
+      expect(dirtySections(editor)).toEqual(["music_sharing"]);
+      expect(sectionUpdate(editor.draft, "music_acquisition")).toEqual({
+        section: "music_acquisition",
+        local_acquisition: null,
+        production_worker: { queue_capacity: 64, acquisition: null },
+      });
+      expect(sectionUpdate(editor.draft, "music_sharing")).not.toHaveProperty("production_worker");
+      editor.draft.production_worker!.queue_capacity = 8;
+      const discardSharing = discardConfigurationSection(editor, "music_sharing");
+      expect(discardSharing.draft.production_worker!.queue_capacity).toBe(8);
+      expect(discardSharing.draft.production_worker!.sharing!.policy.access).toBe("none");
+      const discardAcquisition = discardConfigurationSection(editor, "music_acquisition");
+      expect(discardAcquisition.draft.production_worker!.queue_capacity).toBe(64);
+      expect(discardAcquisition.draft.production_worker!.sharing!.policy.access).toBe("all");
+      expect(editor.baseline.production_worker!.sharing!.policy.access).toBe("none");
+    });
+
+    it("retains sibling worker drafts after either section saves", () => {
+      const withWorker = {
+        ...configuration,
+        local_acquisition: null,
+        production_worker: {
+          queue_capacity: 64,
+          acquisition: null,
+          sharing: { ...newSharingDraft(), account: null },
+        },
+      };
+      const editor = beginConfigurationEdit({ ...state, active: withWorker, saved: withWorker });
+      editor.draft.production_worker!.queue_capacity = 8;
+      editor.draft.production_worker!.sharing!.listen = "0.0.0.0:2244";
+      const sharingSaved = {
+        ...withWorker,
+        production_worker: {
+          ...withWorker.production_worker,
+          sharing: { ...newSharingDraft(), account: null, listen: "0.0.0.0:2244" },
+        },
+      };
+      const afterSharing = acceptConfigurationSave(
+        editor,
+        {
+          ...state,
+          saved: sharingSaved,
+        },
+        ["music_sharing"],
+      );
+      expect(afterSharing.draft.production_worker!.queue_capacity).toBe(8);
+      expect(dirtySections(afterSharing)).toEqual(["music_acquisition"]);
+      const acquisitionSaved = {
+        ...withWorker,
+        production_worker: {
+          ...withWorker.production_worker,
+          queue_capacity: 8,
+        },
+      };
+      const afterAcquisition = acceptConfigurationSave(
+        editor,
+        {
+          ...state,
+          saved: acquisitionSaved,
+        },
+        ["music_acquisition"],
+      );
+      expect(afterAcquisition.draft.production_worker!.sharing!.listen).toBe("0.0.0.0:2244");
+      expect(dirtySections(afterAcquisition)).toEqual(["music_sharing"]);
+      const errors = configurationErrors(editor, [
+        {
+          field: "production_worker.sharing.policy.limits",
+          message: "Invalid sharing limits",
+        },
+      ]);
+      expect(sectionHasErrors(errors, "music_sharing")).toBe(true);
+      expect(sectionHasErrors(errors, "music_acquisition")).toBe(false);
+    });
+
+    it("shows all sharing limits, units, explicit binding actions and hidden account references", () => {
+      vi.mocked(useResource).mockReturnValue({
+        data: [],
+        error: undefined,
+        loading: false,
+        refresh: vi.fn(),
+      });
+      const editor = beginConfigurationEdit(state);
+      const sharing = newSharingDraft();
+      sharing.policy.access = "allowlist";
+      sharing.account = {
+        credentials_file: { action: "keep" },
+        server: "8.8.8.8:2242",
+        acknowledge_plaintext_login: true,
+      };
+      editor.draft.production_worker = { queue_capacity: 64, acquisition: null, sharing };
+      const markup = renderToStaticMarkup(
+        <BackendConfigurationForm
+          editor={editor}
+          section="music_sharing"
+          disabled={false}
+          busy={false}
+          onChange={vi.fn()}
+          onValidate={vi.fn()}
+          onSave={vi.fn()}
+          onDiscard={vi.fn()}
+        />,
+      );
+      for (const name of Object.keys(sharing.policy.limits)) {
+        expect(markup).toContain(`name="production_worker.sharing.policy.limits.${name}"`);
+      }
+      expect(markup).toContain("None — sharing off");
+      expect(markup).toContain("Specific allowlist");
+      expect(markup).toContain("case-sensitive username");
+      expect(markup).toContain("Inspect folder");
+      expect(markup).toContain("Bind inspected folder");
+      expect(markup).toContain("bytes");
+      expect(markup).toContain("seconds");
+      expect(markup).toContain("Restart the separate worker");
+      expect(markup).toContain("The saved value stays hidden.");
+      expect(markup).not.toContain(
+        'name="production_worker.sharing.account.credentials_file" type="password"',
+      );
+      expect(markup).toContain("Save changes");
+      expect(markup).toContain("Discard changes");
+    });
+
     it("sends only owned fields and retains other section drafts after save", () => {
       const initial = beginConfigurationEdit(state);
       const editor = changeConfigurationDraft(initial, {

@@ -129,6 +129,7 @@ fn queue_upgrade_retains_legacy_completion_times_and_unknown_age() -> TestResult
     let unknown = store.enqueue(1)?;
     drop(store);
     let raw = Connection::open(&database)?;
+    raw.execute_batch(include_str!("support/drop_sharing.sql"))?;
     raw.execute_batch(
         "DROP TABLE worker_requests; DROP TABLE worker_host; DROP TABLE transfer_evidence; DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update;
          DROP TABLE queue_presentations; PRAGMA user_version=18;

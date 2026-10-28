@@ -16,6 +16,8 @@ pub struct WorkerConfiguration {
     #[serde(default = "default_capacity")]
     pub queue_capacity: u16,
     pub acquisition: Option<LocalAcquisition>,
+    #[serde(default)]
+    pub sharing: Option<super::sharing::SharingConfiguration>,
 }
 
 fn default_capacity() -> u16 {
@@ -46,6 +48,9 @@ impl WorkerConfiguration {
         }
         if let Some(acquisition) = &self.acquisition {
             acquisition.validate(store, services)?;
+        }
+        if let Some(sharing) = &self.sharing {
+            sharing.validate(store, self.acquisition.as_ref())?;
         }
         Ok(())
     }
@@ -315,6 +320,20 @@ impl PreparedProductionWorker {
     }
 
     fn supervise(self, stop: Arc<AtomicBool>) -> Result<()> {
+        let sharing = self
+            .configuration
+            .sharing
+            .as_ref()
+            .map(|configuration| {
+                super::soulseek::sharing::SharingRuntime::start(
+                    &self.database,
+                    configuration,
+                    self.configuration.acquisition.as_ref(),
+                    stop.clone(),
+                )
+            })
+            .transpose()?
+            .flatten();
         let mut store = Store::open_current_existing(&self.database)?;
         let host = store.start_worker_host(
             &format!("production-{}", std::process::id()),
@@ -327,6 +346,12 @@ impl PreparedProductionWorker {
         let lanes = &mut active.slots;
         let mut failure = None;
         loop {
+            if let Some(sharing) = &sharing
+                && let Err(error) = sharing.check()
+            {
+                failure.get_or_insert(error);
+                stop.store(true, Ordering::Release);
+            }
             let heartbeat = store.heartbeat_worker(&host, stop.load(Ordering::Acquire));
             if let Err(error) = heartbeat {
                 failure.get_or_insert(error);
@@ -376,6 +401,7 @@ impl PreparedProductionWorker {
                             let claim = Arc::new(claim);
                             let operation = claim.request.operation.clone();
                             let binding = claim.request.configuration_binding.clone();
+                            let account = sharing.as_ref().map(|sharing| sharing.account.clone());
                             let spawned = std::thread::Builder::new()
                                 .name(format!("domus-{lane}"))
                                 .spawn(move || {
@@ -386,6 +412,7 @@ impl PreparedProductionWorker {
                                         operation,
                                         stopping,
                                         &binding,
+                                        account,
                                     )
                                 });
                             match spawned {
@@ -431,6 +458,7 @@ fn execute(
     operation: WorkerOperation,
     stop: Arc<AtomicBool>,
     binding: &str,
+    shared_account: Option<Arc<super::soulseek::sharing::Account>>,
 ) -> Result<()> {
     let mut store = Store::open_current_existing(database)?.with_worker_stop(stop.clone());
     store.check_worker_stop()?;
@@ -482,7 +510,7 @@ fn execute(
                 } else {
                     None
                 };
-                acquisition.acquire_with_stop(
+                acquisition.acquire_controlled(
                     database,
                     services,
                     job_id,
@@ -491,7 +519,10 @@ fn execute(
                         source_candidate,
                         acknowledge_new_only_publication: true,
                     },
-                    stop,
+                    super::worker::AcquisitionExecution {
+                        stop: Some(stop),
+                        shared_account,
+                    },
                 )?;
             }
         }

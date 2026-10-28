@@ -35,6 +35,9 @@ pub fn publish_new_album(
     run: i64,
 ) -> Result<String> {
     store.check_worker_stop()?;
+    // Acquire before durable destination intent and retain through verification.
+    // Recovery and replacement must use this same cross-process boundary.
+    let _visibility = crate::infrastructure::shares::publication_visibility_write(store)?;
     staging.check_store(store)?;
     store.renew_claim(claim, 300)?;
     let (normalized, _, work) = store.publication_source(claim, run)?;

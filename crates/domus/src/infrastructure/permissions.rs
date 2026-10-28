@@ -108,7 +108,7 @@ impl FilePermissions {
 
 #[cfg(test)]
 #[path = "../../tests/support/private.rs"]
-mod private_fixture;
+pub(crate) mod private_fixture;
 #[cfg(test)]
 pub(crate) use private_fixture::tempdir as private_test_directory;
 
