@@ -3,6 +3,38 @@ import type { BackendConfigurationIssue } from "../src/generated/BackendConfigur
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
 import type { ConfigurationSection } from "../src/generated/ConfigurationSection";
 import type { ConfigurationSectionUpdate } from "../src/generated/ConfigurationSectionUpdate";
+import type { BackendSharingDraft } from "../src/generated/BackendSharingDraft";
+
+export function newSharingDraft(): BackendSharingDraft {
+  return {
+    policy: {
+      access: "none",
+      allowlist: [],
+      roots: [],
+      limits: {
+        upload_slots: 2,
+        queued_files: 128,
+        queued_per_peer: 16,
+        buffer_bytes: 65536,
+        roots: 16,
+        catalog_files: 1000000,
+        catalog_bytes: 268435456,
+        expanded_bytes: 268435456,
+        compressed_bytes: 67108864,
+        spool_bytes: 268435456,
+        peer_connections: 16,
+        pending_handshakes: 4,
+        requests_per_minute: 60,
+        search_results: 200,
+        concurrent_browses: 2,
+        idle_seconds: 10,
+        operation_seconds: 1800,
+      },
+    },
+    account: null,
+    listen: null,
+  };
+}
 
 export const configurationSections = [
   {
@@ -41,6 +73,12 @@ export const configurationSections = [
     group: "Media · Music",
     description: "Manage the production worker or the development download service.",
   },
+  {
+    id: "music_sharing",
+    title: "Sharing",
+    group: "Media · Music",
+    description: "Share selected library folders through the separate Soulseek worker.",
+  },
 ] as const satisfies readonly {
   id: ConfigurationSection;
   title: string;
@@ -55,6 +93,7 @@ const sectionFields = {
   storage: ["database", "cache"],
   music_providers: ["services"],
   music_acquisition: ["local_acquisition", "production_worker"],
+  music_sharing: ["production_worker"],
 } as const satisfies Record<ConfigurationSection, readonly (keyof BackendConfigurationDraft)[]>;
 
 export type ConfigurationEditor = {
@@ -100,6 +139,20 @@ export function beginConfigurationEdit(state: BackendConfigurationState): Config
                 server: value.production_worker.acquisition.server,
                 acknowledge_plaintext_login:
                   value.production_worker.acquisition.acknowledge_plaintext_login,
+              }
+            : null,
+          sharing: value.production_worker.sharing
+            ? {
+                policy: structuredClone(value.production_worker.sharing.policy),
+                listen: value.production_worker.sharing.listen,
+                account: value.production_worker.sharing.account
+                  ? {
+                      credentials_file: { action: "keep" },
+                      server: value.production_worker.sharing.account.server,
+                      acknowledge_plaintext_login:
+                        value.production_worker.sharing.account.acknowledge_plaintext_login,
+                    }
+                  : null,
               }
             : null,
         }
@@ -150,18 +203,38 @@ export function sectionUpdate(
       return {
         section,
         local_acquisition: draft.local_acquisition,
-        production_worker: draft.production_worker,
+        production_worker: draft.production_worker
+          ? {
+              queue_capacity: draft.production_worker.queue_capacity,
+              acquisition: draft.production_worker.acquisition,
+            }
+          : null,
       };
+    case "music_sharing":
+      return { section, sharing: draft.production_worker?.sharing ?? null };
   }
 }
 
 export function dirtySections(editor: ConfigurationEditor): ConfigurationSection[] {
   return configurationSections
-    .filter(
-      ({ id }) =>
+    .filter(({ id }) => {
+      if (
+        id === "music_acquisition" &&
+        !editor.baseline.production_worker &&
+        editor.draft.production_worker?.sharing &&
+        !editor.draft.production_worker.acquisition &&
+        editor.draft.production_worker.queue_capacity === 64
+      ) {
+        return (
+          JSON.stringify(editor.draft.local_acquisition) !==
+          JSON.stringify(editor.baseline.local_acquisition)
+        );
+      }
+      return (
         JSON.stringify(sectionUpdate(editor.draft, id)) !==
-        JSON.stringify(sectionUpdate(editor.baseline, id)),
-    )
+        JSON.stringify(sectionUpdate(editor.baseline, id))
+      );
+    })
     .map(({ id }) => id);
 }
 
@@ -170,7 +243,11 @@ export function sectionHasErrors(
   section: ConfigurationSection,
 ): boolean {
   return editor.errors.some(({ field }) =>
-    sectionFields[section].some((name) => field === name || field.startsWith(`${name}.`)),
+    section === "music_sharing"
+      ? field.startsWith("production_worker.sharing")
+      : section === "music_acquisition" && field.startsWith("production_worker.sharing")
+        ? false
+        : sectionFields[section].some((name) => field === name || field.startsWith(`${name}.`)),
   );
 }
 
@@ -182,10 +259,7 @@ export function acceptConfigurationSave(
   const next = beginConfigurationEdit(state);
   for (const section of dirtySections(editor)) {
     if (!submitted.includes(section)) {
-      const values = Object.fromEntries(
-        sectionFields[section].map((field) => [field, editor.draft[field]]),
-      );
-      next.draft = { ...next.draft, ...values };
+      next.draft = copySection(next.draft, editor.draft, section);
     }
   }
   return next;
@@ -195,10 +269,58 @@ export function discardConfigurationSection(
   editor: ConfigurationEditor,
   section: ConfigurationSection,
 ): ConfigurationEditor {
+  return {
+    ...editor,
+    draft: copySection(editor.draft, editor.baseline, section),
+    errors: [],
+    validated: false,
+  };
+}
+
+function copySection(
+  target: BackendConfigurationDraft,
+  source: BackendConfigurationDraft,
+  section: ConfigurationSection,
+): BackendConfigurationDraft {
+  if (section === "music_sharing") {
+    const sharing = structuredClone(source.production_worker?.sharing ?? null);
+    if (
+      !source.production_worker &&
+      !sharing &&
+      target.production_worker?.queue_capacity === 64 &&
+      !target.production_worker.acquisition
+    ) {
+      return { ...target, production_worker: null };
+    }
+    return {
+      ...target,
+      production_worker: target.production_worker
+        ? { ...target.production_worker, sharing }
+        : sharing
+          ? { queue_capacity: 64, acquisition: null, sharing }
+          : null,
+    };
+  }
+  if (section === "music_acquisition") {
+    const sharing = target.production_worker?.sharing ?? null;
+    return {
+      ...target,
+      local_acquisition: structuredClone(source.local_acquisition),
+      production_worker: source.production_worker
+        ? { ...structuredClone(source.production_worker), sharing }
+        : sharing
+          ? {
+              queue_capacity: target.production_worker?.queue_capacity ?? 64,
+              acquisition: null,
+              sharing,
+            }
+          : null,
+    };
+  }
   const values = Object.fromEntries(
-    sectionFields[section].map((field) => [field, editor.baseline[field]]),
+    sectionFields[section].map((field) => [field, structuredClone(source[field])]),
   );
-  return { ...editor, draft: { ...editor.draft, ...values }, errors: [], validated: false };
+  return { ...target, ...values };
 }
 
 export function changeConfigurationDraft(

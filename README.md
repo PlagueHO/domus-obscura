@@ -53,6 +53,7 @@ approval, recovery and external-service rules.
 - Rust-generated TypeScript contracts and a neutral React output-preview component.
 - One shared task interface, editor tasks, and configured Windows/Linux CI.
 - A separate foreground production worker with bounded durable handoff, one acquisition pipeline, one independent scan, and safe stop/recovery boundaries.
+- Explicit read-only Soulseek sharing with native-bound library folders, access controls, bounded browse responses and upload queues.
 
 An experimental one-shot acquisition worker can process an already-selected,
 approved source through private normalization and new-only publication. The
@@ -63,14 +64,14 @@ design. Its Orbit navigation, Home queue, shared status pills, fixed-size media
 cards, download preparation drawer and safe-cancellation confirmation now use
 shared components. Browser answers and safe recovery remain separate actions.
 Atomic album publication, replacement/restore management, automated source
-selection, native worker service supervision, sharing, the remaining UI port,
+selection, native worker service supervision, the remaining UI port,
 native services and production packages remain incomplete.
 
 ## Separate production worker
 
 `domus worker <absolute-configuration-file>` runs accepted background work in a
 separate foreground process. It uses the same local SQLite state as the guarded
-API. It opens no listener. Native Windows service and systemd installation remain
+API. It opens no peer listener unless sharing explicitly configures one. Native Windows service and systemd installation remain
 separate work in issues #17 and #18. Do not treat foreground checks as service,
 reboot, Linux, or live-account acceptance.
 
@@ -147,6 +148,83 @@ sharing that directory. Never replace or delete these files while processes can
 use them. Separate deployments must not use the same live Soulseek account.
 The worker requires the current schema and never migrates state during loading.
 
+## Read-only Soulseek sharing
+
+Sharing defaults to **None**. The production worker starts no sharing-only account
+connection or peer listener in this mode. **All** permits any valid Soulseek
+username. **Specific allowlist** permits only the exact configured usernames.
+The same access check applies to browse, folder contents, search and uploads.
+Soulseek usernames and server-provided addresses are not cryptographic identity.
+The plaintext protocol cannot provide a strong identity guarantee.
+
+Use **System configuration > Media > Music > Sharing**. Select a registered main
+or backup library and an optional library-relative subfolder. Inspect and bind
+the actual native folder before selecting its binding and public alias. A saved
+configuration cannot bind or rebind a folder. A changed native root or subfolder
+fails closed. Peer paths remain virtual identifiers, never native paths.
+
+Set `production_worker.sharing` to configure the worker. Its `policy` contains
+`access` (`none`, `all` or `allowlist`), `allowlist`, `roots` and `limits`.
+Each root contains `binding_id` and `alias`. The optional `account` contains
+`credentials_file`, `server` and `acknowledge_plaintext_login`. Without an
+explicit sharing account, sharing uses the acquisition account. Conflicting
+accounts fail validation. A sharing-only worker needs no acquisition staging.
+Sharing and acquisition use one account login and one framed I/O owner.
+
+The optional `listen` value is an explicit IPv4 address and nonzero port.
+No automatic port mapping, obfuscation or distributed-child acceptance is
+enabled. Without a listener, sharing can use outgoing peer connections, but
+cannot accept reverse file connections. Do not expose a port or use a live
+account without separate operator approval.
+
+Only MP3, FLAC, JPG and JPEG regular files are eligible. M4A is not enabled.
+Native handle checks exclude links, hard-link aliases, private application state
+and changed file evidence. A pending or failed application publication stays
+hidden. A completely verified primary destination can remain visible while its
+backup is pending. Cross-process read/write guards coordinate application
+publication and sharing. These guards do not stop arbitrary external programs
+from modifying media in place.
+
+Complete share lists use paged catalog reads, bounded compression and a private
+spool beside SQLite. They are streamed without raising ordinary incoming frame
+limits. A response that exceeds its limit fails; it is not silently truncated.
+Uploads open read-only handles, validate resume offsets and keep bounded buffers.
+They do not change tags, artwork, directory names or media bytes.
+
+| Limit                                 | Default                 | Safety ceiling          |
+| ------------------------------------- | ----------------------- | ----------------------- |
+| Concurrent uploads                    | 2                       | 8                       |
+| Queued files / files per peer         | 128 / 16                | 1024 / 128              |
+| Transfer buffer                       | 64 KiB                  | 256 KiB                 |
+| Selected roots / catalog files        | 16 / 1,000,000          | 64 / 2,000,000          |
+| Encoded catalog-entry budget          | 256 MiB                 | 1 GiB                   |
+| Expanded / compressed browse          | 256 MiB / 64 MiB        | 512 MiB / 128 MiB       |
+| Spool budget                          | 256 MiB                 | 1 GiB                   |
+| Peer connections / pending handshakes | 16 / 4                  | 24 / 8                  |
+| Requests per minute / search results  | 60 / 200                | 600 / 1000              |
+| Concurrent browse responses           | 2                       | 4                       |
+| Idle / operation timeout              | 10 seconds / 30 minutes | 30 seconds / 60 minutes |
+
+These are shared administrator settings. Combined limits must also be consistent.
+The catalog-entry budget bounds encoded path and evidence estimates. It is not
+a physical SQLite disk quota. SQLite pages, indexes, WAL and unrelated application
+state need additional disk space. Rebuilds remove old catalog generations.
+Crash-retained `.domus-share-<process>-<token>.pending` files count against the
+spool budget at startup. Insufficient space or too many retained files blocks
+sharing with an operator error. Review these exact files with the worker stopped;
+do not remove live spool files or stable lock files.
+
+Saving or validating settings does not start sharing, build a catalog or contact
+Soulseek. Restart the separate worker at a safe boundary to activate changes.
+The API reload command does not restart that worker. Its reported configuration
+revision, not the API's active revision, identifies the worker configuration.
+Generated fixtures check native-root rejection, read-only uploads, publication
+visibility, queue fairness and one-session routing. A 60,000-entry wire fixture
+checks every entry in a complete compressed listing larger than 1 MiB.
+This is not physical large-library scanning or process-memory evidence.
+Isolated fixtures are not live-account, public-network, Linux or service-install
+acceptance evidence.
+
 ## Try the local test harness
 
 You can test a separate browser harness without Entra, CAA, certificates or live providers:
@@ -179,7 +257,7 @@ The caller must identify the peer through a connection manager before supplying 
 
 Actual loopback TCP fixtures cover both MP3 and FLAC complete-album receive-to-normalization, including an uploader that waits for receiver closure. These automated tests use no live credentials or peer downloads.
 
-`SoulseekSession` uses one session-owned nonblocking I/O loop for all framed server and peer connections. Each socket has one reader and one controlled write path. Typed events retain their connection identity and session generation. Interleaved server requests remain available to their operation instead of being skipped. Login uses experimental client version 177.1, not another client's identity. Frames remain limited to 1 MiB; a partial frame has a ten-second idle limit and a 30-second absolute limit. Address lookup and file setup have 30-second deadlines. Peer addresses must be public unicast IPv4 addresses. Private, loopback, link-local, shared, documentation, benchmark, multicast and reserved ranges are rejected.
+`SoulseekSession` uses one session-owned nonblocking I/O loop for all framed server and peer connections. Each socket has one reader and one controlled write path. Typed events retain their connection identity and session generation. Interleaved server requests remain available to their operation instead of being skipped. Login uses experimental client version 177.1, not another client's identity. Ordinary frames remain limited to 1 MiB; complete outgoing share lists use a separate bounded streaming path. A partial input frame has a ten-second idle limit and a 30-second absolute limit. Address lookup and file setup have 30-second deadlines. Peer addresses must be public unicast IPv4 addresses. Private, loopback, link-local, shared, documentation, benchmark, multicast and reserved ranges are rejected.
 
 The session sends an empty `ServerPing` every 60 seconds without expecting a reply. This continues during queue waits and raw file reception. Normal queue waits have a 30-minute absolute limit; queue queries occur at most once per minute. Ownership is checked while waiting, and worker leases renew every 30 seconds. Limits are 34 framed connections, 64 pending commands, 128 queued events per connection, 8 MiB of retained event data across the session and 2 MiB of queued writes per connection. Each connection processes at most one frame per I/O pass. Unused documented server notifications are parsed and discarded under a 128-per-30-second rate bound. Unknown codes, malformed messages, overflow and duplicate connection tokens close the affected connection explicitly. Server failures stop new peer commands.
 
@@ -187,9 +265,9 @@ The worker can reconnect after a classified transient socket failure at most thr
 
 `negotiate_transfer` loads the selected file from the claimed job. It commits `submitting` before sending `QueueUpload`. Pending pause or cancel requests are checked again before queue commands. The peer's upload offer must match the exact selected path and size. Ownership and current approval bindings are checked while messages arrive. The accepted token commits before the five-byte upload-response body is sent. Failed or uncertain negotiation does not reset the transfer to `planned`. Protocol fixtures read SQLite independently after queue and acceptance messages to check this order. Wrong peers, stale claims/observations, malformed offers, remote denial and an injected acceptance-transaction failure cannot produce an acceptance response.
 
-Soulseek login sends the password over plaintext TCP. The protocol-required MD5 fields do not protect that transport. Credentials are not stored in the session, database, logs or serializable contracts. Do not reuse a password from another service. Server error text is not echoed. The server-provided username/address binding is not cryptographic peer authentication. The adapter advertises zero shared files and no distributed-child acceptance. It opens no listener and shares no files.
+Soulseek login sends the password over plaintext TCP. The protocol-required MD5 fields do not protect that transport. Credentials are not stored in the session, database, logs or serializable contracts. Do not reuse a password from another service. Server error text is not echoed. The server-provided username/address binding is not cryptographic peer authentication. Standalone acquisition advertises zero shared files and opens no listener. Only explicitly configured production sharing changes those defaults. Distributed-child acceptance stays disabled.
 
-The uploader can request a reverse `F` connection through the server. The adapter accepts only the selected username, `F` type and exact previously selected IP/port. It connects outward to that address and sends the request's one-byte `PierceFireWall` init with its connection token. The receiver then checks the separate accepted file-transfer token before sending offset zero. A wrong username, address, type, token, malformed request or changed worker claim stops the flow. Failed setup closes the control/session handles without resetting the accepted transfer. A failed direct `P` connection can use a matching server-requested reverse `P` connection to that same bound address. No inbound listener or port-forwarding change is enabled. Peers that require an inbound connection remain unsupported. The [Nicotine+ community reference](https://nicotine-plus.org/doc/SLSKPROTOCOL.html#modern-peer-connection-message-order), not an official server specification, defines these connection paths.
+The uploader can request a reverse `F` connection through the server. The adapter accepts only the selected username, `F` type and exact previously selected IP/port. It connects outward to that address and sends the request's one-byte `PierceFireWall` init with its connection token. The receiver then checks the separate accepted file-transfer token before sending offset zero. A wrong username, address, type, token, malformed request or changed worker claim stops the flow. Failed setup closes the control/session handles without resetting the accepted transfer. A failed direct `P` connection can use a matching server-requested reverse `P` connection to that same bound address. Standalone acquisition enables no inbound listener or port-forwarding change. In this mode, peers that require an inbound connection remain unsupported. The [Nicotine+ community reference](https://nicotine-plus.org/doc/SLSKPROTOCOL.html#modern-peer-connection-message-order), not an official server specification, defines these connection paths.
 
 `acquire_album` reconciles the complete immutable source before queuing any new file. Every retained received file must have its matching sealed disk receipt. An `active` transfer with a valid sealed local input can complete its missing database receipt without another network connection or file write, including after index observations change. A `received` entry with missing evidence is an error. Partial, orphaned or corrupt staging data also blocks work. Recorded byte progress without a sealed input requires operator review. The staging lock stays held throughout inspection and receive.
 
@@ -212,9 +290,9 @@ the full protocol is implemented or a change to the approved V1 scope.
 | Search              | One bounded global search, public metadata results, outgoing reverse `P` connections                                      | Concurrent correlated searches, cancellation, user/room/wishlist searches, result filters and ranking                  |
 | Peer browsing       | One bounded selected-folder query and conservative track assessment                                                       | User information, complete share browsing, persistent correlated browsing and approved folder download selection       |
 | Transfers           | Journaled sequential receive, queue evidence, sealed-input recovery, exact-offer reconciliation and reverse `F` setup     | Fair scheduling, bounded concurrency, progress events, cancellation, bandwidth limits and explicit partial-file resume |
-| Shares and uploads  | Disabled; zero shares advertised                                                                                          | Explicit read-only share roots, share listings, search replies, upload queues, permissions and limits                  |
+| Shares and uploads  | Explicit native-bound folders, access controls, streamed listings, search replies and bounded read-only uploads           | Additional formats with acceptance fixtures and bandwidth policy                                                       |
 | Social features     | Not implemented                                                                                                           | Private messages and acknowledgements, rooms, membership, room chat, buddy/ignore lists, interests and recommendations |
-| Connectivity        | Bounded outgoing direct/reverse `P` and reverse `F` manager, public IPv4 only; no listener                                | Optional listener, port reachability, supported obfuscation and distributed-network participation                      |
+| Connectivity        | Bounded outgoing direct/reverse `P` and reverse `F` manager, public IPv4 only; explicit sharing listener                  | Port reachability, supported obfuscation and distributed-network participation                                         |
 
 Follow the current [community-maintained protocol reference](https://nicotine-plus.org/doc/SLSKPROTOCOL.html).
 Soulseek has proprietary servers and different client implementations. New
@@ -253,7 +331,7 @@ its session and folder queries consume their channel; this change does not add
 a concurrent public search/chat API. Before extending that API, register each
 operation's username, token and generation explicitly. Never add another socket
 reader, discard another operation's response or reuse late replies after
-reconnect. Raw `F` sockets pass once to the file receiver and are not read by
+reconnect. Raw `F` sockets pass once to the selected transfer handler and are not read by
 the framed-message loop. Session shutdown closes owned sockets and joins the
 I/O owner.
 
@@ -267,8 +345,8 @@ Reconnect is not permission to repeat a transfer. Cancellation, pause, resume,
 retry and upload support each need explicit state transitions and tests for
 lost replies, stale ownership and partial files. Never reset an uncertain
 submission or bypass the current journal/staging checks. Optional listeners,
-uploads, sharing and port mapping stay disabled until explicitly configured
-and separately approved. An upload must read only an authorized native-bound
+uploads and sharing stay disabled until explicitly configured
+and separately approved. Port mapping remains unsupported. An upload must read only an authorized native-bound
 share root; a peer-supplied path is never a native filesystem path.
 
 Test additions with isolated wire fixtures, interleaved/late messages,

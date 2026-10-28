@@ -6,6 +6,7 @@ mod media;
 mod paths;
 mod planning;
 mod questions;
+pub mod sharing;
 pub mod sources;
 mod templates;
 

@@ -30,6 +30,8 @@ use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 const SESSION_COOKIE: &str = "__Host-domus-session";
 #[cfg(test)]
+mod sharing_tests;
+#[cfg(test)]
 mod worker_tests;
 const LOGIN_COOKIE: &str = "__Host-domus-login";
 
@@ -272,6 +274,12 @@ impl Api {
             .route("/", get(browser_index))
             .route("/assets/{name}", get(browser_asset))
             .route("/api/local/status", get(local_status))
+            .route("/api/sharing/folders", get(inspect_share_folder))
+            .route("/api/sharing/bindings", get(share_bindings))
+            .route(
+                "/api/sharing/folders/bind",
+                post(bind_share_folder).layer(DefaultBodyLimit::max(16_384)),
+            )
             .route("/api/worker/requests", get(worker_requests))
             .route(
                 "/api/worker/requests/{id}/retry",
@@ -1423,6 +1431,40 @@ async fn locations(
             super::server::configuration::ConfigurationService::library_roots(store, page)
         })
         .await?,
+    ))
+}
+
+async fn inspect_share_folder(
+    State(api): State<Api>,
+    Query(request): Query<crate::application::sharing::InspectShareFolder>,
+) -> ApiResult<Json<crate::application::sharing::ShareFolderInspection>> {
+    Ok(Json(
+        api.database(move |store| {
+            crate::application::sharing::inspect_share_folder(store, &request)
+        })
+        .await?,
+    ))
+}
+
+async fn bind_share_folder(
+    State(api): State<Api>,
+    Json(request): Json<crate::application::sharing::BindShareFolder>,
+) -> ApiResult<Json<crate::application::sharing::ShareFolderInspection>> {
+    api.require_configuration_write().await?;
+    Ok(Json(
+        api.database(move |store| crate::application::sharing::bind_share_folder(store, &request))
+            .await?,
+    ))
+}
+
+async fn share_bindings(
+    State(api): State<Api>,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Vec<crate::application::sharing::ShareFolderInspection>>> {
+    let page = query.page()?;
+    Ok(Json(
+        api.database(move |store| crate::application::sharing::share_bindings(store, page))
+            .await?,
     ))
 }
 async fn location(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult<Json<Location>> {

@@ -349,6 +349,43 @@ uses the same guarded listener implementation. A retained bound socket permits
 restoration on handover failure. Separate worker processes remain unchanged.
 Passive service operations cannot enter this lifecycle path.
 
+## Read-only sharing boundary
+
+`domain/sharing.rs` owns access policy, file-type eligibility and finite resource
+limits. `application/sharing.rs` exposes explicit library-folder inspection and
+binding. `infrastructure/shares.rs` builds a bounded catalog through native
+directory handles. An indexed filename alone never authorizes an upload.
+
+The production worker optionally starts `soulseek/sharing.rs`. One account owner
+holds the native account lock through sharing, acquisition, reconnect and drain.
+The existing framed transport owns all socket reads. Separate bounded routes
+keep browse requests off the acquisition offer queue, including requests on an
+acquisition peer's existing control socket. Shared socket writes serialize whole
+frames. A failed streamed frame retires the physical connection.
+Acquisition can borrow an existing sharing control connection for the same
+server-bound peer address. It does not send a second peer init. Duplicate peer
+controls are rejected before init. A frame already in progress returns Busy
+instead of blocking a new acquisition behind a large browse response. Active
+acquisition controls keep their sharing handler alive and use a shorter browse
+write budget.
+
+Browse preparation uses paged catalog reads, bounded zlib output and a private
+spool. Normal input frame and event limits stay unchanged. Raw upload sockets
+remain separate from the framed reader. Uploads read the exact authorized handle
+with checked offsets, bounded buffers and finite time limits.
+
+Application publication takes the matching exclusive visibility guard before
+new destination effects. Sharing retains a read guard over protected work.
+Pending and failed destinations remain excluded. A complete destination receipt
+can expose the primary while a backup remains pending. Future replacement and
+recovery entry points must use the same guard. OS advisory locks do not prevent
+arbitrary external in-place writes on Linux.
+
+The Music Sharing configuration section owns only its worker subsection.
+Acquisition and Sharing saves preserve sibling drafts and saved fields.
+Inspection and validation stay passive. Explicit native binding and worker
+restart remain separate operator actions.
+
 ## Known gaps for design review
 
 - Artist-photo discovery has no installed provider. CAA supplies release artwork,
@@ -359,8 +396,9 @@ Passive service operations cannot enter this lifecycle path.
 - The System route uses the normal application shell. Guarded root registration
   and indexing reuse application use cases, native root bindings and Store
   checks. Existing roots cannot be edited, deleted or rebound through the UI.
-- Search and acquisition are not general concurrent Soulseek services. Persistent
-  concurrent operations need one reader per connection and bounded typed routing.
+- Standalone source searches are not a general concurrent search service.
+  Configured sharing and acquisition have bounded routing through one account
+  owner; this does not implement unrestricted concurrent client operations.
 - Settings, approvals, indexing and recovery use cases still depend on concrete
   `Store` operations. Acquisition interfaces also accept concrete store/staging
   types. Do not present these as fully infrastructure-independent interfaces.

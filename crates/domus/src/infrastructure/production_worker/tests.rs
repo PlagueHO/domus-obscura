@@ -14,6 +14,7 @@ fn runtime(directory: &Path) -> Result<PreparedProductionWorker> {
         configuration: WorkerConfiguration {
             queue_capacity: 64,
             acquisition: None,
+            sharing: None,
         },
         services: Default::default(),
         revision: "a".repeat(64),
@@ -114,6 +115,7 @@ fn worker_execute_rejects_configuration_changes_and_leaves_saved_decisions_idle(
             operation.clone(),
             Arc::new(AtomicBool::new(false)),
             binding,
+            None,
         )
     };
     assert!(matches!(run(&"b".repeat(64)), Err(Error::Conflict(_))));

@@ -14,6 +14,125 @@ fn normalized(fixture: &mut Fixture) -> Result<i64, Box<dyn std::error::Error>> 
 }
 
 #[test]
+fn sharing_publication_visibility_retains_failed_exclusions_until_exact_completion() -> TestResult {
+    use domus::application::sharing::{
+        BindShareFolder, InspectShareFolder, bind_share_folder, inspect_share_folder,
+    };
+    use domus::domain::sharing::{ShareAccess, SharePolicy, ShareRoot};
+    use domus::infrastructure::shares::ShareCatalog;
+    use std::sync::{Arc, atomic::AtomicBool};
+    let mut fixture = Fixture::build(AudioFormat::Flac, true)?;
+    let run = normalized(&mut fixture)?;
+    let plan = fixture.store.plan(fixture.job, fixture.version)?;
+    let location_id = plan
+        .plan
+        .destinations
+        .iter()
+        .find(|destination| destination.kind == "main")
+        .ok_or("main destination")?
+        .location_id;
+    let inspected = inspect_share_folder(
+        &fixture.store,
+        &InspectShareFolder {
+            location_id,
+            relative_path: String::new(),
+        },
+    )?;
+    let binding = bind_share_folder(
+        &fixture.store,
+        &BindShareFolder {
+            location_id,
+            relative_path: String::new(),
+            expected_identity: inspected.native_identity,
+        },
+    )?;
+    let policy = SharePolicy {
+        access: ShareAccess::All,
+        roots: vec![ShareRoot {
+            binding_id: binding.binding_id.ok_or("share binding")?,
+            alias: "Music".into(),
+        }],
+        ..SharePolicy::default()
+    };
+    let build =
+        || ShareCatalog::build(&fixture.database, &policy, Arc::new(AtomicBool::new(false)));
+    let before = build()?;
+    let response = before.check()?;
+    assert!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )
+        .is_err()
+    );
+    assert!(
+        fixture
+            .store
+            .publication_destinations(fixture.job, fixture.version)?
+            .is_empty()
+    );
+    drop(response);
+    let raw = Connection::open(&fixture.database)?;
+    raw.execute_batch("CREATE TRIGGER sharing_fail_receipt BEFORE UPDATE OF verified_at ON publication_files BEGIN SELECT RAISE(ABORT,'injected sharing interruption'); END;")?;
+    assert!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )
+        .is_err()
+    );
+    assert!(before.check().is_err());
+    // A new catalog after the interruption must still hide the partial album.
+    let hidden = build()?;
+    assert_eq!(hidden.counts()?.1, 0);
+    assert!(hidden.page(0, 20, None, None)?.is_empty());
+    let reopened = Store::open_existing(&fixture.database)?;
+    assert!(
+        reopened
+            .publication_destinations(fixture.job, fixture.version)?
+            .iter()
+            .all(|target| target.verified_at.is_none())
+    );
+    drop(reopened);
+    raw.execute_batch("DROP TRIGGER sharing_fail_receipt")?;
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )?,
+        "complete"
+    );
+    assert!(hidden.check().is_err());
+    let complete = build()?;
+    assert_eq!(complete.counts()?.1 as usize, plan.plan.outputs.len() + 1);
+    let file = complete
+        .page(0, 1, None, None)?
+        .pop()
+        .ok_or("shared file")?;
+    let read = complete.open(&file)?;
+    assert_eq!(read.file.metadata()?.len(), file.bytes);
+    read.check()?;
+    drop(read);
+    let cover = album(&fixture, fixture._library.path())?.join("folder.jpg");
+    std::fs::remove_file(&cover)?;
+    assert!(
+        build().is_err(),
+        "a missing receipted file must not create a partial shared album"
+    );
+    assert!(
+        !cover.exists(),
+        "sharing must not repair or rewrite publication output"
+    );
+    Ok(())
+}
+
+#[test]
 fn browser_publication_recovery_requires_exact_retained_journal_and_never_rewrites_partial_files()
 -> TestResult {
     use domus::infrastructure::worker::{ResumePublication, resume_publication};
@@ -786,11 +905,12 @@ fn schema_fifteen_upgrade_preserves_completed_normalization_and_approval() -> Te
         [run],
         |row| row.get(0),
     )?;
+    raw.execute_batch(include_str!("../support/drop_sharing.sql"))?;
     raw.execute_batch("DROP TABLE worker_requests; DROP TABLE worker_host; DROP TABLE transfer_evidence; DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; PRAGMA user_version=15; UPDATE jobs SET lease_until=0;")?;
     fixture.store = Store::open(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        23
+        24
     );
     assert_eq!(
         raw.query_row(

@@ -258,12 +258,12 @@ impl SourceSelection {
 // Deliberately no Debug, Serialize, Clone or public credential fields.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Credentials {
-    username: String,
-    password: String,
+pub(crate) struct Credentials {
+    pub(crate) username: String,
+    pub(crate) password: String,
 }
 
-fn read_credentials(path: &Path) -> Result<Credentials> {
+pub(crate) fn read_credentials(path: &Path) -> Result<Credentials> {
     let mut bytes = read_local(path, 4096, true)?;
     let parsed = serde_json::from_slice::<Credentials>(&bytes);
     bytes.fill(0);
@@ -273,7 +273,7 @@ fn read_credentials(path: &Path) -> Result<Credentials> {
     Ok(credentials)
 }
 
-fn account_lock(
+pub(crate) fn account_lock(
     database: &Path,
     credentials: &Credentials,
 ) -> Result<super::local_file::ProcessLock> {
@@ -577,7 +577,8 @@ impl PreparedSearch {
 /// Network access starts solely in run(). It never searches for peers, retries
 /// uncertain submissions or publishes destinations.
 pub struct PreparedWorker {
-    _account: super::local_file::ProcessLock,
+    _account: Option<super::local_file::ProcessLock>,
+    shared_account: Option<std::sync::Arc<super::soulseek::sharing::Account>>,
     services: ServiceConfiguration,
     store: Store,
     claim: JobClaim,
@@ -738,6 +739,13 @@ impl PreparedWorker {
     }
 
     fn from_validated(validated: ValidatedWorker) -> Result<Self> {
+        Self::from_validated_account(validated, None)
+    }
+
+    fn from_validated_account(
+        validated: ValidatedWorker,
+        shared_account: Option<std::sync::Arc<super::soulseek::sharing::Account>>,
+    ) -> Result<Self> {
         let ValidatedWorker {
             configuration,
             mut store,
@@ -745,7 +753,11 @@ impl PreparedWorker {
             source,
             credentials,
         } = validated;
-        let account = account_lock(&configuration.database, &credentials)?;
+        let account = if shared_account.is_some() {
+            None
+        } else {
+            Some(account_lock(&configuration.database, &credentials)?)
+        };
         if let Some(decision) =
             store.check_artwork(configuration.job_id, configuration.plan_version)?
         {
@@ -804,6 +816,7 @@ impl PreparedWorker {
         };
         Ok(Self {
             _account: account,
+            shared_account,
             services: configuration.services,
             store,
             claim: claimed.claim,
@@ -822,7 +835,12 @@ impl PreparedWorker {
     }
 
     fn execute(self, publish: bool) -> Result<WorkerOutcome> {
+        let shared = self.shared_account.clone();
+        let peer = self.peer.clone();
         self.execute_with_login(publish, &mut |server, username, password| {
+            if let Some(account) = &shared {
+                return account.session(&peer, server, username);
+            }
             let socket = TcpStream::connect_timeout(&server.into(), Duration::from_secs(10))
                 .map_err(Error::SoulseekTransport)?;
             SoulseekSession::login(socket, username, password)
@@ -975,6 +993,12 @@ pub struct LocalAcquisition {
     pub acknowledge_plaintext_login: bool,
 }
 
+#[derive(Default)]
+pub(crate) struct AcquisitionExecution {
+    pub(crate) stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) shared_account: Option<std::sync::Arc<super::soulseek::sharing::Account>>,
+}
+
 impl LocalAcquisition {
     pub fn validate(&self, store: &Store, services: &ServiceConfiguration) -> Result<()> {
         services.validate_builtins()?;
@@ -1115,36 +1139,24 @@ impl LocalAcquisition {
         plan_version: i64,
         request: StartLocalDownload,
     ) -> Result<WorkerOutcome> {
-        self.acquire_controlled(database, services, job_id, plan_version, request, None)
-    }
-
-    pub(crate) fn acquire_with_stop(
-        &self,
-        database: &Path,
-        services: ServiceConfiguration,
-        job_id: i64,
-        plan_version: i64,
-        request: StartLocalDownload,
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<WorkerOutcome> {
         self.acquire_controlled(
             database,
             services,
             job_id,
             plan_version,
             request,
-            Some(stop),
+            AcquisitionExecution::default(),
         )
     }
 
-    fn acquire_controlled(
+    pub(crate) fn acquire_controlled(
         &self,
         database: &Path,
         services: ServiceConfiguration,
         job_id: i64,
         plan_version: i64,
         request: StartLocalDownload,
-        stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        execution: AcquisitionExecution,
     ) -> Result<WorkerOutcome> {
         if !request.acknowledge_new_only_publication {
             return Err(Error::InvalidInput(
@@ -1168,10 +1180,10 @@ impl LocalAcquisition {
             &[],
             false,
         )?;
-        if let Some(stop) = stop {
+        if let Some(stop) = execution.stop {
             validated.store = validated.store.with_worker_stop(stop);
         }
-        PreparedWorker::from_validated(validated)?.execute(true)
+        PreparedWorker::from_validated_account(validated, execution.shared_account)?.execute(true)
     }
 }
 

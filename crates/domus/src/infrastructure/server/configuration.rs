@@ -78,6 +78,7 @@ pub struct BackendLocalAcquisition {
 pub struct BackendWorker {
     pub queue_capacity: u16,
     pub acquisition: Option<BackendLocalAcquisition>,
+    pub sharing: Option<BackendSharing>,
 }
 
 #[derive(Deserialize, ts_rs::TS)]
@@ -85,6 +86,44 @@ pub struct BackendWorker {
 pub struct BackendWorkerDraft {
     pub queue_capacity: u16,
     pub acquisition: Option<BackendLocalAcquisitionDraft>,
+    pub sharing: Option<BackendSharingDraft>,
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct BackendAcquisitionWorkerDraft {
+    pub queue_capacity: u16,
+    pub acquisition: Option<BackendLocalAcquisitionDraft>,
+}
+
+#[derive(Clone, Serialize, ts_rs::TS)]
+pub struct BackendSharing {
+    pub policy: crate::domain::sharing::SharePolicy,
+    pub account: Option<BackendSharingAccount>,
+    pub listen: Option<String>,
+}
+
+#[derive(Clone, Serialize, ts_rs::TS)]
+pub struct BackendSharingAccount {
+    pub credentials_file_configured: bool,
+    pub server: String,
+    pub acknowledge_plaintext_login: bool,
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct BackendSharingDraft {
+    pub policy: crate::domain::sharing::SharePolicy,
+    pub account: Option<BackendSharingAccountDraft>,
+    pub listen: Option<String>,
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct BackendSharingAccountDraft {
+    pub credentials_file: ConfigurationReplacement,
+    pub server: String,
+    pub acknowledge_plaintext_login: bool,
 }
 
 /// Hidden fields never become browser-readable, including after replacement.
@@ -130,6 +169,7 @@ pub enum ConfigurationSection {
     Storage,
     MusicProviders,
     MusicAcquisition,
+    MusicSharing,
 }
 
 /// Each variant owns a complete section. Omitted sections are never replaced.
@@ -161,7 +201,10 @@ pub enum ConfigurationSectionUpdate {
     },
     MusicAcquisition {
         local_acquisition: Option<BackendLocalAcquisitionDraft>,
-        production_worker: Option<BackendWorkerDraft>,
+        production_worker: Option<BackendAcquisitionWorkerDraft>,
+    },
+    MusicSharing {
+        sharing: Option<BackendSharingDraft>,
     },
 }
 
@@ -773,10 +816,10 @@ impl ConfigurationService {
         let draft = match update {
             ConfigurationUpdate::Full(draft) => *draft,
             ConfigurationUpdate::Sections(sections) => {
-                if sections.is_empty() || sections.len() > 6 {
+                if sections.is_empty() || sections.len() > 7 {
                     return Err(issue(
                         "sections",
-                        "Select one through six changed sections.",
+                        "Select one through seven changed sections.",
                     ));
                 }
                 let saved = Self::parse(bytes)
@@ -837,8 +880,38 @@ impl ConfigurationService {
                             production_worker,
                         } => {
                             draft.local_acquisition = local_acquisition;
-                            draft.production_worker = production_worker;
+                            let sharing = draft
+                                .production_worker
+                                .as_mut()
+                                .and_then(|worker| worker.sharing.take());
+                            draft.production_worker = match production_worker {
+                                Some(worker) => Some(BackendWorkerDraft {
+                                    queue_capacity: worker.queue_capacity,
+                                    acquisition: worker.acquisition,
+                                    sharing,
+                                }),
+                                None => sharing.map(|sharing| BackendWorkerDraft {
+                                    queue_capacity: draft
+                                        .production_worker
+                                        .as_ref()
+                                        .map_or(64, |worker| worker.queue_capacity),
+                                    acquisition: None,
+                                    sharing: Some(sharing),
+                                }),
+                            };
                             ConfigurationSection::MusicAcquisition
+                        }
+                        ConfigurationSectionUpdate::MusicSharing { sharing } => {
+                            if let Some(worker) = draft.production_worker.as_mut() {
+                                worker.sharing = sharing;
+                            } else if sharing.is_some() {
+                                draft.production_worker = Some(BackendWorkerDraft {
+                                    queue_capacity: 64,
+                                    acquisition: None,
+                                    sharing,
+                                });
+                            }
+                            ConfigurationSection::MusicSharing
                         }
                     };
                     if seen.contains(&section) {
@@ -968,10 +1041,32 @@ impl ConfigurationService {
                         })
                     })
                     .transpose()?;
+                let sharing = worker.sharing.map(|sharing| {
+                    let previous = saved.production_worker.as_ref()
+                        .and_then(|worker| worker.sharing.as_ref())
+                        .and_then(|sharing| sharing.account.as_ref());
+                    let account = sharing.account.map(|account| {
+                        Ok::<_, BackendConfigurationIssue>(crate::infrastructure::sharing::SharingAccount {
+                            credentials_file: replacement(account.credentials_file, previous.map(|account| account.credentials_file.to_string_lossy().into_owned()))
+                                .map(PathBuf::from)
+                                .ok_or_else(|| issue("production_worker.sharing.account.credentials_file", "Select a credential-file reference."))?,
+                            server: account.server.parse().map_err(|_| issue("production_worker.sharing.account.server", "Enter a public IPv4 address and port."))?,
+                            acknowledge_plaintext_login: account.acknowledge_plaintext_login,
+                        })
+                    }).transpose()?;
+                    Ok::<_, BackendConfigurationIssue>(crate::infrastructure::sharing::SharingConfiguration {
+                        policy: sharing.policy,
+                        account,
+                        listen: sharing.listen.filter(|value| !value.trim().is_empty())
+                            .map(|value| value.parse().map_err(|_| issue("production_worker.sharing.listen", "Enter an IPv4 address and nonzero port.")))
+                            .transpose()?,
+                    })
+                }).transpose()?;
                 Ok::<_, BackendConfigurationIssue>(
                     crate::infrastructure::production_worker::WorkerConfiguration {
                         queue_capacity: worker.queue_capacity,
                         acquisition,
+                        sharing,
                     },
                 )
             })
@@ -1021,6 +1116,15 @@ impl ConfigurationService {
                         server: local.server,
                         acknowledge_plaintext_login: local.acknowledge_plaintext_login,
                     }),
+                sharing: worker.sharing.map(|sharing| BackendSharingDraft {
+                    policy: sharing.policy,
+                    account: sharing.account.map(|account| BackendSharingAccountDraft {
+                        credentials_file: ConfigurationReplacement::Keep,
+                        server: account.server,
+                        acknowledge_plaintext_login: account.acknowledge_plaintext_login,
+                    }),
+                    listen: sharing.listen,
+                }),
             }),
         }
     }
@@ -1050,16 +1154,31 @@ impl ConfigurationService {
             (ConfigurationSection::MusicProviders, &["services"][..]),
             (
                 ConfigurationSection::MusicAcquisition,
-                &["local_acquisition", "production_worker"][..],
+                &["local_acquisition"][..],
             ),
         ]
         .into_iter()
         .filter_map(|(section, fields)| {
-            fields
-                .iter()
-                .any(|field| active[*field] != saved[*field])
-                .then_some(section)
+            (fields.iter().any(|field| active[*field] != saved[*field])
+                || (section == ConfigurationSection::MusicAcquisition
+                    && (active["production_worker"]["queue_capacity"]
+                        .as_u64()
+                        .unwrap_or(64)
+                        != saved["production_worker"]["queue_capacity"]
+                            .as_u64()
+                            .unwrap_or(64)
+                        || active["production_worker"]["acquisition"]
+                            != saved["production_worker"]["acquisition"]
+                        || (active["production_worker"].is_null()
+                            != saved["production_worker"].is_null()
+                            && active["production_worker"]["sharing"].is_null()
+                            && saved["production_worker"]["sharing"].is_null()))))
+            .then_some(section)
         })
+        .chain(
+            (active["production_worker"]["sharing"] != saved["production_worker"]["sharing"])
+                .then_some(ConfigurationSection::MusicSharing),
+        )
         .collect())
     }
 
@@ -1087,6 +1206,22 @@ impl ConfigurationService {
                 "production_worker",
                 "Select the production worker or local acquisition, not both.",
             ));
+        }
+        if let Some(worker) = &configuration.production_worker
+            && let Some(sharing) = &worker.sharing
+        {
+            sharing
+                .policy
+                .validate()
+                .map_err(|error| issue("production_worker.sharing.policy", &error.to_string()))?;
+            sharing
+                .resolved_account(worker.acquisition.as_ref())
+                .map_err(|_| {
+                    issue(
+                        "production_worker.sharing.account",
+                        "Sharing and acquisition must use the same account settings.",
+                    )
+                })?;
         }
         match configuration.environment {
             Environment::Production => {
@@ -1213,6 +1348,19 @@ impl ConfigurationService {
                         ),
                     ]
                 }),
+        )
+        .chain(
+            configuration
+                .production_worker
+                .iter()
+                .filter_map(|worker| worker.sharing.as_ref())
+                .filter_map(|sharing| sharing.account.as_ref())
+                .map(|account| {
+                    (
+                        "production_worker.sharing.account.credentials_file",
+                        &account.credentials_file,
+                    )
+                }),
         ) {
             valid_reference(file).map_err(|_| {
                 issue(
@@ -1267,6 +1415,14 @@ impl ConfigurationService {
         ];
         paths.extend(configuration.client_secret_file.iter().cloned());
         paths.extend(configuration.browser_assets.iter().cloned());
+        paths.extend(
+            configuration
+                .production_worker
+                .iter()
+                .filter_map(|worker| worker.sharing.as_ref())
+                .filter_map(|sharing| sharing.account.as_ref())
+                .map(|account| account.credentials_file.clone()),
+        );
         if let Some(local) = &configuration.local_acquisition {
             paths.push(local.credentials_file.clone());
         }
@@ -1425,6 +1581,8 @@ fn issue_for_error(error: &Error) -> BackendConfigurationIssue {
                 "local_acquisition"
             } else if message.contains("cache") {
                 "cache"
+            } else if message.contains("sharing") {
+                "production_worker.sharing"
             } else if message.contains("provider") {
                 "services"
             } else {
@@ -1515,6 +1673,21 @@ fn summary(configuration: &Configuration) -> BackendConfiguration {
                         server: local.server.to_string(),
                         acknowledge_plaintext_login: local.acknowledge_plaintext_login,
                     }),
+                sharing: worker.sharing.as_ref().map(|sharing| BackendSharing {
+                    policy: sharing.policy.clone(),
+                    account: sharing
+                        .account
+                        .as_ref()
+                        .map(|account| BackendSharingAccount {
+                            credentials_file_configured: !account
+                                .credentials_file
+                                .as_os_str()
+                                .is_empty(),
+                            server: account.server.to_string(),
+                            acknowledge_plaintext_login: account.acknowledge_plaintext_login,
+                        }),
+                    listen: sharing.listen.map(|listen| listen.to_string()),
+                }),
             }),
     }
 }

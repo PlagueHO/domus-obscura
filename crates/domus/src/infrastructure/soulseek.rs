@@ -18,6 +18,7 @@ mod folder;
 mod messages;
 mod protocol;
 pub mod search;
+pub(crate) mod sharing;
 mod transport;
 use messages::{Event, PeerEvent, ServerEvent};
 #[cfg(test)]
@@ -123,6 +124,29 @@ pub struct SoulseekSession {
 }
 
 impl SoulseekSession {
+    pub(crate) fn fork_for_peer(&self, peer: &str) -> Result<Self> {
+        self.fork(peer, false)
+    }
+
+    fn fork_for_sharing(&self, peer: &str) -> Result<Self> {
+        self.fork(peer, true)
+    }
+
+    fn fork(&self, peer: &str, sharing: bool) -> Result<Self> {
+        username(peer)?;
+        let stream = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| Error::Conflict("Soulseek session is closed".into()))?;
+        Ok(Self {
+            stream: Some(if sharing {
+                stream.metadata_subscription(peer)?
+            } else {
+                stream.subscribe(peer)?
+            }),
+            username: self.username.clone(),
+        })
+    }
     pub fn login(mut stream: TcpStream, user: &str, password: &str) -> Result<Self> {
         validate_credentials(user, password)?;
         stream.set_write_timeout(Some(IO_TIMEOUT))?;
@@ -181,7 +205,19 @@ impl SoulseekSession {
     /// Connections are outgoing only. A matching server-requested reverse
     /// control connection can follow a failed direct connection.
     pub fn connect_peer(&mut self, peer: &str) -> Result<PeerControl<'_>> {
+        self.stream
+            .as_ref()
+            .ok_or_else(|| Error::Conflict("Soulseek server session is closed".into()))?
+            .expect_control(true)?;
         let address = self.peer_address(peer)?;
+        if let Some(stream) = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| Error::Conflict("Soulseek server session is closed".into()))?
+            .reuse_peer(peer, address.address)?
+        {
+            return self.control_from_channel(address, stream, None);
+        }
         let socket = match TcpStream::connect_timeout(&address.address.into(), IO_TIMEOUT) {
             Ok(socket) => (socket, None),
             Err(error) => {
@@ -242,21 +278,37 @@ impl SoulseekSession {
         reverse_token: Option<u32>,
     ) -> Result<PeerControl<'_>> {
         let stream = match self.stream.as_ref() {
-            Some(server) => server.peer(socket)?,
+            Some(server) => server.peer_for(socket, &peer.username, peer.address)?,
             #[cfg(test)]
             None => Channel::isolated_peer(socket)?,
             #[cfg(not(test))]
             None => return Err(Error::Conflict("Soulseek server session is closed".into())),
         };
-        let mut body = Vec::new();
-        string(&mut body, &self.username);
-        string(&mut body, "P");
-        body.extend_from_slice(&0u32.to_le_bytes());
-        // Init codes occupy one byte, not the normal four-byte message code.
-        if let Some(token) = reverse_token {
-            stream.init(0, &token.to_le_bytes())?;
-        } else {
-            stream.init(1, &body)?;
+        self.control_from_channel(peer, stream, reverse_token)
+    }
+
+    fn control_from_channel(
+        &mut self,
+        peer: PeerAddress,
+        stream: Channel,
+        reverse_token: Option<u32>,
+    ) -> Result<PeerControl<'_>> {
+        let reused = stream.shared_control();
+        if !reused {
+            stream.share_control(&peer.username, peer.address)?;
+            let mut body = Vec::new();
+            string(&mut body, &self.username);
+            string(&mut body, "P");
+            body.extend_from_slice(&0u32.to_le_bytes());
+            // Init codes occupy one byte, not the normal four-byte message code.
+            if let Some(token) = reverse_token {
+                stream.init(0, &token.to_le_bytes())?;
+            } else {
+                stream.init(1, &body)?;
+            }
+        }
+        if let Some(server) = self.stream.as_ref() {
+            server.expect_control(false)?;
         }
         Ok(PeerControl {
             session: self,

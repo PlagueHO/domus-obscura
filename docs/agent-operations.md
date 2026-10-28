@@ -43,6 +43,19 @@ requests. Section updates merge with the latest exact saved revision under the
 same writer protocol. Other sections retain their saved values. A browser can
 save several changed sections atomically when validation spans section boundaries.
 
+Music Sharing owns only `production_worker.sharing`. Music Acquisition owns the
+worker queue and acquisition settings. A section save must preserve the sibling
+settings. Sharing is disabled by default. A sharing-only worker needs no staging
+root. An explicit sharing account must match the acquisition account when both
+are configured; otherwise sharing can reuse the acquisition account.
+
+Folder inspection and explicit native binding are separate from configuration
+saves. A save validates policy and existing account references without binding
+folders, building catalogs, logging in or opening listeners. The Sharing form
+reports saved configuration separately from worker status. Only a fresh worker
+heartbeat with the exact saved revision confirms that configuration revision.
+An API reload does not restart the worker or prove that sharing is available.
+
 `POST /api/system/configuration/reload` explicitly replaces the API host with
 the expected saved revision. The runtime prepares the replacement before listener
 handover. It retains the old bound socket for restoration. Preparation failure
@@ -153,6 +166,19 @@ Recheck successful destinations, with the primary last, before completion.
 `publication-status` and the protected publication GET route are read-only.
 This command exposes partially copied final folders. It is not an atomic album
 switch, replacement, restore, cleanup or power-loss acceptance.
+The sharing boundary hides incomplete publication destinations. Publication
+holds the stable native exclusive visibility lock before journal intent and
+media changes. Browse responses and uploads hold the matching shared lock.
+Lock admission is nonblocking. A busy operation must retry at its normal
+boundary, not wait indefinitely. Retained destination intents keep failed
+copies hidden after restart. A verified primary does not need a backup receipt
+to become eligible. Catalog generation and native file evidence are rechecked
+before reads. These advisory locks do not prevent external programs from
+changing files on Linux.
+Future replacement and recovery entry points in #8 and #9 must acquire this
+same visibility lock before intent and filesystem effects. They must preserve
+incomplete exclusions and invalidate old catalog generations. This boundary
+does not implement replacement, restore, or atomic publication.
 Do not run it against existing library roots without separate approval.
 
 `domus job-control <local-database> <job-id> <plan-version> <pause|cancel>`

@@ -4,8 +4,13 @@ use super::protocol::{Fields, protocol};
 use crate::Result;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum ServerEvent {
+    Search {
+        username: String,
+        token: u32,
+        query: String,
+    },
     Address {
         username: String,
         address: SocketAddrV4,
@@ -19,8 +24,27 @@ pub(super) enum ServerEvent {
     CannotConnect(u32),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum PeerEvent {
+    ShareList,
+    FolderRequest {
+        token: u32,
+        folder: String,
+    },
+    Queue {
+        path: String,
+    },
+    QueueRequest {
+        path: String,
+    },
+    DownloadRequest {
+        token: u32,
+        path: String,
+    },
+    UploadResponse {
+        token: u32,
+        allowed: bool,
+    },
     Offer {
         token: u32,
         path: String,
@@ -40,7 +64,7 @@ pub(super) enum PeerEvent {
     Folder(Vec<u8>),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum Event {
     Server(ServerEvent),
     Peer(PeerEvent),
@@ -50,6 +74,7 @@ pub(super) enum Event {
 pub(super) enum Kind {
     Server,
     Peer,
+    SharingPeer,
 }
 
 fn address(fields: &mut Fields<'_>) -> Result<SocketAddrV4> {
@@ -143,6 +168,18 @@ pub(super) fn decode(kind: Kind, code: u32, body: Vec<u8>) -> Result<Option<Even
     let event = match kind {
         Kind::Server => {
             let event = match code {
+                26 | 93 => {
+                    if code == 93 && (fields.take(1)? != [3] || fields.u32()? != 49) {
+                        return Err(protocol());
+                    }
+                    let username = fields.text(30)?.to_owned();
+                    super::username(&username).map_err(|_| protocol())?;
+                    ServerEvent::Search {
+                        username,
+                        token: fields.u32()?,
+                        query: fields.text(4096)?.to_owned(),
+                    }
+                }
                 3 => {
                     let username = fields.text(30)?.to_owned();
                     super::username(&username).map_err(|_| protocol())?;
@@ -190,10 +227,38 @@ pub(super) fn decode(kind: Kind, code: u32, body: Vec<u8>) -> Result<Option<Even
             };
             Event::Server(event)
         }
-        Kind::Peer => {
+        Kind::Peer | Kind::SharingPeer => {
             let event = match code {
+                4 if matches!(kind, Kind::SharingPeer) => PeerEvent::ShareList,
+                36 if matches!(kind, Kind::SharingPeer) => PeerEvent::FolderRequest {
+                    token: fields.u32()?,
+                    folder: fields.text(4096)?.to_owned(),
+                },
+                43 if matches!(kind, Kind::SharingPeer) => PeerEvent::Queue {
+                    path: fields.text(4096)?.to_owned(),
+                },
+                51 if matches!(kind, Kind::SharingPeer) => PeerEvent::QueueRequest {
+                    path: fields.text(4096)?.to_owned(),
+                },
+                41 if matches!(kind, Kind::SharingPeer) => {
+                    let token = fields.u32()?;
+                    let allowed = fields.boolean()?;
+                    if !allowed {
+                        fields.text(4096)?;
+                    }
+                    PeerEvent::UploadResponse { token, allowed }
+                }
                 40 => {
-                    if fields.u32()? != 1 {
+                    let direction = fields.u32()?;
+                    if direction == 0 && matches!(kind, Kind::SharingPeer) {
+                        let event = PeerEvent::DownloadRequest {
+                            token: fields.u32()?,
+                            path: fields.text(4096)?.to_owned(),
+                        };
+                        fields.end()?;
+                        return Ok(Some(Event::Peer(event)));
+                    }
+                    if direction != 1 {
                         return Err(protocol());
                     }
                     PeerEvent::Offer {

@@ -313,6 +313,37 @@ small {
 .configuration-secret > label + label {
   margin-top: 16px;
 }
+.configuration-form textarea {
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  margin-top: 7px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--elev);
+  font: inherit;
+  font-weight: 400;
+  resize: vertical;
+}
+.configuration-sharing-folders,
+.configuration-sharing-limits {
+  grid-column: 1 / -1;
+}
+.configuration-sharing-folders,
+.configuration-sharing-limit-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px 24px;
+}
+.configuration-sharing-folders > p,
+.configuration-sharing-folders > .actions,
+.configuration-sharing-folders > .alert,
+.configuration-sharing-folders > .check {
+  grid-column: 1 / -1;
+  margin: 0;
+}
 .configuration-form-actions {
   border-top: 1px solid var(--line);
   padding-top: 20px;
@@ -343,6 +374,10 @@ small {
     border-bottom: 1px solid var(--line);
   }
   .configuration-form > fieldset {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .configuration-sharing-folders,
+  .configuration-sharing-limit-fields {
     grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -3,7 +3,11 @@ import type { BackendConfigurationDraft } from "../src/generated/BackendConfigur
 import type { ConfigurationReplacement } from "../src/generated/ConfigurationReplacement";
 import type { ConfigurationSection } from "../src/generated/ConfigurationSection";
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
+import type { BackendSharingDraft } from "../src/generated/BackendSharingDraft";
+import type { ShareLimits } from "../src/generated/ShareLimits";
 import type { ConfigurationEditor } from "./backend-configuration-state";
+import { newSharingDraft } from "./backend-configuration-state";
+import { SharingFolders } from "./SharingFolders";
 import { Button, Check } from "./components/ui";
 
 type Props = {
@@ -49,12 +53,24 @@ export function BackendConfigurationForm({
     "local_acquisition.credentials_file": saved?.local_acquisition?.credentials_file_configured,
     "production_worker.acquisition.credentials_file":
       saved?.production_worker?.acquisition?.credentials_file_configured,
+    "production_worker.sharing.account.credentials_file":
+      saved?.production_worker?.sharing?.account?.credentials_file_configured,
   };
   const visible = (value: ConfigurationSection) => section === undefined || section === value;
   const update = <K extends keyof BackendConfigurationDraft>(
     field: K,
     value: BackendConfigurationDraft[K],
   ) => onChange({ ...draft, [field]: value });
+  const sharing = draft.production_worker?.sharing;
+  const updateSharing = (value: BackendSharingDraft | null) =>
+    update(
+      "production_worker",
+      draft.production_worker
+        ? { ...draft.production_worker, sharing: value }
+        : value
+          ? { queue_capacity: 64, acquisition: null, sharing: value }
+          : null,
+    );
   const field = (name: string, label: string, help: string, input: ReactNode) => {
     const errors = editor.errors.filter((error) => error.field === name);
     return (
@@ -411,7 +427,18 @@ export function BackendConfigurationForm({
         <Check
           checked={draft.production_worker !== null}
           onChange={(enabled) =>
-            update("production_worker", enabled ? { queue_capacity: 64, acquisition: null } : null)
+            update(
+              "production_worker",
+              enabled
+                ? {
+                    queue_capacity: 64,
+                    acquisition: null,
+                    sharing: draft.production_worker?.sharing ?? null,
+                  }
+                : draft.production_worker?.sharing
+                  ? { ...draft.production_worker, acquisition: null }
+                  : null,
+            )
           }
         >
           Configure the separate production worker
@@ -461,7 +488,10 @@ export function BackendConfigurationForm({
             >
               Configure approved acquisition and publication
             </Check>
-            <p>Without acquisition settings, the worker can run read-only index scans only.</p>
+            <p>
+              Without acquisition settings, the worker can run read-only index scans and configured
+              sharing. It does not need staging for sharing.
+            </p>
             {draft.production_worker.acquisition && (
               <>
                 {text(
@@ -520,6 +550,185 @@ export function BackendConfigurationForm({
           </>
         )}
       </fieldset>
+      <fieldset disabled={disabled || !visible("music_sharing")} hidden={!visible("music_sharing")}>
+        <legend>Soulseek sharing</legend>
+        <p>
+          Sharing is off by default. Saving or reloading the API does not start sharing. Restart the
+          separate worker at a safe boundary to apply saved changes. Only MP3, FLAC and JPEG files
+          can be shared.
+        </p>
+        {field(
+          "production_worker.sharing.policy.access",
+          "Who can access shared music",
+          "The same access policy controls browsing, search, queues and uploads.",
+          <select
+            name="production_worker.sharing.policy.access"
+            value={sharing?.policy.access ?? "none"}
+            onChange={(event) => {
+              const access = event.target.value as "none" | "all" | "allowlist";
+              const value = sharing ?? newSharingDraft();
+              updateSharing({ ...value, policy: { ...value.policy, access } });
+            }}
+          >
+            <option value="none">None — sharing off</option>
+            <option value="all">All Soulseek users</option>
+            <option value="allowlist">Specific allowlist</option>
+          </select>,
+        )}
+        {!sharing && (
+          <Button
+            variant="secondary"
+            disabled={disabled}
+            onClick={() => updateSharing(newSharingDraft())}
+          >
+            Set up sharing while disabled
+          </Button>
+        )}
+        {sharing && (
+          <>
+            {sharing.policy.access === "allowlist" &&
+              field(
+                "production_worker.sharing.policy.allowlist",
+                "Allowed Soulseek usernames",
+                "One exact, case-sensitive username per line. Maximum 256 names; 1 through 30 printable ASCII characters per name.",
+                <textarea
+                  name="production_worker.sharing.policy.allowlist"
+                  value={sharing.policy.allowlist.join("\n")}
+                  rows={5}
+                  spellCheck={false}
+                  onChange={(event) =>
+                    updateSharing({
+                      ...sharing,
+                      policy: { ...sharing.policy, allowlist: event.target.value.split("\n") },
+                    })
+                  }
+                />,
+              )}
+            {visible("music_sharing") && (
+              <SharingFolders
+                roots={sharing.policy.roots}
+                disabled={disabled}
+                onChange={(roots) =>
+                  updateSharing({ ...sharing, policy: { ...sharing.policy, roots } })
+                }
+              />
+            )}
+            <Check
+              checked={sharing.account !== null}
+              onChange={(enabled) =>
+                updateSharing({
+                  ...sharing,
+                  account: enabled
+                    ? {
+                        credentials_file: { action: "keep" },
+                        server: "",
+                        acknowledge_plaintext_login: false,
+                      }
+                    : null,
+                })
+              }
+            >
+              Configure an explicit sharing account
+            </Check>
+            <p>
+              Otherwise use the production acquisition account. Sharing and acquisition use one
+              session. Explicit settings must match acquisition settings when both exist. A
+              sharing-only worker does not need a staging root.
+            </p>
+            {sharing.account && (
+              <>
+                {hidden(
+                  "production_worker.sharing.account.credentials_file",
+                  "Sharing Soulseek credential file",
+                  sharing.account.credentials_file,
+                  (credentials_file) =>
+                    sharing.account &&
+                    updateSharing({
+                      ...sharing,
+                      account: { ...sharing.account, credentials_file },
+                    }),
+                  false,
+                )}
+                {text(
+                  "production_worker.sharing.account.server",
+                  "Sharing Soulseek server",
+                  sharing.account.server,
+                  (server) =>
+                    sharing.account &&
+                    updateSharing({
+                      ...sharing,
+                      account: { ...sharing.account, server },
+                    }),
+                  "Public IPv4 address and nonzero port. Validation does not connect.",
+                )}
+                <Check
+                  checked={sharing.account.acknowledge_plaintext_login}
+                  onChange={(acknowledge_plaintext_login) =>
+                    sharing.account &&
+                    updateSharing({
+                      ...sharing,
+                      account: { ...sharing.account, acknowledge_plaintext_login },
+                    })
+                  }
+                >
+                  I acknowledge that Soulseek login uses plaintext.
+                </Check>
+              </>
+            )}
+            <Check
+              checked={sharing.listen !== null}
+              onChange={(enabled) => updateSharing({ ...sharing, listen: enabled ? "" : null })}
+            >
+              Configure an incoming peer listener
+            </Check>
+            {sharing.listen !== null &&
+              text(
+                "production_worker.sharing.listen",
+                "Sharing peer listen address",
+                sharing.listen,
+                (listen) => updateSharing({ ...sharing, listen }),
+                "Explicit IPv4 address and nonzero port. No automatic port mapping or distributed-child acceptance. Validation does not open a listener.",
+              )}
+            <details className="configuration-details configuration-sharing-limits">
+              <summary>Sharing resource limits</summary>
+              <p>
+                All limits are finite. Sizes use bytes; timeouts use seconds. Related limits must be
+                consistent.
+              </p>
+              <div className="configuration-sharing-limit-fields">
+                {sharingLimitFields.map(([name, label, min, max, unit]) =>
+                  field(
+                    `production_worker.sharing.policy.limits.${name}`,
+                    label,
+                    `${min.toLocaleString("en")} through ${max.toLocaleString("en")} ${unit}.${name === "catalog_bytes" ? " Estimated entry data only. This excludes database pages, indexes, WAL and unrelated data; it is not a disk quota." : ""}`,
+                    <input
+                      type="number"
+                      name={`production_worker.sharing.policy.limits.${name}`}
+                      min={min}
+                      max={max}
+                      step={1}
+                      required
+                      value={sharing.policy.limits[name]}
+                      onChange={(event) =>
+                        updateSharing({
+                          ...sharing,
+                          policy: {
+                            ...sharing.policy,
+                            limits: {
+                              ...sharing.policy.limits,
+                              [name]: Number(event.target.value),
+                            },
+                          },
+                        })
+                      }
+                    />,
+                  ),
+                )}
+              </div>
+            </details>
+          </>
+        )}
+      </fieldset>
       {editor.validated && (
         <p role="status">
           Changes checked. Save them when you are ready. Reload performs full startup validation.
@@ -552,3 +761,23 @@ export function BackendConfigurationForm({
     </form>
   );
 }
+
+const sharingLimitFields: [keyof ShareLimits, string, number, number, string][] = [
+  ["upload_slots", "Concurrent uploads", 1, 8, "uploads"],
+  ["queued_files", "Queued files", 1, 1024, "files"],
+  ["queued_per_peer", "Queued files per peer", 1, 128, "files"],
+  ["buffer_bytes", "Transfer buffer", 4096, 262144, "bytes"],
+  ["roots", "Selected share roots", 1, 64, "roots"],
+  ["catalog_files", "Complete catalog files", 1, 2000000, "files"],
+  ["catalog_bytes", "Encoded catalog entry budget", 1024, 1073741824, "bytes"],
+  ["expanded_bytes", "Expanded complete browse response", 1024, 536870912, "bytes"],
+  ["compressed_bytes", "Compressed complete browse response", 1024, 134217728, "bytes"],
+  ["spool_bytes", "Private browse spool storage", 1024, 1073741824, "bytes"],
+  ["peer_connections", "Peer connections", 1, 24, "connections"],
+  ["pending_handshakes", "Pending handshakes", 1, 8, "handshakes"],
+  ["requests_per_minute", "Requests per minute", 1, 600, "requests per minute"],
+  ["search_results", "Search results", 1, 1000, "results"],
+  ["concurrent_browses", "Concurrent large browse responses", 1, 4, "responses"],
+  ["idle_seconds", "Idle timeout", 1, 30, "seconds"],
+  ["operation_seconds", "Operation timeout", 1, 3600, "seconds"],
+];

@@ -148,6 +148,7 @@ fn schema_twelve_upgrade_requires_explicit_native_binding_without_losing_observa
     scan_location(&mut store, location)?;
     drop(store);
     let raw = rusqlite::Connection::open(&database)?;
+    raw.execute_batch(include_str!("support/drop_sharing.sql"))?;
     raw.execute_batch("DROP TABLE worker_requests; DROP TABLE worker_host; DROP TABLE transfer_evidence; DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; PRAGMA user_version = 12;")?;
     let mut store = Store::open_existing(&database)?;
     assert!(store.location(location)?.native_identity.is_none());
@@ -235,6 +236,7 @@ fn legacy_staging_binding_checks_exact_identity_before_any_marker_change() -> Te
     let marker = std::fs::read(scratch.path().join("owner.lock"))?;
     drop(store);
     let raw = rusqlite::Connection::open(&database)?;
+    raw.execute_batch(include_str!("support/drop_sharing.sql"))?;
     raw.execute_batch("DROP TABLE worker_requests; DROP TABLE worker_host; DROP TABLE transfer_evidence; DROP INDEX plan_events; DROP TRIGGER queue_completed_insert; DROP TRIGGER queue_completed_update; DROP TABLE queue_presentations; DROP TABLE acquisition_source_reviews; DROP TABLE source_candidates; DROP TABLE job_controls; DROP TABLE publication_files; DROP TABLE publication_destinations; DROP TABLE artwork_question_resolutions; DROP TABLE artwork_questions; DROP TABLE artwork_caa_evidence; DROP TABLE caa_cache; DROP TABLE filesystem_roots; PRAGMA user_version = 12;")?;
     let mut store = Store::open_existing(&database)?;
     assert!(StagingRoot::open(&mut store, scratch.path()).is_err());

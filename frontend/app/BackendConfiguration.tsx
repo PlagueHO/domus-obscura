@@ -3,6 +3,8 @@ import type { BackendConfigurationState } from "../src/generated/BackendConfigur
 import type { BackendConfigurationResult } from "../src/generated/BackendConfigurationResult";
 import type { ConfigurationSection } from "../src/generated/ConfigurationSection";
 import type { ConfigurationReloadState } from "../src/generated/ConfigurationReloadState";
+import type { WorkerStatus } from "../src/generated/WorkerStatus";
+import type { LocalStatus } from "../src/generated/LocalStatus";
 import { ApiError, request } from "./api";
 import { useCommand, useResource } from "./hooks";
 import { Alert, Button } from "./components/ui";
@@ -380,6 +382,13 @@ export function BackendConfiguration({
             <ConfigurationCard title={currentSection?.title ?? "Settings"}>
               <p className="muted">{currentSection?.description}</p>
               {!state && !resource.error && <p role="status">Loading settings…</p>}
+              {state && backendSection === "music_sharing" && (
+                <>
+                  <SharingWorkerStatus revision={state.saved_revision} />
+                  <h3>Saved sharing configuration</h3>
+                  <p>These are saved worker settings, not a live sharing status report.</p>
+                </>
+              )}
               {state && readOnly && backendSection && (
                 <SectionSummary configuration={state.saved} section={backendSection} />
               )}
@@ -426,7 +435,14 @@ export function BackendConfiguration({
                   {state.saved_requires_validation && (
                     <p>Saved settings need full validation when the API reloads.</p>
                   )}
-                  <h3>Currently running</h3>
+                  <h3>
+                    {backendSection === "music_sharing"
+                      ? "API configuration snapshot"
+                      : "Currently running"}
+                  </h3>
+                  {backendSection === "music_sharing" && (
+                    <p>The API snapshot does not report the separate worker configuration.</p>
+                  )}
                   <SectionSummary configuration={state.active} section={backendSection} />
                   <dl className="properties">
                     <dt>Active revision</dt>
@@ -447,6 +463,46 @@ export function BackendConfiguration({
         </div>
       </div>
     </RefreshContext.Provider>
+  );
+}
+
+export function sharingWorkerEvidence(
+  worker: WorkerStatus | undefined,
+  revision: string,
+  fresh: boolean,
+): string {
+  if (!fresh) return "Worker sharing status is unknown. Refresh the status before relying on it.";
+  if (!worker)
+    return "Worker sharing status is unknown. The API has no worker status snapshot. Reload the API if its worker settings changed.";
+  if (!worker.online)
+    return "The worker is offline or its heartbeat is stale. Saved sharing settings are not confirmed active.";
+  if (worker.stopping)
+    return "The worker is stopping. Saved sharing settings are not confirmed active.";
+  if (worker.active_revision !== revision)
+    return "The worker runs a different configuration revision. Restart it at a safe boundary to apply the saved sharing settings.";
+  return "The worker heartbeat confirms this saved configuration revision. This does not prove that peers can connect or that every folder is available.";
+}
+
+function SharingWorkerStatus({ revision }: { revision: string }) {
+  const status = useResource(
+    (signal) => request<LocalStatus>("/api/local/status", { signal }),
+    `sharing-worker:${revision}`,
+    5000,
+  );
+  const fresh = !status.loading && !status.error && status.data !== undefined;
+  return (
+    <div>
+      <p role="status">{sharingWorkerEvidence(status.data?.worker, revision, fresh)}</p>
+      {fresh && status.data?.worker?.active_revision && (
+        <p>
+          Worker revision: <code>{status.data.worker.active_revision}</code>.
+        </p>
+      )}
+      <Alert error={status.error} />
+      <Button variant="ghost" disabled={status.loading} onClick={status.refresh}>
+        Refresh worker status
+      </Button>
+    </div>
   );
 }
 
@@ -500,28 +556,54 @@ function SectionSummary({
                   ["Artwork providers", value.services.artwork.join(", ") || "Disabled"],
                   ["Acquisition providers", value.services.acquisition.join(", ") || "Disabled"],
                 ]
-              : [
-                  [
-                    "Development acquisition",
-                    value.local_acquisition ? "Configured · development only" : "Disabled",
-                  ],
-                  ...(value.local_acquisition
-                    ? ([
-                        ["Private staging root", value.local_acquisition.staging_root],
-                        [
-                          "Soulseek credential file",
-                          configured(value.local_acquisition.credentials_file_configured),
+              : section === "music_sharing"
+                ? [
+                    ["Access", value.production_worker?.sharing?.policy.access ?? "none"],
+                    ["Shared folders", value.production_worker?.sharing?.policy.roots.length ?? 0],
+                    [
+                      "Allowlist usernames",
+                      value.production_worker?.sharing?.policy.allowlist.join(", ") || "None",
+                    ],
+                    ["Peer listener", value.production_worker?.sharing?.listen ?? "Not configured"],
+                    [
+                      "Account",
+                      value.production_worker?.sharing?.account
+                        ? configured(
+                            value.production_worker.sharing.account.credentials_file_configured,
+                          )
+                        : "Use production acquisition account",
+                    ],
+                    ["Activation", "Restart the separate worker to apply saved changes."],
+                    ...(value.production_worker?.sharing?.policy.roots.map(
+                      (root) =>
+                        [`Public alias · binding ${root.binding_id}`, root.alias] satisfies [
+                          string,
+                          ReactNode,
                         ],
-                        ["Soulseek server", value.local_acquisition.server],
-                        [
-                          "Plaintext login acknowledgement",
-                          value.local_acquisition.acknowledge_plaintext_login
-                            ? "Acknowledged"
-                            : "Not acknowledged",
-                        ],
-                      ] satisfies [string, ReactNode][])
-                    : []),
-                ];
+                    ) ?? []),
+                  ]
+                : [
+                    [
+                      "Development acquisition",
+                      value.local_acquisition ? "Configured · development only" : "Disabled",
+                    ],
+                    ...(value.local_acquisition
+                      ? ([
+                          ["Private staging root", value.local_acquisition.staging_root],
+                          [
+                            "Soulseek credential file",
+                            configured(value.local_acquisition.credentials_file_configured),
+                          ],
+                          ["Soulseek server", value.local_acquisition.server],
+                          [
+                            "Plaintext login acknowledgement",
+                            value.local_acquisition.acknowledge_plaintext_login
+                              ? "Acknowledged"
+                              : "Not acknowledged",
+                          ],
+                        ] satisfies [string, ReactNode][])
+                      : []),
+                  ];
   return (
     <dl className="properties">
       {rows.map(([name, content]) => (
