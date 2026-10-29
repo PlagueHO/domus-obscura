@@ -1167,7 +1167,7 @@ One first-frame Xing/Info header is counted separately from audio. Its side info
 
 The result includes the exact MPEG byte range, its SHA-256 digest, format values and physical decoded sample count. The sample count is not a gapless duration estimate. The inspector does not transcode or write files. Generated silence and nonzero spectral fixtures check decoding, every supported sample rate/channel count, padding, CRCs, bitrate changes, metadata counts, malformed inputs and unchanged encoded bytes. A 4,096-frame fixture checks that read requests stay within 64 KiB. Metadata framing is limited to 8 MiB in total. These bounds are not a combined process-memory guarantee.
 
-Private staging and the normalization use case now bind this proof to sealed input bytes and durable receipts. The downloader and publication remain unfinished.
+Private staging and the normalization use case bind this proof to sealed input bytes and durable receipts. The read-only inspector does not download or publish files. The explicit publication flow is described below.
 
 ## FLAC proof boundary
 
@@ -1179,7 +1179,7 @@ Generated fixtures cover constant and nonzero audio, verbatim coding, fixed and 
 
 Metadata framing is limited to 8 MiB and 128 blocks. Each encoded frame is limited to 16,777,215 bytes. Decoded channel blocks contain at most 65,535 samples each, with at most eight channels. These bounds are not a combined process-memory guarantee. Existing metadata contents, except STREAMINFO, are skipped and never trusted or used to fetch linked artwork. Full metadata-content validation is not provided.
 
-The current decoder cannot accept sample rates above 655,350 Hz or 32-bit stereo coding with a 33-bit side channel. Those cases return explicit errors. Private staging and the normalization use case now bind this proof to sealed inputs. Publication remains unfinished. Same-length concurrent source changes remain outside this read-only inspector's proof boundary.
+The current decoder cannot accept sample rates above 655,350 Hz or 32-bit stereo coding with a 33-bit side channel. Those cases return explicit errors. Private staging and the normalization use case bind this proof to sealed inputs. Publication uses the separate explicit flow described below. Same-length concurrent source changes remain outside this read-only inspector's proof boundary.
 
 ## Fresh metadata boundary
 
@@ -1191,7 +1191,7 @@ Every output embeds the exact immutable `CoverJpeg` bytes that future publicatio
 
 The normalizer validates the source, hashes the full input while copying only its encoded-audio range, and checks that the copied range matches the original audio proof. It flushes, validates the rewritten audio again, and reads back the complete output to verify its SHA-256. Read/write failures, source changes, nonempty destinations and mismatched written bytes return errors. Any failed staging output is unusable and must not be published.
 
-The stream helper is not a file-publication operation. The private staging adapter now binds input identity, syncs files and journals the returned evidence. Cached provider-backed CAA selection is available through the CLI and API. Automated selection and publication remain unfinished.
+The stream helper is not a file-publication operation. The private staging adapter binds input identity, syncs files and journals the returned evidence. Cached provider-backed CAA selection is available through the CLI and API. Automated artwork selection remains unfinished.
 
 ## Normalization journal
 
