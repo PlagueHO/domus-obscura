@@ -47,7 +47,7 @@ fn schema_thirteen_upgrade_preserves_legacy_previews_without_fabricated_evidence
     );
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        25
+        26
     );
     Ok(())
 }

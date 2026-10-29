@@ -1167,7 +1167,7 @@ One first-frame Xing/Info header is counted separately from audio. Its side info
 
 The result includes the exact MPEG byte range, its SHA-256 digest, format values and physical decoded sample count. The sample count is not a gapless duration estimate. The inspector does not transcode or write files. Generated silence and nonzero spectral fixtures check decoding, every supported sample rate/channel count, padding, CRCs, bitrate changes, metadata counts, malformed inputs and unchanged encoded bytes. A 4,096-frame fixture checks that read requests stay within 64 KiB. Metadata framing is limited to 8 MiB in total. These bounds are not a combined process-memory guarantee.
 
-Private staging and the normalization use case now bind this proof to sealed input bytes and durable receipts. The downloader and publication remain unfinished.
+Private staging and the normalization use case bind this proof to sealed input bytes and durable receipts. The read-only inspector does not download or publish files. The explicit publication flow is described below.
 
 ## FLAC proof boundary
 
@@ -1179,7 +1179,7 @@ Generated fixtures cover constant and nonzero audio, verbatim coding, fixed and 
 
 Metadata framing is limited to 8 MiB and 128 blocks. Each encoded frame is limited to 16,777,215 bytes. Decoded channel blocks contain at most 65,535 samples each, with at most eight channels. These bounds are not a combined process-memory guarantee. Existing metadata contents, except STREAMINFO, are skipped and never trusted or used to fetch linked artwork. Full metadata-content validation is not provided.
 
-The current decoder cannot accept sample rates above 655,350 Hz or 32-bit stereo coding with a 33-bit side channel. Those cases return explicit errors. Private staging and the normalization use case now bind this proof to sealed inputs. Publication remains unfinished. Same-length concurrent source changes remain outside this read-only inspector's proof boundary.
+The current decoder cannot accept sample rates above 655,350 Hz or 32-bit stereo coding with a 33-bit side channel. Those cases return explicit errors. Private staging and the normalization use case bind this proof to sealed inputs. Publication uses the separate explicit flow described below. Same-length concurrent source changes remain outside this read-only inspector's proof boundary.
 
 ## Fresh metadata boundary
 
@@ -1191,7 +1191,7 @@ Every output embeds the exact immutable `CoverJpeg` bytes that future publicatio
 
 The normalizer validates the source, hashes the full input while copying only its encoded-audio range, and checks that the copied range matches the original audio proof. It flushes, validates the rewritten audio again, and reads back the complete output to verify its SHA-256. Read/write failures, source changes, nonempty destinations and mismatched written bytes return errors. Any failed staging output is unusable and must not be published.
 
-The stream helper is not a file-publication operation. The private staging adapter now binds input identity, syncs files and journals the returned evidence. Cached provider-backed CAA selection is available through the CLI and API. Automated selection and publication remain unfinished.
+The stream helper is not a file-publication operation. The private staging adapter binds input identity, syncs files and journals the returned evidence. Cached provider-backed CAA selection is available through the CLI and API. Automated artwork selection remains unfinished.
 
 ## Normalization journal
 
@@ -1217,7 +1217,8 @@ The acquisition worker uses this application use case with the exact durably app
 
 ## Explicit new-album publication
 
-Migration 16 adds retained destination and file journals. The separate
+Migration 26 adds durable preparation and visibility receipts to the retained
+destination and file journals. The separate
 `publish-new-once` command uses only completed, verified normalization and the
 current approved plan. It needs no provider credentials or network connection.
 The acquisition worker does not invoke it automatically.
@@ -1260,6 +1261,12 @@ with a saved receipt is not recreated. An exact synced file without its receipt
 can be verified on retry. Unexpected files, links, changed root/album identities
 and case-colliding paths block completion.
 
+New albums are copied into hidden `.domus-pending-*` sibling folders. The
+application verifies the full album before it atomically renames that folder to
+its final name without replacing an item that appeared at the destination.
+Library scans ignore prepared folders. A retry reconciles a rename that
+completed before its visibility receipt was saved.
+
 The primary is copied first. An unavailable backup leaves a verified primary
 and `backup_pending`, with its error in publication status. Retry the same
 command after restoring the original backup root. Retry uses the same
@@ -1269,12 +1276,11 @@ with the primary last. Generic state changes cannot bypass the journal.
 The protected `GET /api/jobs/{id}/plans/{version}/publication` route returns
 bounded destination status. There is no publication mutation API or browser UI.
 
-**Limit:** files copy directly into the final album folder. Partial folders can
-be visible during copying and after failure. This is not an atomic whole-album
-switch or production acceptance. File synchronization runs before receipts,
-but Windows directory durability and power-loss/reboot recovery are not proven.
-Replacement, retained old-album recovery, restore and scratch cleanup remain
-unfinished. Staging and all partial copies are retained.
+**Limit:** primary and backup publication remain separate operations. A failed
+backup can leave a complete primary album and `backup_pending`. This is not a
+replacement, restore, cleanup or power-loss acceptance. File synchronization
+runs before receipts, but Windows directory durability and power-loss/reboot
+recovery are not proven. Staging and all failed copies are retained.
 
 ## Artwork approval
 

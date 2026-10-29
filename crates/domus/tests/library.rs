@@ -83,6 +83,7 @@ fn library_tags_counts_locations_and_read_only_files() -> TestResult {
     for folder in ["original", "other-edition", "flac"] {
         std::fs::create_dir(main.path().join(folder))?;
     }
+
     mp3(
         &main.path().join("original/one.mp3"),
         9,
@@ -201,6 +202,45 @@ fn library_tags_counts_locations_and_read_only_files() -> TestResult {
         .library_albums(main_id, None, Page::new(first.id, 1)?)?
         .remove(0);
     assert!(second.id > first.id);
+    Ok(())
+}
+
+#[test]
+fn library_scan_ignores_prepared_publication_folders() -> TestResult {
+    let state = tempdir()?;
+    let media = tempdir()?;
+    let pending = media.path().join(".domus-pending-7-1");
+    std::fs::create_dir(&pending)?;
+    mp3(
+        &pending.join("one.mp3"),
+        9,
+        Some("Hidden artist"),
+        Some("Incomplete album"),
+    )?;
+    let visible = media.path().join("visible");
+    std::fs::create_dir(&visible)?;
+    mp3(
+        &visible.join("one.mp3"),
+        9,
+        Some("Visible artist"),
+        Some("Complete album"),
+    )?;
+
+    let mut store = Store::open(&state.path().join("state.db"))?;
+    let location = add_location(&store, media.path(), "main")?;
+    scan_location(&mut store, location)?;
+
+    let root = store.browse(location, &LibraryPath::parse("")?, page()?)?;
+    assert!(
+        root.iter()
+            .all(|entry| entry.relative_path != ".domus-pending-7-1")
+    );
+    let artists = store.library_artists(location, page()?)?;
+    assert_eq!(artists.len(), 1);
+    assert_eq!(artists[0].name, "Visible artist");
+    let albums = store.library_albums(location, None, page()?)?;
+    assert_eq!(albums.len(), 1);
+    assert_eq!(albums[0].title, "Complete album");
     Ok(())
 }
 

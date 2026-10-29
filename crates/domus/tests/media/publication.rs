@@ -168,7 +168,8 @@ fn browser_publication_recovery_requires_exact_retained_journal_and_never_rewrit
             .is_err()
         );
         raw.execute_batch("DROP TRIGGER fail_recovery_receipt; UPDATE jobs SET lease_until=0;")?;
-        let image = album(&fixture, fixture._library.path())?.join("folder.jpg");
+        let image = prepared_album(&fixture)?.join("folder.jpg");
+        assert!(!album(&fixture, fixture._library.path())?.exists());
         if partial {
             std::fs::write(&image, b"retain partial image")?;
         }
@@ -223,7 +224,15 @@ fn browser_publication_recovery_requires_exact_retained_journal_and_never_rewrit
             assert_eq!(result?.state, "complete");
             verify_album(&fixture, run, fixture._library.path())?;
         }
-        assert_eq!(std::fs::read(&image)?, before);
+        let published_image = album(&fixture, fixture._library.path())?.join("folder.jpg");
+        assert_eq!(
+            if partial {
+                std::fs::read(&image)?
+            } else {
+                std::fs::read(published_image)?
+            },
+            before
+        );
         assert_eq!(
             serde_json::to_value(fixture.store.transfers(
                 fixture.job,
@@ -248,6 +257,19 @@ fn album(fixture: &Fixture, root: &Path) -> Result<PathBuf, Box<dyn std::error::
             .relative_folder
             .replace('/', std::path::MAIN_SEPARATOR_STR),
     ))
+}
+
+fn prepared_album(fixture: &Fixture) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let raw = Connection::open(&fixture.database)?;
+    let folder: String = raw.query_row(
+        "SELECT prepared_folder FROM publication_destinations WHERE job_id=?1",
+        [fixture.job],
+        |row| row.get(0),
+    )?;
+    Ok(fixture
+        ._library
+        .path()
+        .join(folder.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }
 
 fn verify_album(fixture: &Fixture, run: i64, root: &Path) -> TestResult {
@@ -478,7 +500,8 @@ fn synced_unreceipted_file_reconciles_after_reclaim_but_partial_file_is_retained
             )
             .is_err()
         );
-        let image = album(&fixture, fixture._library.path())?.join("folder.jpg");
+        let image = prepared_album(&fixture)?.join("folder.jpg");
+        assert!(!album(&fixture, fixture._library.path())?.exists());
         assert_eq!(std::fs::read(&image)?, fixture.cover.bytes());
         let before = if partial {
             std::fs::write(&image, b"partial interrupted image")?;
@@ -507,13 +530,21 @@ fn synced_unreceipted_file_reconciles_after_reclaim_but_partial_file_is_retained
             assert_eq!(result?, "complete");
             verify_album(&fixture, run, fixture._library.path())?;
         }
-        assert_eq!(std::fs::read(image)?, before);
+        let published_image = album(&fixture, fixture._library.path())?.join("folder.jpg");
+        assert_eq!(
+            if partial {
+                std::fs::read(image)?
+            } else {
+                std::fs::read(published_image)?
+            },
+            before
+        );
     }
     Ok(())
 }
 
 #[test]
-fn creation_binding_gap_is_retained_and_never_recovered_by_guessing_ownership() -> TestResult {
+fn unbound_creation_gap_is_abandoned_and_retried_without_adopting_it() -> TestResult {
     let mut fixture = Fixture::build(AudioFormat::Flac, true)?;
     let run = normalized(&mut fixture)?;
     let raw = Connection::open(&fixture.database)?;
@@ -527,35 +558,28 @@ fn creation_binding_gap_is_retained_and_never_recovered_by_guessing_ownership() 
         )
         .is_err()
     );
-    assert_eq!(
-        album(&fixture, fixture._library.path())?
-            .read_dir()?
-            .count(),
-        0
-    );
+    let abandoned = prepared_album(&fixture)?;
+    assert!(abandoned.is_dir());
+    assert!(!album(&fixture, fixture._library.path())?.exists());
     raw.execute_batch("DROP TRIGGER fail_publication_binding;")?;
-    assert!(
+    assert_eq!(
         publish_new_album(
             &mut fixture.store,
             &fixture.claim,
             fixture.staging.as_ref().ok_or("staging")?,
             run
-        )
-        .is_err()
+        )?,
+        "complete"
     );
     assert!(
         fixture
             .store
             .publication_destinations(fixture.job, fixture.version)?[0]
             .album_identity
-            .is_none()
+            .is_some()
     );
-    assert_eq!(
-        album(&fixture, fixture._library.path())?
-            .read_dir()?
-            .count(),
-        0
-    );
+    assert!(abandoned.is_dir());
+    verify_album(&fixture, run, fixture._library.path())?;
     Ok(())
 }
 
@@ -740,7 +764,8 @@ fn publication_retry_never_recreates_receipted_missing_files_or_accepts_extras()
             )
             .is_err()
         );
-        let folder = album(&fixture, fixture._library.path())?;
+        let folder = prepared_album(&fixture)?;
+        assert!(!album(&fixture, fixture._library.path())?.exists());
         let receipt: Option<i64> = raw.query_row(
             "SELECT verified_at FROM publication_files WHERE ordinal=0",
             [],
@@ -896,6 +921,58 @@ fn failed_publication_final_commit_keeps_receipts_and_can_finish_after_restart()
 }
 
 #[test]
+fn publication_rename_receipt_gap_recovers_the_complete_album() -> TestResult {
+    let mut fixture = Fixture::build(AudioFormat::Flac, true)?;
+    let run = normalized(&mut fixture)?;
+    let raw = Connection::open(&fixture.database)?;
+    raw.execute_batch("CREATE TRIGGER fail_publication_visible BEFORE UPDATE OF published_at ON publication_destinations BEGIN SELECT RAISE(ABORT,'injected visibility receipt failure'); END;")?;
+    assert!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )
+        .is_err()
+    );
+    assert!(album(&fixture, fixture._library.path())?.exists());
+    assert!(!prepared_album(&fixture)?.exists());
+    assert!(
+        fixture
+            .store
+            .publication_destinations(fixture.job, fixture.version)?
+            .iter()
+            .all(|target| target.verified_at.is_none())
+    );
+    verify_album(&fixture, run, fixture._library.path())?;
+
+    raw.execute_batch("DROP TRIGGER fail_publication_visible; UPDATE jobs SET lease_until=0;")?;
+    let claim = fixture
+        .store
+        .claim_approved_plan(fixture.job, fixture.version, "receipt-retry", 300)?
+        .ok_or("claim")?
+        .claim;
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )?,
+        "complete"
+    );
+    assert!(
+        fixture
+            .store
+            .publication_destinations(fixture.job, fixture.version)?
+            .iter()
+            .all(|target| target.verified_at.is_some())
+    );
+    verify_album(&fixture, run, fixture._library.path())?;
+    Ok(())
+}
+
+#[test]
 fn schema_fifteen_upgrade_preserves_completed_normalization_and_approval() -> TestResult {
     let mut fixture = Fixture::build(AudioFormat::Flac, true)?;
     let run = normalized(&mut fixture)?;
@@ -910,7 +987,7 @@ fn schema_fifteen_upgrade_preserves_completed_normalization_and_approval() -> Te
     fixture.store = Store::open(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        25
+        26
     );
     assert_eq!(
         raw.query_row(

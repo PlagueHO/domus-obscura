@@ -35,6 +35,12 @@ pub struct PublicationFile {
     pub verified_at: Option<i64>,
 }
 
+pub(crate) struct PublicationPreparation {
+    pub(crate) folder: String,
+    pub(crate) published_at: Option<i64>,
+    pub(crate) atomic: bool,
+}
+
 fn conflict() -> Error {
     Error::Conflict("publication requires its current approved plan, completed normalization and exact destination receipts".into())
 }
@@ -233,8 +239,8 @@ impl Store {
                 id
             } else {
                 transaction.execute(
-                    "INSERT INTO publication_destinations(job_id,plan_version,run_id,location_id,root,root_identity,kind,relative_folder,folder_key,manifest_sha256)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    "INSERT INTO publication_destinations(job_id,plan_version,run_id,location_id,root,root_identity,kind,relative_folder,folder_key,manifest_sha256,atomic)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1)",
                     params![claim.job,claim.plan_version,run,target.location_id,target.root,root_identity,target.kind,folder,folder.to_uppercase(),hash],
                 )?;
                 let id = transaction.last_insert_rowid();
@@ -319,6 +325,92 @@ impl Store {
         Ok(())
     }
 
+    /// Save a fresh hidden sibling path before creating a prepared directory.
+    /// An unbound directory is never reopened after a crash.
+    pub(crate) fn prepare_publication_path(
+        &mut self,
+        claim: &JobClaim,
+        id: i64,
+    ) -> Result<PublicationPreparation> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let saved = bound(&transaction, claim, id)?;
+        let (mut folder, mut attempt, published_at, atomic): (
+            Option<String>,
+            i64,
+            Option<i64>,
+            bool,
+        ) = transaction.query_row(
+            "SELECT prepared_folder,prepare_attempt,published_at,atomic
+                 FROM publication_destinations WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        if let Some(folder) = folder.as_ref()
+            && (saved.album_identity.is_some() || published_at.is_some())
+        {
+            transaction.commit()?;
+            return Ok(PublicationPreparation {
+                folder: folder.clone(),
+                published_at,
+                atomic,
+            });
+        }
+
+        if attempt >= 10_000 {
+            return Err(conflict());
+        }
+        attempt = attempt.checked_add(1).ok_or_else(conflict)?;
+        let parent = saved
+            .relative_folder
+            .rsplit_once('/')
+            .map_or("", |(parent, _)| parent);
+        let name = format!(".domus-pending-{}-{attempt}", saved.id);
+        folder = Some(if parent.is_empty() {
+            name
+        } else {
+            format!("{parent}/{name}")
+        });
+        LibraryPath::parse(folder.as_deref().ok_or_else(conflict)?)?;
+        if transaction.execute(
+            "UPDATE publication_destinations SET prepared_folder=?2,prepare_attempt=?3
+             WHERE id=?1 AND (album_identity IS NULL OR prepared_folder IS NULL)",
+            params![id, folder, attempt],
+        )? != 1
+        {
+            return Err(conflict());
+        }
+        transaction.commit()?;
+        Ok(PublicationPreparation {
+            folder: folder.ok_or_else(conflict)?,
+            published_at,
+            atomic,
+        })
+    }
+
+    pub(crate) fn publication_preparation(
+        &self,
+        claim: &JobClaim,
+        id: i64,
+    ) -> Result<PublicationPreparation> {
+        bound(&self.connection, claim, id)?;
+        let (folder, published_at, atomic): (Option<String>, Option<i64>, bool) =
+            self.connection.query_row(
+                "SELECT prepared_folder,published_at,atomic
+                 FROM publication_destinations WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let folder = folder.ok_or_else(conflict)?;
+        LibraryPath::parse(&folder)?;
+        Ok(PublicationPreparation {
+            folder,
+            published_at,
+            atomic,
+        })
+    }
+
     pub(crate) fn record_publication_file(
         &mut self,
         claim: &JobClaim,
@@ -350,19 +442,54 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let saved = bound(&transaction, claim, id)?;
         let missing: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM publication_files WHERE destination_id=?1 AND verified_at IS NULL)",[id],|row| row.get(0))?;
+        let published: bool = transaction.query_row(
+            "SELECT published_at IS NOT NULL FROM publication_destinations WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )?;
         let count: i64 = transaction.query_row(
             "SELECT count(*) FROM publication_files WHERE destination_id=?1",
             [id],
             |row| row.get(0),
         )?;
         let run = normalization::read_run(&transaction, saved.run_id)?;
-        if missing || count != i64::from(run.files) + 1 || saved.album_identity.is_none() {
+        if missing
+            || count != i64::from(run.files) + 1
+            || saved.album_identity.is_none()
+            || !published
+        {
             return Err(conflict());
         }
         transaction.execute("UPDATE publication_destinations SET verified_at=COALESCE(verified_at,unixepoch()),last_error=NULL WHERE id=?1",[id])?;
         if saved.verified_at.is_none() {
             transaction.execute("INSERT INTO events(job_id,plan_version,event_type) VALUES (?1,?2,'destination_verified')",params![claim.job,claim.plan_version])?;
         }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn record_publication_visible(&mut self, claim: &JobClaim, id: i64) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let saved = bound(&transaction, claim, id)?;
+        if saved.album_identity.is_none() {
+            return Err(conflict());
+        }
+        let missing: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM publication_files
+             WHERE destination_id=?1 AND verified_at IS NULL)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if missing {
+            return Err(conflict());
+        }
+        transaction.execute(
+            "UPDATE publication_destinations SET published_at=COALESCE(published_at,unixepoch())
+             WHERE id=?1",
+            [id],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -403,8 +530,8 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (_, plan) = snapshot(&transaction, claim, run)?;
         let (count,primary,verified): (i64,i64,i64) = transaction.query_row(
-            "SELECT count(*),COALESCE(sum(kind='main' AND verified_at IS NOT NULL AND last_error IS NULL),0),
-             COALESCE(sum(verified_at IS NOT NULL AND last_error IS NULL),0)
+            "SELECT count(*),COALESCE(sum(kind='main' AND verified_at IS NOT NULL AND published_at IS NOT NULL AND last_error IS NULL),0),
+             COALESCE(sum(verified_at IS NOT NULL AND published_at IS NOT NULL AND last_error IS NULL),0)
              FROM publication_destinations WHERE job_id=?1 AND plan_version=?2 AND run_id=?3",
             params![claim.job,claim.plan_version,run],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
         )?;

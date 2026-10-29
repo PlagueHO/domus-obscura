@@ -2,13 +2,15 @@ use super::filesystem::{
     LibraryDirectory, is_unsafe_cap_link, is_unsafe_link, sync_directory as sync,
 };
 use super::permissions::FilePermissions;
-use super::store::{PublicationDestination, PublicationFile, Store};
+use super::store::{PublicationDestination, PublicationFile, PublicationPreparation, Store};
 use crate::domain::LibraryPath;
 use crate::{Error, Result};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -58,48 +60,112 @@ fn check_case(directory: &Dir, name: &str) -> Result<()> {
 
 pub(crate) struct PublicationDirectory {
     directory: Dir,
+    parent: Dir,
     identity: String,
     permissions: FilePermissions,
+    prepared_folder: String,
+    prepared_name: String,
+    final_folder: String,
+    final_name: String,
+    visible: bool,
 }
 
 impl PublicationDirectory {
-    /// Only create a new album. An existing unbound directory is never adopted,
-    /// even if its bytes happen to match. Retain creation/receipt gaps for recovery.
-    pub(crate) fn open(store: &Store, target: &PublicationDestination) -> Result<Self> {
+    /// Prepare a complete album in a hidden sibling folder. An unbound folder is
+    /// never adopted, even if its bytes happen to match.
+    pub(crate) fn open(
+        store: &Store,
+        target: &PublicationDestination,
+        preparation: &PublicationPreparation,
+    ) -> Result<Option<Self>> {
         let root = LibraryDirectory::open(Path::new(&target.root))?;
         store.check_native_root(&target.root, "media", root.native_root())?;
         if root.native_root().identity != target.root_identity {
             return Err(conflict());
         }
-        let path = LibraryPath::parse(&target.relative_folder)?;
-        if path.as_str().is_empty() {
+        let final_path = LibraryPath::parse(&target.relative_folder)?;
+        let prepared_path = LibraryPath::parse(&preparation.folder)?;
+        let final_parent = final_path.parent();
+        if final_path.as_str().is_empty()
+            || prepared_path.parent() != final_parent
+            || !prepared_path
+                .as_str()
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with(".domus-pending-"))
+        {
             return Err(conflict());
         }
         let permissions = FilePermissions::current()?;
-        if target.album_identity.is_none() {
-            let mut parts = path.as_str().split('/').peekable();
-            let mut parent = root.into_directory();
-            checked(&parent, &permissions)?;
-            while let Some(name) = parts.next() {
-                check_case(&parent, name)?;
-                if parts.peek().is_none() {
-                    parent.create_dir(name)?;
-                    sync(&parent)?;
-                } else {
-                    match parent.create_dir(name) {
-                        Ok(()) => sync(&parent)?,
-                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                parent = parent.open_dir_nofollow(name)?;
-                checked(&parent, &permissions)?;
+        let mut parent = root.into_directory();
+        checked(&parent, &permissions)?;
+        let mut parts = final_parent.split('/').filter(|part| !part.is_empty());
+        for name in parts.by_ref() {
+            check_case(&parent, name)?;
+            match parent.create_dir(name) {
+                Ok(()) => sync(&parent)?,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
             }
+            parent = parent.open_dir_nofollow(name)?;
+            checked(&parent, &permissions)?;
         }
-        let root = LibraryDirectory::open(Path::new(&target.root))?;
-        store.check_native_root(&target.root, "media", root.native_root())?;
-        let album = root.open_directory(&path)?;
-        let identity = album.native_root().identity.clone();
+        let final_name = final_path
+            .as_str()
+            .rsplit('/')
+            .next()
+            .ok_or_else(conflict)?;
+        let prepared_name = prepared_path
+            .as_str()
+            .rsplit('/')
+            .next()
+            .ok_or_else(conflict)?;
+        check_case(&parent, final_name)?;
+        check_case(&parent, prepared_name)?;
+        let mut final_directory = open_child_directory(&parent, final_name)?;
+        let mut prepared_directory = open_child_directory(&parent, prepared_name)?;
+        if final_directory.is_some() && prepared_directory.is_some() {
+            return Err(conflict());
+        }
+        let mut visible = preparation.published_at.is_some();
+        let directory = if visible {
+            if prepared_directory.is_some() {
+                return Err(conflict());
+            }
+            final_directory.take().ok_or_else(conflict)?
+        } else if let Some(directory) = prepared_directory.take() {
+            directory
+        } else if let Some(directory) = final_directory.take() {
+            let identity =
+                super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
+            if target.album_identity.as_deref() != Some(identity.as_str()) {
+                return Err(conflict());
+            }
+            if preparation.atomic {
+                visible = true;
+                directory
+            } else {
+                drop(directory);
+                rename_no_replace(&parent, final_name, prepared_name)?;
+                sync(&parent)?;
+                parent.open_dir_nofollow(prepared_name)?
+            }
+        } else if target.album_identity.is_some() {
+            return Err(conflict());
+        } else {
+            match parent.create_dir(prepared_name) {
+                Ok(()) => {
+                    sync(&parent)?;
+                    parent.open_dir_nofollow(prepared_name)?
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let identity =
+            super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
         if target
             .album_identity
             .as_ref()
@@ -107,19 +173,18 @@ impl PublicationDirectory {
         {
             return Err(conflict());
         }
-        let directory = album.into_directory();
-        // Recheck case collisions after creation as well as before it.
-        let mut parent = root.into_directory();
-        for name in path.as_str().split('/') {
-            check_case(&parent, name)?;
-            parent = parent.open_dir_nofollow(name)?;
-        }
         checked(&directory, &permissions)?;
-        Ok(Self {
+        Ok(Some(Self {
             directory,
+            parent,
             identity,
             permissions,
-        })
+            prepared_folder: preparation.folder.clone(),
+            prepared_name: prepared_name.to_owned(),
+            final_folder: target.relative_folder.clone(),
+            final_name: final_name.to_owned(),
+            visible,
+        }))
     }
 
     pub(crate) fn identity(&self) -> &str {
@@ -132,13 +197,41 @@ impl PublicationDirectory {
         if root.native_root().identity != target.root_identity {
             return Err(conflict());
         }
-        let album = root.open_directory(&LibraryPath::parse(&target.relative_folder)?)?;
+        let folder = if self.visible {
+            &self.final_folder
+        } else {
+            &self.prepared_folder
+        };
+        let album = root.open_directory(&LibraryPath::parse(folder)?)?;
         if album.native_root().identity != self.identity
             || target.album_identity.as_deref() != Some(self.identity.as_str())
         {
             return Err(conflict());
         }
         checked(&self.directory, &self.permissions)
+    }
+
+    pub(crate) fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    pub(crate) fn publish(&mut self, store: &Store, target: &PublicationDestination) -> Result<()> {
+        self.check(store, target)?;
+        check_case(&self.parent, &self.final_name)?;
+        if open_child_directory(&self.parent, &self.final_name)?.is_some() {
+            return Err(conflict());
+        }
+        let directory = std::mem::replace(&mut self.directory, self.parent.try_clone()?);
+        drop(directory);
+        let result = rename_no_replace(&self.parent, &self.prepared_name, &self.final_name);
+        if let Err(error) = result {
+            self.directory = self.parent.open_dir_nofollow(&self.prepared_name)?;
+            return Err(error);
+        }
+        sync(&self.parent)?;
+        self.directory = self.parent.open_dir_nofollow(&self.final_name)?;
+        self.visible = true;
+        self.check(store, target)
     }
 
     fn regular(&self, file: File) -> Result<File> {
@@ -248,6 +341,40 @@ impl PublicationDirectory {
     }
 }
 
+fn open_child_directory(parent: &Dir, name: &str) -> Result<Option<Dir>> {
+    match parent.open_dir_nofollow(name) {
+        Ok(directory) => Ok(Some(directory)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn rename_no_replace(directory: &Dir, from: &str, to: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let directory = directory.try_clone()?.into_std_file();
+        rustix::fs::renameat_with(
+            &directory,
+            from,
+            &directory,
+            to,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(std::io::Error::from)?;
+    }
+    #[cfg(windows)]
+    {
+        let directory = fence_windows::DirectoryHandle::from_directory_file(
+            directory.try_clone()?.into_std_file(),
+        )
+        .map_err(std::io::Error::other)?;
+        directory
+            .rename_child_noreplace(OsStr::new(from), OsStr::new(to))
+            .map_err(std::io::Error::other)?;
+    }
+    Ok(())
+}
+
 fn verify(
     file: &mut File,
     entry: &PublicationFile,
@@ -274,4 +401,72 @@ fn verify(
         return Err(conflict());
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::rename_no_replace;
+    use cap_std::fs::Dir;
+    use std::fs::{self, OpenOptions};
+    use std::io::{self, Write};
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn windows_directory_rename_does_not_replace_a_racing_file() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let parent = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())?;
+
+        for _ in 0..32 {
+            let prepared = root.path().join("prepared");
+            let final_path = root.path().join("album");
+            fs::create_dir(&prepared)?;
+            fs::write(prepared.join("track.flac"), b"album")?;
+
+            let barrier = Arc::new(Barrier::new(2));
+            let writer_barrier = Arc::clone(&barrier);
+            let writer_path = final_path.clone();
+            let writer = std::thread::Builder::new().spawn(move || {
+                writer_barrier.wait();
+                let result = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&writer_path);
+                match result {
+                    Ok(mut file) => {
+                        file.write_all(b"racing file")?;
+                        Ok(true)
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+                    Err(error)
+                        if error.kind() == io::ErrorKind::PermissionDenied
+                            && writer_path.is_dir() =>
+                    {
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
+                }
+            })?;
+
+            barrier.wait();
+            let rename = rename_no_replace(&parent, "prepared", "album");
+            let writer_created_file = writer
+                .join()
+                .map_err(|_| io::Error::other("destination writer panicked"))??;
+
+            if writer_created_file {
+                assert!(rename.is_err());
+                assert!(prepared.is_dir());
+                assert_eq!(fs::read(&final_path)?, b"racing file");
+                fs::remove_file(final_path)?;
+                fs::remove_dir_all(prepared)?;
+            } else {
+                assert!(rename.is_ok());
+                assert!(!prepared.exists());
+                assert_eq!(fs::read(final_path.join("track.flac"))?, b"album");
+                fs::remove_dir_all(final_path)?;
+            }
+        }
+
+        Ok(())
+    }
 }

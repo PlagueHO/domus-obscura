@@ -19,7 +19,7 @@ fn schema_one_upgrades_without_losing_existing_jobs() -> Result<(), Box<dyn std:
     drop(store);
     let current = rusqlite::Connection::open(&database)?;
     let version: i64 = current.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 25);
+    assert_eq!(version, 26);
     Ok(())
 }
 

@@ -284,8 +284,9 @@ and complete decoding. Advertised peer bitrate is not sufficient.
 The worker retains its fenced claim and private staging OS lock through new-only
 publication. It never adopts an existing album folder or overwrites partial,
 different or receipted-but-missing files. A verified primary can remain
-`backup_pending`. New-only publication exposes partially copied final folders;
-it is not an atomic replacement or power-loss acceptance.
+`backup_pending`. Each album is prepared in a hidden sibling folder, verified,
+then published by atomic rename. Library scans ignore prepared folders. This is
+not an atomic replacement or power-loss acceptance.
 
 ## Failure and recovery
 
