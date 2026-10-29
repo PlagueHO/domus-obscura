@@ -9,6 +9,7 @@ pub mod filesystem;
 pub mod flac;
 pub mod http;
 pub mod identity;
+pub(crate) mod library_metadata;
 mod local_file;
 pub mod local_runtime;
 pub mod mcp;

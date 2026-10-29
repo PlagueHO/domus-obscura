@@ -109,6 +109,18 @@ fn run(args: &[String]) -> Result<()> {
             // serde_json emits integer JSON numbers, not JavaScript bigint values.
             let config = ts_rs::Config::default().with_large_int("number");
             let contracts = [
+                ("LibraryRefresh.ts", domus::infrastructure::api::LibraryRefresh::export_to_string(&config)),
+                ("RefreshLibraryFolder.ts", domus::infrastructure::api::RefreshLibraryFolder::export_to_string(&config)),
+                ("LibraryTags.ts", domus::domain::library::LibraryTags::export_to_string(&config)),
+                ("LibraryAudio.ts", domus::domain::library::LibraryAudio::export_to_string(&config)),
+                ("LibraryMetadata.ts", domus::domain::library::LibraryMetadata::export_to_string(&config)),
+                ("LibraryArtist.ts", domus::domain::library::LibraryArtist::export_to_string(&config)),
+                ("LibraryAlbum.ts", domus::domain::library::LibraryAlbum::export_to_string(&config)),
+                ("LibraryFile.ts", domus::domain::library::LibraryFile::export_to_string(&config)),
+                ("LibraryCoverage.ts", domus::domain::library::LibraryCoverage::export_to_string(&config)),
+                ("LibraryMatchQuery.ts", domus::domain::library::LibraryMatchQuery::export_to_string(&config)),
+                ("LibraryMatch.ts", domus::domain::library::LibraryMatch::export_to_string(&config)),
+                ("LibraryMatches.ts", domus::domain::library::LibraryMatches::export_to_string(&config)),
                 ("WorkerOperation.ts", domus::infrastructure::production_worker::WorkerOperation::export_to_string(&config)),
                 ("WorkerRequest.ts", domus::infrastructure::production_worker::WorkerRequest::export_to_string(&config)),
                 ("WorkerStatus.ts", domus::infrastructure::production_worker::WorkerStatus::export_to_string(&config)),

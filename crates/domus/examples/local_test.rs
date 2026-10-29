@@ -23,6 +23,9 @@ const ORIGIN: &str = "http://127.0.0.1:4173";
 #[path = "local_test/album.rs"]
 mod album;
 
+#[path = "local_test/library.rs"]
+mod library;
+
 struct Fixture {
     store: Store,
     location: i64,
@@ -85,6 +88,10 @@ impl Fixture {
             album.join("README.txt"),
             b"Generated browsing fixture. This is not an audio file.\n",
         )?;
+        library::generate(&album)?;
+        let alternate = media.join("Other folder");
+        std::fs::create_dir(&alternate)?;
+        library::generate(&alternate)?;
         let mut store = Store::open(&directory.path().join("state.db"))?;
         let location = add_location(&store, &media, "main")?;
         scan_location(&mut store, location)?;
@@ -338,6 +345,15 @@ async fn guard(request: Request, next: Next) -> Response {
 
 fn router(fixture: Fixture, index: String, script: Vec<u8>, style: Vec<u8>) -> Router {
     Router::new()
+        .route(
+            "/assets/local-test.ttf",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "font/ttf")],
+                    include_bytes!("../../../frontend/app/assets/BebasNeue-Regular.ttf").as_slice(),
+                )
+            }),
+        )
         .route("/", get(move || async { axum::response::Html(index) }))
         .route(
             "/assets/local-test.js",
@@ -351,6 +367,23 @@ fn router(fixture: Fixture, index: String, script: Vec<u8>, style: Vec<u8>) -> R
         .route(
             "/assets/local-test.css",
             get(move || async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], style) }),
+        )
+        .route(
+            "/api/locations/{location}/library/matches",
+            post(library::matches),
+        )
+        .route(
+            "/api/locations/{location}/library/refresh",
+            post(library::refresh),
+        )
+        .route(
+            "/api/locations/{location}/library/{*tail}",
+            get(library::read),
+        )
+        .route("/api/locations/{location}/entries", get(library::entries))
+        .route(
+            "/api/locations/{location}/availability",
+            get(library::availability),
         )
         .route("/local/snapshot", get(snapshot))
         .route("/local/album-test", get(album_status).post(album_run))

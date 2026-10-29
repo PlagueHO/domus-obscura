@@ -184,7 +184,7 @@ fn schema_fourteen_upgrade_keeps_generic_questions_without_inventing_artwork_con
     assert!(store.claim(job, "other", 60)?.is_some());
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        24
+        25
     );
     Ok(())
 }

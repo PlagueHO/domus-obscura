@@ -609,12 +609,30 @@ active operation through result recording instead of abandoning its blocking
 task. Ctrl+C is supported; Linux SIGTERM is wired to the same path. Forced
 termination and native service-manager acceptance remain unverified.
 
-The read-only Library screen now offers an explicit saved-index refresh,
-root-bound folder navigation and clear incomplete-coverage and failed-refresh
-states. It does not scan or change media. Changing a resource key immediately
+The read-only Library screen offers location-scoped Artists, Albums and Folders.
+MP3 at any supported header bitrate and FLAC receive bounded tag inspection.
+Other audio formats remain visible as unsupported. Artists use Album Artist,
+with Track Artist as the fallback. Separate folders remain separate album entries,
+even when their tags match. This does not change output layout or acquisition rules.
+File details show saved tags, identifiers, header properties and inspection errors.
+Album folders list assets; indexed JPEG previews use checked native handles and
+strict bounded image decoding. Embedded covers are not extracted.
+
+Saved-index refresh is passive. The separate **Refresh folder from disk** command
+scans only the selected directory and its direct entries through the existing scan
+lane. It does not renew complete-location coverage or scan child folders. Failed
+enumeration cannot confirm absence. Production requests show their exact worker
+request state and require explicit retry after failure. The system-settings edit
+policy applies. No Library operation changes media or creates acquisition work.
+Changing a resource key immediately
 hides the old resource until the new read starts. This also protects request
 and provider views from showing another resource's saved result as current.
-The Library is still a folder index, not a completed tag-based album browser.
+Discovery shows possible saved-tag matches for one selected location at a time.
+Comparison trims outer whitespace and ignores case, but preserves punctuation.
+Matches, provider IDs and no-match responses do not prove an exact edition,
+ownership or absence. Coverage and observation times remain visible. Edition
+recommendation policy remains issue #21; physical scanning and memory acceptance
+remain issue #23.
 An explicit root-availability check opens only the configured root through the
 existing no-follow boundary and verifies its saved native binding. It does not
 scan, update coverage or authorize later writes. Missing, inaccessible, unbound

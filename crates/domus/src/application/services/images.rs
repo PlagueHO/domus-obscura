@@ -51,6 +51,22 @@ impl ImageService {
         Self { artwork, processor }
     }
 
+    /// Local original bytes have no provider provenance or approval authority.
+    pub async fn process_local(
+        &self,
+        original: Vec<u8>,
+        options: ImageOptions,
+    ) -> Result<ProcessedImage> {
+        if original.len() > 8 * 1024 * 1024 {
+            return Err(Error::InvalidInput(
+                "local image exceeds compressed byte limit".into(),
+            ));
+        }
+        let image = self.processor.process(original, options).await?;
+        Self::check_image(&image, options)?;
+        Ok(image)
+    }
+
     /// Reuse the provider's original/cache rules, then create the selected JPEG.
     /// A missing image stays missing; corruption and provider errors stay errors.
     pub async fn retrieve(
@@ -73,6 +89,17 @@ impl ImageService {
         };
         let original_sha256 = Sha256::digest(&original).into();
         let image = self.processor.process(original, options).await?;
+        Self::check_image(&image, options)?;
+        Ok(Some(RetrievedImage {
+            request,
+            sources: fetched.sources,
+            original_sha256,
+            options,
+            image,
+        }))
+    }
+
+    fn check_image(image: &ProcessedImage, options: ImageOptions) -> Result<()> {
         let target = options.size.map_or(1200, ArtworkSize::target_side);
         if image.jpeg.is_empty()
             || image.jpeg.len() > 8 * 1024 * 1024
@@ -86,13 +113,7 @@ impl ImageService {
                 "image processor returned an invalid JPEG result",
             ));
         }
-        Ok(Some(RetrievedImage {
-            request,
-            sources: fetched.sources,
-            original_sha256,
-            options,
-            image,
-        }))
+        Ok(())
     }
 }
 

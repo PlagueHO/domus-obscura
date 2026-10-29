@@ -7,7 +7,7 @@ import type { JobSummary } from "../src/generated/JobSummary";
 import type { StoredQuestion } from "../src/generated/StoredQuestion";
 import { request, type LocalStatus } from "./api";
 import { WorkerRequests } from "./WorkerRequests";
-import { useResource } from "./hooks";
+import { useCommand, useResource } from "./hooks";
 import { activeStates } from "./state";
 import { Alert, Badge, Button, Card, Check, Cover, Empty, Pager } from "./components/ui";
 import { Album, Artist, Settings } from "./Catalog";
@@ -168,7 +168,17 @@ export function App() {
   }, []);
   const problems = groupJobs(jobs.data ?? []).attention;
   const problemCount = problems.length + (local.data?.last_error ? 1 : 0);
-  const locations = setup.data?.locations ?? [];
+  const locationCommand = useCommand();
+  const [moreLocations, setMoreLocations] = useState<{
+    base: Location[] | undefined;
+    rows: Location[];
+    complete: boolean;
+  }>({ base: undefined, rows: [], complete: false });
+  const extraLocations = moreLocations.base === setup.data?.locations ? moreLocations.rows : [];
+  const locations = [...(setup.data?.locations ?? []), ...extraLocations];
+  const locationsComplete =
+    (setup.data?.locations.length ?? 0) < 100 ||
+    (moreLocations.base === setup.data?.locations && moreLocations.complete);
   const parts = route.split("/");
   const section = (parts[1] ?? "").split("?")[0] ?? "";
   const sectionTitle =
@@ -191,9 +201,9 @@ export function App() {
   let page;
   if (route.startsWith("/search")) {
     const search = new URLSearchParams(route.split("?")[1]).get("q") ?? "";
-    page = <Search key={search} term={search} />;
+    page = <Search key={search} term={search} locations={locations} />;
   } else if (parts[1] === "artist" && routeId) {
-    page = <Artist key={routeId} id={routeId} />;
+    page = <Artist key={routeId} id={routeId} locations={locations} />;
   } else if (parts[1] === "album" && routeId) {
     page = (
       <Album
@@ -286,8 +296,14 @@ export function App() {
         onReload={setup.refresh}
       />
     );
-  } else if (route === "/library") {
-    page = <Library locations={locations} />;
+  } else if (route.split("?")[0] === "/library") {
+    page = (
+      <Library
+        locations={locations}
+        route={route}
+        readOnly={setup.data?.settingsPolicy.read_only ?? true}
+      />
+    );
   } else if (route === "/components") {
     page = <ComponentLibrary />;
   } else {
@@ -596,6 +612,29 @@ export function App() {
               Sign in with Microsoft
             </a>
           </Card>
+        )}
+        {session.data && !locationsComplete && (
+          <div className="actions">
+            <Button
+              variant="secondary"
+              disabled={locationCommand.busy || setup.loading || Boolean(setup.error)}
+              onClick={() =>
+                void locationCommand.run(async () => {
+                  const rows = await request<Location[]>(
+                    `/api/locations?after=${locations.at(-1)?.id ?? 0}&limit=100`,
+                  );
+                  setMoreLocations({
+                    base: setup.data?.locations,
+                    rows: [...extraLocations, ...rows],
+                    complete: rows.length < 100,
+                  });
+                })
+              }
+            >
+              Load more library roots
+            </Button>
+            <Alert error={locationCommand.error} />
+          </div>
         )}
         <footer>Music only · Local collection · No automatic downloads</footer>
       </main>

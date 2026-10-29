@@ -2,6 +2,7 @@ mod catalog;
 pub(crate) mod identifiers;
 pub(crate) use catalog::credit_text;
 mod jobs;
+pub mod library;
 mod media;
 mod paths;
 mod planning;

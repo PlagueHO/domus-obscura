@@ -62,6 +62,39 @@ describe("read-only library", () => {
     expect(markup).toMatch(/<button[^>]*disabled[^>]*>Refresh index view/);
   });
 
+  it("does not replace an unavailable selected root with the first listed root", () => {
+    vi.mocked(useResource).mockReturnValue({
+      data: undefined,
+      error: new Error("Selected root unavailable"),
+      loading: false,
+      refresh,
+    });
+    const markup = renderToStaticMarkup(
+      <Library locations={[root]} route="/library?location=2&view=folders&folder=private" />,
+    );
+    expect(markup).toContain("Selected root unavailable");
+    expect(markup).toContain("No other location is shown in its place");
+    expect(markup).not.toContain("Check root availability");
+    expect(markup).not.toContain("Refresh folder from disk");
+  });
+
+  it("resolves a selected root that is outside the loaded root page", () => {
+    vi.mocked(useResource)
+      .mockReturnValue({ data: [], error: undefined, loading: false, refresh })
+      .mockReturnValueOnce({
+        data: { ...root, id: 101, kind: "backup", root: "selected-backup" },
+        error: undefined,
+        loading: false,
+        refresh,
+      });
+    const markup = renderToStaticMarkup(
+      <Library locations={[root]} route="/library?location=101&view=folders" />,
+    );
+    expect(markup).toMatch(/<option[^>]*value="101"[^>]*selected[^>]*>backup/);
+    expect(markup).toContain("selected-backup");
+    expect(vi.mocked(useResource).mock.calls[1]?.[1]).toBe("101::0");
+  });
+
   it("shows bounded index entries and keeps confirmed absence distinct", () => {
     const markup = render(
       [root],

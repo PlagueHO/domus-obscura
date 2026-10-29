@@ -49,6 +49,7 @@ approval, recovery and external-service rules.
 - Authenticated event replay with durable IDs, bounded pages, reconnect cursors and active-session checks.
 - Read-only file inventory with bounded batches, persistent directory checkpoints, scan leases, and cached observations for unavailable locations.
 - Main/backup separation and paginated folder/file queries.
+- Indexed Artist/Album browsing, saved MP3/FLAC tags, conservative local matches and explicit direct-folder refresh.
 - Visible unsafe-link observations without junction/symlink traversal.
 - Rust-generated TypeScript contracts and a neutral React output-preview component.
 - One shared task interface, editor tasks, and configured Windows/Linux CI.
@@ -66,6 +67,39 @@ shared components. Browser answers and safe recovery remain separate actions.
 Atomic album publication, replacement/restore management, automated source
 selection, native worker service supervision, the remaining UI port,
 native services and production packages remain incomplete.
+
+## Indexed Library
+
+Library has location-scoped Artists, Albums and Folders with 50-row pages. Album
+Artist is the grouping key, with Track Artist as the fallback. Separate folders
+remain separate album entries. Main and backup evidence is never merged.
+
+The bounded reader inspects MP3 ID3v2.2–2.4 tags without transformation flags,
+MPEG Layer III headers, FLAC STREAMINFO and Vorbis comments. It saves title,
+track/album artists, album, date, track/disc numbers and totals, supported
+MusicBrainz text identifiers and embedded-cover presence. ID3v1-only tags are not
+inspected. Unsupported tag flags, malformed data and resource limits produce
+saved diagnostics. Other audio formats, including M4A, remain visible as
+unsupported. Browsing does not use the acquisition MP3-320 validator.
+
+Sample rate, channels, bits per sample, header bitrate and header duration remain
+unknown when bounded inspection cannot establish them. Header bitrate is not a
+whole-file CBR check. File details and asset lists remain available without album
+tags. JPEG previews check the saved native file binding and use strict bounded
+decoding. Embedded covers are not extracted.
+
+**Refresh index view** reads SQLite only. **Refresh folder from disk** inspects
+the selected folder and its direct entries, not child folders. It preserves
+whole-location coverage and requires system-settings write permission. Production
+refreshes use the existing worker queue; failures require explicit retry. None
+of these operations changes media or creates acquisition jobs.
+
+Discovery matches compare saved artist/album tags after trimming outer whitespace
+and ignoring case. Punctuation is preserved. Matches are possible name matches,
+not exact-edition or ownership proof. No indexed match does not prove absence.
+Saved coverage and times are not live availability checks. Legacy metadata stays
+unobserved until an explicit scan. Edition policy and physical scan/memory
+acceptance remain issues #21 and #23.
 
 ## Separate production worker
 
@@ -118,6 +152,9 @@ Acquisition/publication commands retain their existing guarded routes and return
 HTTP 202 after durable admission. Production library scans also return HTTP 202,
 not scan completion. Read worker requests through
 `GET /api/worker/requests?after=0&limit=50`; `job_id` filters one album.
+`GET /api/worker/requests/{id}` reads the exact accepted request, including a
+folder refresh. Full scans and folder refreshes share the scan lane and location
+target. An interrupted scan can resume only its original scope.
 The browser uses `unfinished_only=true` so old completed history cannot hide
 pending work. Completed album progress remains in the normal queue and history.
 `POST /api/worker/requests/{id}/retry` explicitly retries the same saved work.
@@ -235,7 +272,7 @@ You can test a separate browser harness without Entra, CAA, certificates or live
 
 On Linux, use `cargo task local-test` (Linux execution remains unverified). Open **http://127.0.0.1:4173**. Use this exact address, not `localhost`. Stop the process with Ctrl+C. Each start creates a fresh temporary database and generated sample directory. Stopping the process discards that test state.
 
-The harness uses the real Rust output rules, SQLite settings versions, plan preparation/approval, observation checks and read-only indexing. You can edit sample metadata, preview MP3/FLAC filenames, save test settings, save and approve a plan, browse the sample directory and rescan it. Rescanning changes the observation binding, so an old plan cannot be approved without preparing a new plan. Save template edits before saving a plan; plans use the selected saved settings version. Sample release metadata is synthetic and has not been checked against MusicBrainz. The generated library contains a text fixture, not real audio.
+The harness uses the real Rust output rules, SQLite settings versions, plan preparation/approval, observation checks and read-only indexing. You can edit sample metadata, preview MP3/FLAC filenames, save test settings, save and approve a plan, browse the sample directory and rescan it. Rescanning changes the observation binding, so an old plan cannot be approved without preparing a new plan. Save template edits before saving a plan; plans use the selected saved settings version. Sample release metadata is synthetic and has not been checked against MusicBrainz. The generated library contains text, tagged MPEG-header fixtures and an unsupported-format fixture, not playable music. **Open generated Library browsing** uses the shared Library components with fixture-only routes, a fresh database and generated roots. It does not use the production router.
 
 Select **Run sample album test** for a local download/name/tag/decode check. The test generates three audible tones as 16-bit, 44.1 kHz mono FLAC files. It downloads them from a short-lived loopback HTTP server, checks each download hash, and uses the real Rust filename, metadata and artwork normalization code. It writes a fresh temporary output tree and verifies the files from disk. An independent tag reader checks the original tag text, continuous track numbers, original disc/track mapping, date, synthetic catalog IDs and embedded cover. The decoder checks every sample against the FLAC MD5. Encoded audio frames remain unchanged; no transcoding occurs during normalization.
 

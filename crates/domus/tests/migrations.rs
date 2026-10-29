@@ -19,7 +19,7 @@ fn schema_one_upgrades_without_losing_existing_jobs() -> Result<(), Box<dyn std:
     drop(store);
     let current = rusqlite::Connection::open(&database)?;
     let version: i64 = current.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     Ok(())
 }
 
@@ -34,6 +34,42 @@ fn a_newer_database_is_not_downgraded() -> Result<(), Box<dyn std::error::Error>
     let connection = rusqlite::Connection::open(&database)?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     assert_eq!(version, 99);
+    Ok(())
+}
+
+#[test]
+fn legacy_library_entries_upgrade_to_unknown_metadata_without_io()
+-> Result<(), Box<dyn std::error::Error>> {
+    use domus::domain::{LibraryPath, Page};
+    let data = tempdir()?;
+    let database = data.path().join("legacy-library.db");
+    let old = rusqlite::Connection::open(&database)?;
+    let mut migrations =
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+    migrations.sort();
+    for migration in migrations.iter().take(24) {
+        old.execute_batch(&std::fs::read_to_string(migration)?)?;
+    }
+    old.execute_batch(
+        "INSERT INTO locations(id,root,kind,coverage,observed_at) VALUES (1,'unavailable legacy root','main','complete',123);
+         INSERT INTO scans(id,location_id,status,owner,lease_until) VALUES (1,1,'complete','legacy',0);
+         INSERT INTO entries(id,location_id,relative_path,parent_path,kind,size,scan_id)
+         VALUES (1,1,'track.mp3','','file',123,1);
+         PRAGMA user_version=24;",
+    )?;
+    drop(old);
+    let store = Store::open(&database)?;
+    assert_eq!(store.library_file(1, 1)?.metadata.status, "unobserved");
+    assert_eq!(
+        store
+            .library_coverage(1, &LibraryPath::parse("")?)?
+            .unobserved_files,
+        1
+    );
+    assert!(store.library_artists(1, Page::new(0, 10)?)?.is_empty());
+    assert_eq!(store.location(1)?.observed_at, Some(123));
     Ok(())
 }
 
