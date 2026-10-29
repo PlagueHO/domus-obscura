@@ -55,7 +55,7 @@ fn require_ready(connection: &Connection, operation: &WorkerOperation) -> Result
             WorkerOperation::Publish { .. } => {
                 matches!(state.as_deref(), Some("publishing" | "backup_pending"))
             }
-            WorkerOperation::Scan { .. } => false,
+            WorkerOperation::Scan { .. } | WorkerOperation::RefreshFolder { .. } => false,
         };
         if !ready
             || planning::read_plan(connection, job, version)?
@@ -182,6 +182,11 @@ impl Store {
         }
         operation.validate(self)?;
         let body = serde_json::to_string(&operation)?;
+        if body.len() > 4096 {
+            return Err(Error::InvalidInput(
+                "worker request body exceeds 4096 bytes".into(),
+            ));
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

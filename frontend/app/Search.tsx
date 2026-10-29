@@ -7,6 +7,8 @@ import { query, request } from "./api";
 import { useResource } from "./hooks";
 import { AlbumCard, ArtistCard } from "./components/Media";
 import { Alert, Button, Check, Empty, Pager } from "./components/ui";
+import type { Location } from "../src/generated/Location";
+import { LocalMatches } from "./LocalMatches";
 
 /** Space distinct search operations, not retries. The server's durable provider
  * budget remains authoritative, including any longer pause or backoff. */
@@ -33,7 +35,7 @@ export function nextArtistOffset(page: CatalogPage<CatalogArtist>): number | nul
   return page.items.length > 0 && next < page.count ? next : null;
 }
 
-function SearchAlbums({ term }: { term: string }) {
+function SearchAlbums({ term, locations }: { term: string; locations: Location[] }) {
   const [pages, setPages] = useState([0]);
   const offset = pages.at(-1) ?? 0;
   const [expanded, setExpanded] = useState(false);
@@ -92,11 +94,17 @@ function SearchAlbums({ term }: { term: string }) {
         previous={pages.length > 1 ? () => setPages(pages.slice(0, -1)) : undefined}
         next={next !== null && next !== undefined ? () => setPages([...pages, next]) : undefined}
       />
+      {page && (
+        <LocalMatches
+          locations={locations}
+          queries={page.items.map((release) => ({ artist: release.artist, album: release.title }))}
+        />
+      )}
     </section>
   );
 }
 
-function SearchResults({ term }: { term: string }) {
+function SearchResults({ term, locations }: { term: string; locations: Location[] }) {
   const [pages, setPages] = useState([0]);
   const offset = pages.at(-1) ?? 0;
   const [albumsReady, setAlbumsReady] = useState(false);
@@ -147,9 +155,15 @@ function SearchResults({ term }: { term: string }) {
           previous={pages.length > 1 ? () => setPages(pages.slice(0, -1)) : undefined}
           next={next !== null ? () => setPages([...pages, next]) : undefined}
         />
+        {page && (
+          <LocalMatches
+            locations={locations}
+            queries={page.items.map((artist) => ({ artist: artist.name, album: null }))}
+          />
+        )}
       </section>
       {albumsReady ? (
-        <SearchAlbums term={term} />
+        <SearchAlbums term={term} locations={locations} />
       ) : (
         <section className="search-group">
           <h2>Albums and exact editions</h2>
@@ -160,7 +174,7 @@ function SearchResults({ term }: { term: string }) {
   );
 }
 
-export function Search({ term }: { term: string }) {
+export function Search({ term, locations = [] }: { term: string; locations?: Location[] }) {
   if (!term.trim()) return <Empty>Enter an artist or album in the search field.</Empty>;
-  return <SearchResults key={term} term={term} />;
+  return <SearchResults key={term} term={term} locations={locations} />;
 }

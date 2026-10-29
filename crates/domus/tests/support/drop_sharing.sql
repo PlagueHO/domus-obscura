@@ -1,3 +1,18 @@
+-- Remove newer layers before rebuilding a pre-sharing upgrade fixture.
+DROP TRIGGER library_location_insert;
+DROP TRIGGER library_entry_insert;
+DROP TRIGGER library_entry_count_update;
+DROP TRIGGER library_metadata_insert;
+DROP TRIGGER library_metadata_delete;
+DROP TRIGGER library_metadata_update_old;
+DROP TRIGGER library_metadata_update_new;
+DROP TRIGGER library_entry_changed;
+DROP TABLE library_metadata;
+DROP TABLE library_albums;
+DROP TABLE library_artists;
+DROP TABLE library_metadata_counts;
+DROP TABLE library_folder_observations;
+ALTER TABLE scans DROP COLUMN folder_scope;
 DROP TRIGGER sharing_publication_intent;
 DROP TRIGGER sharing_publication_receipt;
 DROP TRIGGER sharing_binding_insert;

@@ -189,6 +189,11 @@ impl LibraryDirectory {
     pub(crate) fn open_file(&self, name: &OsStr) -> Result<std::fs::File> {
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+        }
         let file = self
             .directory
             .open_with(Path::new(name), &options)?

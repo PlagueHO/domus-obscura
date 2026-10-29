@@ -19,6 +19,7 @@ import { Alert, Badge, Button, Check, Cover, Empty, Pager } from "./components/u
 import { AlbumCard } from "./components/Media";
 import { searchGap } from "./Search";
 import { BackendConfiguration, ConfigurationCard } from "./BackendConfiguration";
+import { LocalMatches } from "./LocalMatches";
 
 const audioChoices: { format: AudioFormat; label: string }[] = [
   { format: "mp3", label: "MP3 · 320 kbps CBR" },
@@ -33,7 +34,7 @@ export function ReleaseCard({ release }: { release: CatalogReleaseSummary }) {
   return <AlbumCard release={release} />;
 }
 
-export function Artist({ id }: { id: string }) {
+export function Artist({ id, locations = [] }: { id: string; locations?: Location[] }) {
   const [albumsReady, setAlbumsReady] = useState(false);
   const artist = useResource(
     (signal) =>
@@ -75,6 +76,9 @@ export function Artist({ id }: { id: string }) {
       </header>
       <Alert error={artist.error} />
       {artist.loading && <p role="status">Loading artist identity…</p>}
+      {identity && (
+        <LocalMatches locations={locations} queries={[{ artist: identity.name, album: null }]} />
+      )}
       {albumsReady && <ArtistAlbums key={id} id={id} />}
     </>
   );
@@ -335,6 +339,10 @@ export function Album({
           {editionsOpen && album.release_group_id && (
             <EditionBrowser current={album.summary} group={album.release_group_id} />
           )}
+          <LocalMatches
+            locations={locations}
+            queries={[{ artist: album.summary.artist, album: album.summary.title }]}
+          />
           <div>
             <section>
               <h2>Tracks on this edition</h2>

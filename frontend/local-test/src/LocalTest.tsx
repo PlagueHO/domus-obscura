@@ -72,6 +72,7 @@ export function LocalTest() {
       <header>
         <h1>Domus Obscura</h1>
         <p className="subtitle">Local test harness</p>
+        <a href="/?library=1#/library?view=artists">Open generated Library browsing</a>
         <p className="boundary">
           Sample data only. No sign-in, CAA, MusicBrainz or Soulseek requests. Your music library is
           not connected. Data resets when the server stops.

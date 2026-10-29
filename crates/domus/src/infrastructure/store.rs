@@ -13,6 +13,7 @@ mod catalog;
 mod catalog_clock;
 mod inbox;
 mod job_controls;
+mod library;
 mod native_roots;
 mod normalization;
 mod planning;
@@ -71,6 +72,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/022_transfer_evidence.sql"),
     include_str!("../../migrations/023_worker_requests.sql"),
     include_str!("../../migrations/024_sharing.sql"),
+    include_str!("../../migrations/025_library_metadata.sql"),
 ];
 
 pub struct Store {
@@ -432,6 +434,15 @@ impl Store {
     }
 
     pub fn begin_scan(&mut self, location: i64) -> Result<ScanClaim> {
+        self.begin_scoped_scan(location, None)
+    }
+
+    pub fn begin_folder_scan(&mut self, location: i64, folder: &LibraryPath) -> Result<ScanClaim> {
+        self.begin_scoped_scan(location, Some(folder.as_str()))
+    }
+
+    fn begin_scoped_scan(&mut self, location: i64, folder: Option<&str>) -> Result<ScanClaim> {
+        self.location(location)?;
         let owner = format!(
             "{}-{}",
             std::process::id(),
@@ -445,19 +456,30 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let previous = transaction
             .query_row(
-                "SELECT id, lease_until > unixepoch() FROM scans
+                "SELECT id, lease_until > unixepoch(), folder_scope FROM scans
              WHERE location_id = ?1 AND status = 'running'",
                 [location],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?;
         let id = match previous {
-            Some((_, true)) => {
+            Some((_, true, _)) => {
                 return Err(Error::Conflict(
                     "location already has an active scan".into(),
                 ));
             }
-            Some((id, false)) => {
+            Some((id, false, scope)) => {
+                if scope.as_deref() != folder {
+                    return Err(Error::Conflict(
+                        "an interrupted scan has a different scope; resume it first".into(),
+                    ));
+                }
                 transaction.execute(
                     "UPDATE scans SET owner = ?2, lease_until = unixepoch() + 60 WHERE id = ?1",
                     params![id, owner],
@@ -466,22 +488,31 @@ impl Store {
             }
             None => {
                 transaction.execute(
-                    "INSERT INTO scans(location_id, status, owner, lease_until)
-                     VALUES (?1, 'running', ?2, unixepoch() + 60)",
-                    params![location, owner],
+                    "INSERT INTO scans(location_id, status, owner, lease_until,folder_scope)
+                     VALUES (?1, 'running', ?2, unixepoch() + 60,?3)",
+                    params![location, owner, folder],
                 )?;
                 let id = transaction.last_insert_rowid();
                 transaction.execute(
-                    "INSERT INTO scan_directories(scan_id, relative_path) VALUES (?1, '')",
-                    [id],
+                    "INSERT INTO scan_directories(scan_id, relative_path) VALUES (?1, ?2)",
+                    params![id, folder.unwrap_or("")],
                 )?;
                 id
             }
         };
-        transaction.execute(
-            "UPDATE locations SET coverage = 'scanning', last_error = NULL WHERE id = ?1",
-            [location],
-        )?;
+        if let Some(folder) = folder {
+            transaction.execute(
+                "INSERT INTO library_folder_observations(location_id,folder,state)
+                 VALUES (?1,?2,'scanning') ON CONFLICT(location_id,folder)
+                 DO UPDATE SET state='scanning',last_error=NULL",
+                params![location, folder],
+            )?;
+        } else {
+            transaction.execute(
+                "UPDATE locations SET coverage = 'scanning', last_error = NULL WHERE id = ?1",
+                [location],
+            )?;
+        }
         transaction.commit()?;
         Ok(ScanClaim {
             id,
@@ -504,7 +535,7 @@ impl Store {
         path.map(|value| LibraryPath::parse(&value)).transpose()
     }
 
-    fn renew_scan(&self, claim: &ScanClaim) -> Result<()> {
+    pub(crate) fn renew_scan(&self, claim: &ScanClaim) -> Result<()> {
         let changed = self.connection.execute(
             "UPDATE scans SET lease_until = unixepoch() + 60 WHERE id = ?1
              AND location_id = ?2 AND owner = ?3 AND status = 'running'
@@ -548,6 +579,15 @@ impl Store {
         claim: &ScanClaim,
         observations: &[Observation<'_>],
     ) -> Result<()> {
+        self.record_library_batch(claim, observations, &[])
+    }
+
+    pub(crate) fn record_library_batch(
+        &mut self,
+        claim: &ScanClaim,
+        observations: &[Observation<'_>],
+        metadata: &[(&LibraryPath, &crate::domain::library::LibraryMetadata)],
+    ) -> Result<()> {
         if observations.len() > 128 {
             return Err(Error::InvalidInput("scan batch exceeds 128 entries".into()));
         }
@@ -563,6 +603,19 @@ impl Store {
         if !running {
             return Err(Error::Conflict(
                 "scan is not active for this location".into(),
+            ));
+        }
+        let scope: Option<String> = transaction.query_row(
+            "SELECT folder_scope FROM scans WHERE id=?1",
+            [claim.id],
+            |row| row.get(0),
+        )?;
+        if scope
+            .as_ref()
+            .is_some_and(|scope| observations.iter().any(|item| item.path.parent() != scope))
+        {
+            return Err(Error::Conflict(
+                "folder observation is outside the claimed direct-folder scope".into(),
             ));
         }
         {
@@ -585,11 +638,15 @@ impl Store {
                 ])?;
                 if observation.kind == "directory" {
                     transaction.execute(
-                        "INSERT OR IGNORE INTO scan_directories(scan_id, relative_path) VALUES (?1, ?2)",
+                        "INSERT OR IGNORE INTO scan_directories(scan_id, relative_path)
+                         SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM scans WHERE id=?1 AND folder_scope IS NULL)",
                         params![claim.id, observation.path.as_str()],
                     )?;
                 }
             }
+        }
+        for (path, metadata) in metadata {
+            library::save_metadata(&transaction, claim, path, metadata)?;
         }
         transaction.execute(
             "UPDATE scans SET observed_count = observed_count + ?2, lease_until = unixepoch() + 60
@@ -643,17 +700,31 @@ impl Store {
             |row| row.get(0),
         )?;
         let complete = errors == 0 && !pending;
+        let scope: Option<String> = transaction.query_row(
+            "SELECT folder_scope FROM scans WHERE id=?1",
+            [claim.id],
+            |row| row.get(0),
+        )?;
         if complete {
             transaction.execute(
-                "UPDATE entries SET present = 0 WHERE location_id = ?1 AND scan_id != ?2",
-                params![claim.location, claim.id],
+                "UPDATE entries SET present = 0 WHERE location_id = ?1 AND scan_id != ?2
+                 AND (?3 IS NULL OR parent_path=?3)",
+                params![claim.location, claim.id, scope],
             )?;
         }
         transaction.execute(
             "UPDATE scans SET status = ?2, completed_at = unixepoch() WHERE id = ?1",
             params![claim.id, if complete { "complete" } else { "failed" }],
         )?;
-        transaction.execute(
+        if let Some(scope) = scope {
+            transaction.execute(
+                "UPDATE library_folder_observations SET state=?3,observed_at=unixepoch(),
+                 last_error=(SELECT detail FROM scan_errors WHERE scan_id=?4 ORDER BY id DESC LIMIT 1)
+                 WHERE location_id=?1 AND folder=?2",
+                params![claim.location,scope,if complete {"complete"} else {"incomplete"},claim.id],
+            )?;
+        } else {
+            transaction.execute(
             "UPDATE locations SET coverage = ?2, observed_at = unixepoch(),
              last_error = (SELECT detail FROM scan_errors WHERE scan_id = ?3 ORDER BY id DESC LIMIT 1)
              WHERE id = ?1",
@@ -662,7 +733,8 @@ impl Store {
                 if complete { "complete" } else { "incomplete" },
                 claim.id
             ],
-        )?;
+            )?;
+        }
         transaction.commit()?;
         Ok(complete)
     }

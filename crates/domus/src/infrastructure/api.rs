@@ -29,6 +29,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 const SESSION_COOKIE: &str = "__Host-domus-session";
+mod library;
+use library::*;
+pub use library::{LibraryRefresh, RefreshLibraryFolder};
 #[cfg(test)]
 mod sharing_tests;
 #[cfg(test)]
@@ -281,6 +284,7 @@ impl Api {
                 post(bind_share_folder).layer(DefaultBodyLimit::max(16_384)),
             )
             .route("/api/worker/requests", get(worker_requests))
+            .route("/api/worker/requests/{id}", get(worker_request))
             .route(
                 "/api/worker/requests/{id}/retry",
                 post(worker_retry).layer(DefaultBodyLimit::max(64)),
@@ -325,6 +329,40 @@ impl Api {
                 post(scan_location).layer(DefaultBodyLimit::max(1024)),
             )
             .route("/api/locations/{id}/entries", get(entries))
+            .route("/api/locations/{id}/library/artists", get(library_artists))
+            .route("/api/locations/{id}/library/albums", get(library_albums))
+            .route(
+                "/api/locations/{id}/library/albums/{album}",
+                get(library_album),
+            )
+            .route(
+                "/api/locations/{id}/library/albums/{album}/files",
+                get(library_album_files),
+            )
+            .route(
+                "/api/locations/{id}/library/albums/{album}/assets",
+                get(library_album_assets),
+            )
+            .route(
+                "/api/locations/{id}/library/files/{entry}",
+                get(library_file),
+            )
+            .route(
+                "/api/locations/{id}/library/files/{entry}/preview",
+                get(library_preview),
+            )
+            .route(
+                "/api/locations/{id}/library/coverage",
+                get(library_coverage),
+            )
+            .route(
+                "/api/locations/{id}/library/matches",
+                post(library_matches).layer(DefaultBodyLimit::max(131072)),
+            )
+            .route(
+                "/api/locations/{id}/library/refresh",
+                post(library_refresh).layer(DefaultBodyLimit::max(16384)),
+            )
             .route(
                 "/api/settings",
                 get(settings).merge(put(save_settings).layer(DefaultBodyLimit::max(16384))),
@@ -1585,15 +1623,26 @@ async fn worker_retry(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult<
     if api.0.production_worker.is_none() {
         return Err(Error::Conflict("production worker is not configured".into()).into());
     }
+
     let request = api.database(move |store| store.worker_request(id)).await?;
     if matches!(
         request.operation,
         super::production_worker::WorkerOperation::Scan { .. }
+            | super::production_worker::WorkerOperation::RefreshFolder { .. }
     ) {
         api.require_configuration_write().await?;
     }
     api.database(move |store| store.retry_worker(id)).await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+async fn worker_request(
+    State(api): State<Api>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<super::production_worker::WorkerRequest>> {
+    Ok(Json(
+        api.database(move |store| store.worker_request(id)).await?,
+    ))
 }
 
 async fn worker_dismiss(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult<StatusCode> {

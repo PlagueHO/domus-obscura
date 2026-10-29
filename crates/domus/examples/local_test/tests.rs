@@ -109,6 +109,61 @@ async fn harness_uses_real_rust_preview_planning_approval_and_stale_observations
 }
 
 #[tokio::test]
+async fn harness_library_routes_only_use_generated_index_evidence() -> TestResult {
+    let app = app()?;
+    let artists = json_response(
+        call(
+            &app,
+            Method::GET,
+            "/api/locations/1/library/artists",
+            Value::Null,
+        )
+        .await?,
+    )
+    .await?;
+    assert_eq!(artists.as_array().ok_or("artist page")?.len(), 2);
+    let matches = json_response(
+        call(
+            &app,
+            Method::POST,
+            "/api/locations/1/library/matches",
+            json!([{"artist":"Sample Artist","album":"Sample Album"}]),
+        )
+        .await?,
+    )
+    .await?;
+    assert_eq!(
+        matches["matches"][0]["albums"]
+            .as_array()
+            .ok_or("album matches")?
+            .len(),
+        2
+    );
+    let refreshed = json_response(
+        call(
+            &app,
+            Method::POST,
+            "/api/locations/1/library/refresh",
+            json!({"folder":"Other folder"}),
+        )
+        .await?,
+    )
+    .await?;
+    assert_eq!(refreshed["coverage"]["folder_state"], "complete");
+    for path in [
+        "/api/locations/2/library/artists",
+        "/api/locations/1/library/anything",
+        "/api/locations/1/library/coverage?folder=..%2Foutside",
+    ] {
+        assert_eq!(
+            call(&app, Method::GET, path, Value::Null).await?.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn harness_settings_are_versioned_and_do_not_change_frozen_plans() -> TestResult {
     let app = app()?;
     let snapshot =
@@ -146,7 +201,12 @@ async fn harness_only_browses_generated_roots_and_never_serves_raw_files() -> Te
     let before = std::fs::read(&sentinel)?;
     let app = router(fixture, "test".into(), vec![], vec![]);
     let root = json_response(call(&app, Method::GET, "/local/entries", Value::Null).await?).await?;
-    assert_eq!(root[0]["relative_path"], "S");
+    assert!(
+        root.as_array()
+            .ok_or("root entries")?
+            .iter()
+            .any(|entry| entry["relative_path"] == "S")
+    );
     let rows = json_response(
         call(
             &app,

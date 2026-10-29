@@ -79,6 +79,30 @@ Refresh saved values before retrying. An interrupted save can leave an owned `.p
 inspect and remove only that exact temporary file while the API is stopped.
 Never delete the configuration or lock file as automatic recovery.
 
+## Indexed Library
+
+Keep browsing passive. Explicit full scans and direct-folder refreshes use the
+same durable scan lane, location target and fenced scan claims. Resume only the
+same scope. A direct-folder refresh lists child directories but never scans them,
+marks descendants absent, or renews whole-location coverage.
+
+Metadata inspection reads MP3 and FLAC through no-follow native handles. Keep the
+8 MiB metadata envelope, 1024 frame/comment limit, 64 KiB MPEG probe, 64 KiB saved
+tag body and 128-entry persistence batches. Unsupported formats and failed tags
+remain indexed files with diagnostics. Do not reuse browsing header evidence as
+full-stream validation or exact-edition proof. Migration leaves legacy metadata
+unobserved until an explicit scan.
+
+Artists, albums, members and assets use location-scoped keyset pages. Conservative
+matches accept at most 24 queries for one location and return at most 50 folders
+per album. Compare stored normalized keys, not filenames, fuzzy aliases or live
+provider results. Keep matching and acquisition decisions separate.
+
+Local JPEG preview requires the indexed location/file binding, unchanged native
+identity, size and high-resolution modification evidence. Reuse strict bounded
+image processing; never serve original bytes or open arbitrary asset paths.
+Do not extract embedded covers or infer artwork approval from a preview.
+
 ## Commands
 
 `domus worker <absolute-configuration-file>` is the separate foreground production

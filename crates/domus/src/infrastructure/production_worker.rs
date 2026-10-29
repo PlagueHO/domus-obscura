@@ -62,6 +62,10 @@ pub enum WorkerOperation {
     Scan {
         location_id: i64,
     },
+    RefreshFolder {
+        location_id: i64,
+        folder: String,
+    },
     Acquire {
         job_id: i64,
         plan_version: i64,
@@ -109,7 +113,7 @@ impl WorkerOperation {
         }
     }
     pub(crate) fn lane(&self) -> &'static str {
-        if matches!(self, Self::Scan { .. }) {
+        if matches!(self, Self::Scan { .. } | Self::RefreshFolder { .. }) {
             "scan"
         } else {
             "acquisition"
@@ -118,14 +122,16 @@ impl WorkerOperation {
 
     pub(crate) fn target(&self) -> String {
         match self {
-            Self::Scan { location_id } => format!("scan-{location_id}"),
+            Self::Scan { location_id } | Self::RefreshFolder { location_id, .. } => {
+                format!("scan-{location_id}")
+            }
             Self::Acquire { job_id, .. } | Self::Publish { job_id, .. } => format!("job-{job_id}"),
         }
     }
 
     pub(crate) fn job(&self) -> Option<(i64, i64)> {
         match *self {
-            Self::Scan { .. } => None,
+            Self::Scan { .. } | Self::RefreshFolder { .. } => None,
             Self::Acquire {
                 job_id,
                 plan_version,
@@ -148,6 +154,19 @@ impl WorkerOperation {
                 if location_id <= 0 {
                     return Err(Error::InvalidInput("location ID must be positive".into()));
                 }
+                store.location(location_id)?;
+            }
+            Self::RefreshFolder {
+                location_id,
+                ref folder,
+            } => {
+                if location_id <= 0 || folder.len() > 3000 {
+                    return Err(Error::InvalidInput(
+                        "folder refresh requires a positive location and bounded relative folder"
+                            .into(),
+                    ));
+                }
+                crate::domain::LibraryPath::parse(folder)?;
                 store.location(location_id)?;
             }
             Self::Acquire {
@@ -476,6 +495,16 @@ fn execute(
     match operation {
         WorkerOperation::Scan { location_id } => {
             crate::application::scan_location(&mut store, location_id)?;
+        }
+        WorkerOperation::RefreshFolder {
+            location_id,
+            folder,
+        } => {
+            crate::application::refresh_library_folder(
+                &mut store,
+                location_id,
+                &crate::domain::LibraryPath::parse(&folder)?,
+            )?;
         }
         WorkerOperation::Acquire {
             job_id,

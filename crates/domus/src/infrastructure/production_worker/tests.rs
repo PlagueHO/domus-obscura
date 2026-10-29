@@ -75,6 +75,66 @@ fn worker_runtime_runs_a_durable_scan_and_releases_native_ownership_on_stop() ->
 }
 
 #[test]
+fn worker_folder_refresh_recovers_its_scope_without_scanning_children() -> TestResult {
+    let temp = super::super::permissions::private_test_directory()?;
+    let worker = runtime(temp.path())?;
+    let stop = Arc::new(AtomicBool::new(true));
+    let mut store = Store::open_current_existing(&worker.database)?.with_worker_stop(stop.clone());
+    let root = temp.path().join("media");
+    std::fs::create_dir_all(root.join("selected").join("child"))?;
+    std::fs::write(root.join("selected").join("direct.txt"), b"generated")?;
+    std::fs::write(
+        root.join("selected").join("child").join("nested.txt"),
+        b"generated",
+    )?;
+    let location = crate::application::add_location(&store, &root, "main")?;
+    let folder = crate::domain::LibraryPath::parse("selected")?;
+    assert!(matches!(
+        crate::application::refresh_library_folder(&mut store, location, &folder),
+        Err(Error::WorkerStopping)
+    ));
+    stop.store(false, Ordering::Release);
+    let raw = rusqlite::Connection::open(&worker.database)?;
+    raw.execute("UPDATE scans SET lease_until=0 WHERE status='running'", [])?;
+    let request = store.enqueue_worker(
+        WorkerOperation::RefreshFolder {
+            location_id: location,
+            folder: "selected".into(),
+        },
+        64,
+        &"a".repeat(64),
+    )?;
+    let stopping = stop.clone();
+    let handle = std::thread::spawn(move || worker.supervise(stopping));
+    let mut complete = false;
+    for _ in 0..100 {
+        if store.worker_request(request.id)?.state == "complete" {
+            complete = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    stop.store(true, Ordering::Release);
+    handle
+        .join()
+        .map_err(|_| Error::Internal("fixture supervisor panicked"))??;
+    assert!(complete, "worker did not resume the scoped refresh");
+    assert_eq!(store.location(location)?.coverage, "unknown");
+    assert_eq!(store.browse(location, &folder, Page::new(0, 10)?)?.len(), 2);
+    assert!(
+        store
+            .browse(
+                location,
+                &crate::domain::LibraryPath::parse("selected/child")?,
+                Page::new(0, 10)?
+            )?
+            .is_empty()
+    );
+    assert!(store.jobs(Page::new(0, 10)?)?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn worker_shutdown_does_not_start_queued_work() -> TestResult {
     let temp = super::super::permissions::private_test_directory()?;
     let worker = runtime(temp.path())?;
