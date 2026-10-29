@@ -38,6 +38,7 @@ turbojpeg.workspace = true
 rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+fence-windows.workspace = true
 file-id.workspace = true
 windows-permissions.workspace = true
 winsafe.workspace = true

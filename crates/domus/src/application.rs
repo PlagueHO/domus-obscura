@@ -196,6 +196,9 @@ fn observe_directory(
         let name = name
             .to_str()
             .ok_or_else(|| Error::InvalidInput("file path is not valid Unicode".into()))?;
+        if name.to_ascii_lowercase().starts_with(".domus-pending-") {
+            continue;
+        }
         let relative = if directory.as_str().is_empty() {
             name.to_owned()
         } else {

@@ -1,4 +1,11 @@
--- Remove newer layers before rebuilding a pre-sharing upgrade fixture.
+-- Remove newer layers before rebuilding a legacy upgrade fixture.
+DROP TRIGGER immutable_publication_prepared_folder;
+DROP TRIGGER monotonic_publication_published;
+DROP TRIGGER immutable_publication_mode;
+ALTER TABLE publication_destinations DROP COLUMN prepared_folder;
+ALTER TABLE publication_destinations DROP COLUMN prepare_attempt;
+ALTER TABLE publication_destinations DROP COLUMN published_at;
+ALTER TABLE publication_destinations DROP COLUMN atomic;
 DROP TRIGGER library_location_insert;
 DROP TRIGGER library_entry_insert;
 DROP TRIGGER library_entry_count_update;

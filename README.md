@@ -1217,7 +1217,8 @@ The acquisition worker uses this application use case with the exact durably app
 
 ## Explicit new-album publication
 
-Migration 16 adds retained destination and file journals. The separate
+Migration 26 adds durable preparation and visibility receipts to the retained
+destination and file journals. The separate
 `publish-new-once` command uses only completed, verified normalization and the
 current approved plan. It needs no provider credentials or network connection.
 The acquisition worker does not invoke it automatically.
@@ -1260,6 +1261,12 @@ with a saved receipt is not recreated. An exact synced file without its receipt
 can be verified on retry. Unexpected files, links, changed root/album identities
 and case-colliding paths block completion.
 
+New albums are copied into hidden `.domus-pending-*` sibling folders. The
+application verifies the full album before it atomically renames that folder to
+its final name without replacing an item that appeared at the destination.
+Library scans ignore prepared folders. A retry reconciles a rename that
+completed before its visibility receipt was saved.
+
 The primary is copied first. An unavailable backup leaves a verified primary
 and `backup_pending`, with its error in publication status. Retry the same
 command after restoring the original backup root. Retry uses the same
@@ -1269,12 +1276,11 @@ with the primary last. Generic state changes cannot bypass the journal.
 The protected `GET /api/jobs/{id}/plans/{version}/publication` route returns
 bounded destination status. There is no publication mutation API or browser UI.
 
-**Limit:** files copy directly into the final album folder. Partial folders can
-be visible during copying and after failure. This is not an atomic whole-album
-switch or production acceptance. File synchronization runs before receipts,
-but Windows directory durability and power-loss/reboot recovery are not proven.
-Replacement, retained old-album recovery, restore and scratch cleanup remain
-unfinished. Staging and all partial copies are retained.
+**Limit:** primary and backup publication remain separate operations. A failed
+backup can leave a complete primary album and `backup_pending`. This is not a
+replacement, restore, cleanup or power-loss acceptance. File synchronization
+runs before receipts, but Windows directory durability and power-loss/reboot
+recovery are not proven. Staging and all failed copies are retained.
 
 ## Artwork approval
 

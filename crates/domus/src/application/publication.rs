@@ -63,12 +63,33 @@ pub fn publish_new_album(
         store.check_worker_stop()?;
         let result: Result<()> = (|| {
             store.renew_claim(claim, 300)?;
-            let directory = PublicationDirectory::open(store, &target)?;
+            let files = store.publication_files(claim, target.id)?;
+            let mut preparation = store.prepare_publication_path(claim, target.id)?;
+            let mut opened = None;
+            for _ in 0..32 {
+                opened = PublicationDirectory::open(store, &target, &preparation)?;
+                if opened.is_some() {
+                    break;
+                }
+                preparation = store.prepare_publication_path(claim, target.id)?;
+            }
+            let mut directory = opened.ok_or(Error::Conflict(
+                "could not reserve a private publication folder".into(),
+            ))?;
             if target.album_identity.is_none() {
                 store.bind_publication_album(claim, target.id, directory.identity())?;
             }
             let target = store.check_publication(claim, target.id)?;
-            let files = store.publication_files(claim, target.id)?;
+            if directory.is_visible() {
+                let heartbeat = Heartbeat::new();
+                check(store, claim, staging, &directory, &target)?;
+                directory.verify(&files, &|| {
+                    heartbeat.tick(|| check(store, claim, staging, &directory, &target))
+                })?;
+                check(store, claim, staging, &directory, &target)?;
+                store.record_publication_visible(claim, target.id)?;
+                return store.finish_publication_destination(claim, target.id);
+            }
             for file in &files {
                 store.check_worker_stop()?;
                 store.renew_claim(claim, 300)?;
@@ -98,6 +119,13 @@ pub fn publish_new_album(
                 heartbeat.tick(|| check(store, claim, staging, &directory, &target))
             })?;
             check(store, claim, staging, &directory, &target)?;
+            directory.publish(store, &target)?;
+            let heartbeat = Heartbeat::new();
+            directory.verify(&files, &|| {
+                heartbeat.tick(|| check(store, claim, staging, &directory, &target))
+            })?;
+            check(store, claim, staging, &directory, &target)?;
+            store.record_publication_visible(claim, target.id)?;
             store.finish_publication_destination(claim, target.id)
         })();
         if let Err(error) = result {
@@ -119,7 +147,10 @@ pub fn publish_new_album(
             continue;
         }
         let result: Result<()> = (|| {
-            let directory = PublicationDirectory::open(store, &target)?;
+            let preparation = store.publication_preparation(claim, target.id)?;
+            let directory = PublicationDirectory::open(store, &target, &preparation)?.ok_or(
+                Error::Conflict("published album folder is unavailable".into()),
+            )?;
             let files = store.publication_files(claim, target.id)?;
             let heartbeat = Heartbeat::new();
             check(store, claim, staging, &directory, &target)?;

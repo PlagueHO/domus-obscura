@@ -188,8 +188,12 @@ Reclaim can verify exact synced files without another download or normalization.
 A verified primary with an unavailable backup remains `backup_pending`.
 Recheck successful destinations, with the primary last, before completion.
 `publication-status` and the protected publication GET route are read-only.
-This command exposes partially copied final folders. It is not an atomic album
-switch, replacement, restore, cleanup or power-loss acceptance.
+The command copies each album into a hidden `.domus-pending-*` sibling folder.
+It verifies every file before it atomically renames the complete folder to its
+final name without replacing an item that appeared at the destination.
+Library scans ignore prepared folders. Recovery verifies a final folder when a
+crash occurs after the rename but before its visibility receipt.
+This is not a replacement, restore, cleanup or power-loss acceptance.
 The sharing boundary hides incomplete publication destinations. Publication
 holds the stable native exclusive visibility lock before journal intent and
 media changes. Browse responses and uploads hold the matching shared lock.
@@ -199,10 +203,10 @@ copies hidden after restart. A verified primary does not need a backup receipt
 to become eligible. Catalog generation and native file evidence are rechecked
 before reads. These advisory locks do not prevent external programs from
 changing files on Linux.
-Future replacement and recovery entry points in #8 and #9 must acquire this
+Future replacement and recovery entry points in #9 must acquire this
 same visibility lock before intent and filesystem effects. They must preserve
 incomplete exclusions and invalidate old catalog generations. This boundary
-does not implement replacement, restore, or atomic publication.
+does not implement replacement or restore.
 Do not run it against existing library roots without separate approval.
 
 `domus job-control <local-database> <job-id> <plan-version> <pause|cancel>`
