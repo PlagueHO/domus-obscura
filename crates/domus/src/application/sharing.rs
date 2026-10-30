@@ -51,6 +51,15 @@ pub(crate) fn selected_directory(
             "share folder exceeds the native traversal depth limit".into(),
         ));
     }
+    if relative.as_str().split('/').any(|part| {
+        part.to_ascii_lowercase().starts_with(".domus-retained-")
+            || part.to_ascii_lowercase().starts_with(".domus-pending-")
+            || part.to_ascii_lowercase().starts_with(".domus-restore-")
+    }) {
+        return Err(Error::InvalidInput(
+            "publication recovery folders cannot be shared".into(),
+        ));
+    }
     let location = store.location(location_id)?;
     if !matches!(location.kind.as_str(), "main" | "backup") {
         return Err(Error::InvalidInput(

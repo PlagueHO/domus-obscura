@@ -4,6 +4,8 @@ import type { StoredPlan } from "../src/generated/StoredPlan";
 import type { SourceCandidate } from "../src/generated/SourceCandidate";
 import type { ArtworkCandidate } from "../src/generated/ArtworkCandidate";
 import type { PublicationDestination } from "../src/generated/PublicationDestination";
+import type { AlbumReplacementPreview } from "../src/generated/AlbumReplacementPreview";
+import type { AlbumReplacementReview as SavedReplacementReview } from "../src/generated/AlbumReplacementReview";
 import type { TransferFile } from "../src/generated/TransferFile";
 import type { TransferSummary } from "../src/generated/TransferSummary";
 import type { StartLocalDownload } from "../src/generated/StartLocalDownload";
@@ -18,7 +20,8 @@ import { WorkerRequests } from "./WorkerRequests";
 import { ArtworkReview } from "./ArtworkReview";
 import { CancelJob, JobStatus } from "./components/Media";
 import { RequestHistory } from "./RequestHistory";
-import { PublicationRecovery } from "./PublicationRecovery";
+import { AlbumReplacementRestore, PublicationRecovery } from "./PublicationRecovery";
+import { AlbumReplacementReview } from "./AlbumReplacementReview";
 import { TransferProgress, allInputsReceived } from "./TransferProgress";
 
 export function RequestProgress({
@@ -119,6 +122,13 @@ export function RequestPage({
     `${base}:${job.data?.state ?? ""}:${transferAfter}`,
     poll ? 2000 : 0,
   );
+  const replacement = useResource(
+    (signal) =>
+      job.data?.state === "queued" && plan.data?.approved_at !== null
+        ? request<AlbumReplacementPreview[]>(`${base}/publication/replacement-review`, { signal })
+        : Promise.resolve([]),
+    `${base}:${job.data?.state ?? ""}:${plan.data?.approved_at ?? ""}`,
+  );
   const [sourceId, setSourceId] = useState<number>();
   const [coverId, setCoverId] = useState<number>();
   const [submitted, setSubmitted] = useState(false);
@@ -157,6 +167,7 @@ export function RequestPage({
     sources.refresh();
     artwork.refresh();
     receipts.refresh();
+    replacement.refresh();
     decision.refresh();
     onChanged();
   }
@@ -181,6 +192,20 @@ export function RequestPage({
     artwork.error ||
     receipts.error,
   );
+  const replacementBlocked = Boolean(
+    current?.state === "queued" &&
+    stored?.approved_at !== null &&
+    (!replacement.data ||
+      replacement.loading ||
+      replacement.error ||
+      replacement.data.some(
+        (preview) =>
+          (!preview.destination_available && preview.kind === "main") ||
+          (preview.destination_available &&
+            preview.album_identity !== null &&
+            (!preview.decision_saved || preview.saved_action === null)),
+      )),
+  );
   const editable = Boolean(
     stored?.approved_at !== null && stored && current?.state === "queued" && !submitted && !stale,
   );
@@ -200,6 +225,7 @@ export function RequestPage({
     stored &&
     canStart(current, stored, source, cover, status, true, allReceived) &&
     !readsBlocked &&
+    !replacementBlocked &&
     !submitted &&
     !command.busy,
   );
@@ -530,14 +556,34 @@ export function RequestPage({
                 </h2>
                 <p className="warning">
                   {allReceived
-                    ? "The worker rechecks retained inputs, then continues approved local processing and new-only publication. It does not download again."
-                    : "New folders only. This action connects to the configured source, downloads media, writes tags in private staging, then publishes to the approved local roots."}{" "}
-                  Existing files are never overwritten. A failed copy stays for recovery.
+                    ? "The worker rechecks retained inputs, then continues approved local processing and publishes according to the saved decision for each exact destination. It does not download again."
+                    : "This action connects to the configured source, downloads media, writes tags in private staging, then publishes to the approved local roots according to the saved decision for each exact destination."}{" "}
+                  The server never overwrites an unreviewed folder. A failed copy stays for
+                  recovery.
                 </p>
                 <p>
-                  Clicking the start control approves new-only publication to the frozen
-                  destinations. It does not replace the separate source and exact-cover approvals.
+                  Clicking start confirms publication to the frozen destinations. Existing folders
+                  need a separate exact decision below before the worker can act on them. This does
+                  not replace the source and exact-cover approvals.
                 </p>
+                {current.state === "queued" && stored.approved_at !== null && (
+                  <>
+                    {replacement.error && (
+                      <p className="warning">
+                        The current destination review failed. The saved plan cannot be started
+                        until every destination has a current review.
+                      </p>
+                    )}
+                    {replacement.data && (
+                      <AlbumReplacementReview
+                        previews={replacement.data}
+                        blocked={replacement.loading || Boolean(replacement.error) || readsBlocked}
+                        command={command}
+                        onApproved={(_saved: SavedReplacementReview) => refresh()}
+                      />
+                    )}
+                  </>
+                )}
                 {notice && <p role="status">{notice}</p>}
                 <div className="actions">
                   <Button
@@ -599,7 +645,7 @@ export function RequestPage({
                   <p className="muted">
                     Start requires a current approved plan, an acknowledged complete source, an
                     approved exact cover, local acquisition enabled and an idle worker. Clicking
-                    Start Download supplies the explicit new-only acknowledgement. Uncertain
+                    Start Download supplies the explicit publication acknowledgement. Uncertain
                     submissions are never retried here.
                   </p>
                 )}
@@ -690,6 +736,17 @@ export function RequestPage({
               command={command}
               onChanged={() => {
                 setPoll(true);
+                refresh();
+              }}
+            />
+            <AlbumReplacementRestore
+              key={`${base}:${current.state}:${recoveryRevision}`}
+              job={current}
+              version={version}
+              destinations={receipts.data?.publication ?? []}
+              blocked={readsBlocked || stale || stored.approved_at === null}
+              command={command}
+              onChanged={() => {
                 refresh();
               }}
             />

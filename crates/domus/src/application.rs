@@ -16,7 +16,7 @@ pub use acquisition::{acquire_album, acquire_transfer, negotiate_transfer, recei
 mod playback;
 pub use playback::export_playback_album;
 mod publication;
-pub use publication::publish_new_album;
+pub use publication::{preview_album_replacements, publish_new_album, restore_album_replacement};
 
 pub fn add_location(store: &Store, root: &Path, kind: &str) -> Result<i64> {
     let root = canonical_root(root)?;
@@ -38,6 +38,16 @@ pub fn refresh_library_folder(
     location_id: i64,
     folder: &LibraryPath,
 ) -> Result<i64> {
+    if folder.as_str().split('/').any(|part| {
+        let part = part.to_ascii_lowercase();
+        part.starts_with(".domus-pending-")
+            || part.starts_with(".domus-retained-")
+            || part.starts_with(".domus-restore-")
+    }) {
+        return Err(Error::InvalidInput(
+            "publication recovery folders cannot be scanned".into(),
+        ));
+    }
     let location = store.location(location_id)?;
     let claim = store.begin_folder_scan(location_id, folder)?;
     run_scan(store, claim, Path::new(&location.root))
@@ -196,7 +206,11 @@ fn observe_directory(
         let name = name
             .to_str()
             .ok_or_else(|| Error::InvalidInput("file path is not valid Unicode".into()))?;
-        if name.to_ascii_lowercase().starts_with(".domus-pending-") {
+        let folded_name = name.to_ascii_lowercase();
+        if folded_name.starts_with(".domus-pending-")
+            || folded_name.starts_with(".domus-retained-")
+            || folded_name.starts_with(".domus-restore-")
+        {
             continue;
         }
         let relative = if directory.as_str().is_empty() {

@@ -415,10 +415,10 @@ fn legacy_transfer_upgrade_keeps_source_tokens_and_bytes_without_inventing_evide
         "/tests/support/drop_sharing.sql"
     )))?;
     raw.execute_batch(
-        "DROP TABLE worker_requests;
-         DROP TABLE worker_host;
-         DROP TABLE transfer_evidence;
-         PRAGMA user_version=21;",
+        "        DROP TABLE worker_requests;
+        DROP TABLE worker_host;
+        DROP TABLE transfer_evidence;
+        PRAGMA user_version=21;",
     )?;
     drop(raw);
     fixture.store = Store::open_existing(&fixture.database)?;

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { AlbumReplacementRestoreDecision } from "../src/generated/AlbumReplacementRestoreDecision";
 import type { JobSummary } from "../src/generated/JobSummary";
 import type { PublicationDestination } from "../src/generated/PublicationDestination";
 import type { ResumePublication } from "../src/generated/ResumePublication";
@@ -56,13 +57,13 @@ export function PublicationRecovery({
     <section className="review-section" aria-label="Retained publication recovery">
       <h2>Continue retained publication</h2>
       <p>
-        Verify retained copies and continue new-only publication from normalization run {run}. This
+        Verify retained copies and continue approved publication from normalization run {run}. This
         does not download or normalize again. Exact existing files are verified, not overwritten.
         Partial, different or missing receipted files remain errors.
       </p>
       <p className="warning">
-        This action can create new files at the frozen destinations. It cannot replace an existing
-        album, restore files or remove retained data. The server rechecks the current approval,
+        This action can create new files at the frozen destinations. It cannot change a saved album
+        decision, restore files or remove retained data. The server rechecks the current approval,
         worker lease, staging lock and destination bindings.
       </p>
       {submitted ? (
@@ -71,7 +72,7 @@ export function PublicationRecovery({
           result. Refresh the request after the worker finishes before another attempt.
         </p>
       ) : confirming ? (
-        <div className="actions" role="group" aria-label="Confirm new-only publication recovery">
+        <div className="actions" role="group" aria-label="Confirm publication recovery">
           <Button
             disabled={disabled}
             onClick={() =>
@@ -86,7 +87,7 @@ export function PublicationRecovery({
               })
             }
           >
-            {command.busy ? "Sending command…" : "Confirm new-only publication"}
+            {command.busy ? "Sending command…" : "Confirm publication recovery"}
           </Button>
           <Button variant="secondary" disabled={command.busy} onClick={() => setConfirming(false)}>
             Do not continue
@@ -97,6 +98,133 @@ export function PublicationRecovery({
           Review publication recovery
         </Button>
       )}
+    </section>
+  );
+}
+
+export function AlbumReplacementRestore({
+  job,
+  version,
+  destinations,
+  blocked,
+  command,
+  onChanged,
+}: {
+  job: JobSummary;
+  version: number;
+  destinations: PublicationDestination[];
+  blocked: boolean;
+  command: ReturnType<typeof useCommand>;
+  onChanged: () => void;
+}) {
+  const [confirming, setConfirming] = useState<number>();
+  const [submitted, setSubmitted] = useState<number>();
+  if (job.plan_version !== version || job.state !== "complete") return null;
+  const replacements = destinations.filter(
+    (destination) =>
+      destination.replacement &&
+      [
+        "published",
+        "restore_prepared",
+        "restore_current_moved",
+        "restore_original_visible",
+        "restored",
+      ].includes(destination.replacement.state),
+  );
+  if (replacements.length === 0) return null;
+  return (
+    <section className="review-section" aria-label="Retained album restoration">
+      <h2>Retained album versions</h2>
+      <p>
+        Restore uses the exact saved review and checks the current published album again. The
+        displaced album remains in hidden recovery storage after restoration.
+      </p>
+      {replacements.map((destination) => {
+        const replacement = destination.replacement;
+        if (!replacement) return null;
+        const restoring = replacement.state !== "published" && replacement.state !== "restored";
+        const isSubmitted = submitted === destination.location_id;
+        return (
+          <article className="list-row" key={destination.id}>
+            <div>
+              <strong>
+                {destination.kind} · {destination.root} · {replacement.original_folder}
+              </strong>
+              {replacement.state === "restored" ? (
+                <p role="status">
+                  The reviewed original album is restored. The replaced album remains retained.
+                </p>
+              ) : (
+                <>
+                  <p>
+                    Original files to restore:{" "}
+                    {replacement.original_files.map((file) => file.name).join(", ")}
+                  </p>
+                  <p className="muted">
+                    Current album identity · {destination.album_identity ?? "unavailable"}
+                    <br />
+                    Current manifest · {destination.manifest_sha256}
+                  </p>
+                  {restoring && (
+                    <p className="warning">
+                      A restore was interrupted. The server will inspect all three saved folders
+                      before it continues.
+                    </p>
+                  )}
+                  {isSubmitted ? (
+                    <p role="status">
+                      The server accepted the restore command. Refresh to read the saved journal
+                      state.
+                    </p>
+                  ) : confirming === destination.location_id ? (
+                    <div className="actions" role="group" aria-label="Confirm album restoration">
+                      <Button
+                        disabled={blocked || command.busy || !destination.album_identity}
+                        onClick={() =>
+                          void command.run(async () => {
+                            const body: AlbumReplacementRestoreDecision = {
+                              review_id: replacement.review_id,
+                              expected_manifest_sha256: destination.manifest_sha256,
+                              expected_album_identity: destination.album_identity ?? "",
+                            };
+                            await request(
+                              `/api/jobs/${job.id}/plans/${version}/publication/replacement/${destination.location_id}/restore`,
+                              { body },
+                            );
+                            setSubmitted(destination.location_id);
+                            onChanged();
+                          })
+                        }
+                      >
+                        {command.busy
+                          ? "Restoring…"
+                          : restoring
+                            ? "Continue exact restore"
+                            : "Confirm restore"}
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        disabled={command.busy}
+                        onClick={() => setConfirming(undefined)}
+                      >
+                        Do not restore
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      disabled={blocked || command.busy || !destination.album_identity}
+                      onClick={() => setConfirming(destination.location_id)}
+                    >
+                      {restoring ? "Review interrupted restore" : "Review restore"}
+                    </Button>
+                  )}
+                </>
+              )}
+            </div>
+          </article>
+        );
+      })}
     </section>
   );
 }

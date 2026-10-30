@@ -2,7 +2,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { JobSummary } from "../src/generated/JobSummary";
 import type { PublicationDestination } from "../src/generated/PublicationDestination";
-import { PublicationRecovery, retainedPublicationRun } from "./PublicationRecovery";
+import {
+  AlbumReplacementRestore,
+  PublicationRecovery,
+  retainedPublicationRun,
+} from "./PublicationRecovery";
 
 const job: JobSummary = {
   id: 3,
@@ -28,6 +32,7 @@ const target: PublicationDestination = {
   album_identity: "generated-album-id",
   verified_at: 1,
   last_error: null,
+  replacement: null,
 };
 
 const command = {
@@ -105,5 +110,48 @@ describe("retained publication recovery", () => {
       expect(markup).toMatch(/<button[^>]*disabled/);
       expect(markup).toContain("normalization run 7");
     }
+  });
+
+  it("offers a state-bound restore only after publication is complete", () => {
+    const destination: PublicationDestination = {
+      ...target,
+      replacement: {
+        review_id: 11,
+        original_folder: "Generated album",
+        original_album_identity: "old-album",
+        original_files: [
+          { name: "folder.jpg", bytes: 9, sha256: "b".repeat(64) },
+          { name: "manual.txt", bytes: 11, sha256: "c".repeat(64) },
+        ],
+        retained_folder: ".domus-retained-3-2-1-11",
+        restore_folder: ".domus-restore-3-2-1-11",
+        state: "published",
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <AlbumReplacementRestore
+        job={{ ...job, state: "complete" }}
+        version={2}
+        destinations={[destination]}
+        blocked={false}
+        command={command}
+        onChanged={() => {}}
+      />,
+    );
+    expect(markup).toContain("Review restore");
+    expect(markup).toContain("manual.txt");
+    expect(markup).toContain(destination.manifest_sha256);
+    expect(
+      renderToStaticMarkup(
+        <AlbumReplacementRestore
+          job={job}
+          version={2}
+          destinations={[destination]}
+          blocked={false}
+          command={command}
+          onChanged={() => {}}
+        />,
+      ),
+    ).toBe("");
   });
 });

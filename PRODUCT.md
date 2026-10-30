@@ -541,8 +541,9 @@ This section replaces the earlier "Wall + inspector" direction where they differ
 
 The connected local Music browser now lives in `frontend/app`. It extends the
 saved proof of concept with real guarded HTTPS requests, exact-release plans,
-separate source and cover approvals, explicit one-shot acquisition and new-only
-publication. See `docs/local-development.md` for setup and remaining limits.
+separate source and cover approvals, explicit one-shot acquisition and
+state-bound publication decisions. See `docs/local-development.md` for setup
+and remaining limits.
 The request page can search Cover Art Archive for the frozen exact release and
 download a selected image through the installed provider service. It retains CAA
 evidence and requires separate permission acknowledgement and exact JPEG approval.
@@ -558,8 +559,10 @@ session. Album preparation opens in a native dialog styled as the download
 slide-out. Safe cancellation uses one shared, explicit inline-confirmation
 component and never hides an active request before server confirmation.
 The request retains frozen edition/destination details in an expandable section.
-Its start click is the new-only acknowledgement; the extra publication checkbox
-is removed. Saved plan, source and exact-cover approvals are still independent.
+The start click supplies the publication acknowledgement; the extra publication
+checkbox is removed. Each existing album folder needs its own exact skip,
+separate-copy, or replacement decision before work starts. Saved plan, source
+and exact-cover approvals are still independent.
 
 The queue uses only the retained cover approved for its exact current plan.
 Missing covers remain placeholders; image failures have an explicit unavailable
@@ -598,12 +601,27 @@ answer and recovery actions.
 Requests also expose bounded, read-only saved event history for the exact plan.
 Old or unversioned events are not assigned to the current plan. History reads
 cannot approve, resume or retry work.
-Requests with an existing publication journal now expose a separate, explicit
-new-only publication recovery confirmation. It uses retained normalized files
-and the exact saved run. It never downloads, normalizes, replaces or removes
-files. Current plan approval, worker fencing, staging lock and destination
-identity checks remain authoritative. An offline backup is not completion.
-This does not implement replacement, restore or cleanup.
+The request review shows the exact files in each existing destination beside
+the proposed complete album. Skip cancels the request. Separate copy keeps the
+existing folder unchanged. Replacement requires an explicit decision bound to
+the plan version, native root and exact file manifest. The publisher moves the
+verified old folder into hidden retained storage before it publishes the new
+complete folder. It never merges or repairs tracks. Stale files or destination
+identities reject the decision without displacing the folder.
+
+The replacement journal recovers interrupted folder switches. Retained folders
+and temporary restore folders stay out of library scans, direct refresh and
+sharing. After all destinations complete, the request can restore the reviewed
+original folder. Restore checks the exact current publication and retained
+folder, journals each no-replace rename, and retains the displaced publication.
+It does not delete retained data.
+
+Requests with an existing publication journal expose a separate publication
+recovery confirmation. It uses retained normalized files and the exact saved
+run and destination decisions. It never downloads or normalizes again. An
+offline backup remains pending; retry uses its saved decision only when the
+reviewed files and root identity still match. Current plan approval, worker
+fencing, staging lock and destination identity checks remain authoritative.
 The foreground API stops admitting local operations on shutdown and drains the
 active operation through result recording instead of abandoning its blocking
 task. Ctrl+C is supported; Linux SIGTERM is wired to the same path. Forced

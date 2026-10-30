@@ -310,6 +310,18 @@ impl Api {
                 post(local_publication_resume).layer(DefaultBodyLimit::max(512)),
             )
             .route(
+                "/api/jobs/{id}/plans/{version}/publication/replacement-review",
+                get(publication_replacement_review),
+            )
+            .route(
+                "/api/jobs/{id}/plans/{version}/publication/replacement-review/{location}",
+                post(record_publication_replacement_decision).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
+                "/api/jobs/{id}/plans/{version}/publication/replacement/{location}/restore",
+                post(restore_publication_replacement).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
                 "/api/jobs/{id}/plans/{version}/artwork/local",
                 post(upload_artwork).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
             )
@@ -1397,6 +1409,55 @@ async fn local_publication_resume(
     }
     api.local()?.resume_publication(job, version, request)?;
     Ok(StatusCode::ACCEPTED)
+}
+
+async fn publication_replacement_review(
+    State(api): State<Api>,
+    Path((job, version)): Path<(i64, i64)>,
+) -> ApiResult<Json<Vec<super::store::AlbumReplacementPreview>>> {
+    Ok(Json(
+        api.database(move |store| {
+            crate::application::preview_album_replacements(store, job, version)
+        })
+        .await?,
+    ))
+}
+
+async fn record_publication_replacement_decision(
+    State(api): State<Api>,
+    Path((job, version, location)): Path<(i64, i64, i64)>,
+    Json(decision): Json<super::store::AlbumReplacementDecision>,
+) -> ApiResult<Json<super::store::AlbumReplacementReview>> {
+    Ok(Json(
+        api.database(move |store| {
+            let preview = crate::application::preview_album_replacements(store, job, version)?
+                .into_iter()
+                .find(|preview| preview.location_id == location)
+                .ok_or_else(|| {
+                    Error::Conflict("replacement destination is no longer planned".into())
+                })?;
+            if preview.album_identity.is_none() {
+                return Err(Error::Conflict(
+                    "replacement review requires an existing album folder".into(),
+                ));
+            }
+            store.record_album_replacement_decision(&preview, decision)
+        })
+        .await?,
+    ))
+}
+
+async fn restore_publication_replacement(
+    State(api): State<Api>,
+    Path((job, version, location)): Path<(i64, i64, i64)>,
+    Json(decision): Json<super::store::AlbumReplacementRestoreDecision>,
+) -> ApiResult<Json<super::store::PublicationDestination>> {
+    Ok(Json(
+        api.database(move |store| {
+            crate::application::restore_album_replacement(store, job, version, location, decision)
+        })
+        .await?,
+    ))
 }
 
 #[derive(Deserialize)]

@@ -1,11 +1,13 @@
 use super::{RELEASE, TestResult, cover, cover_source, flac, mp3, release_body};
-use domus::application::{add_location, scan_location};
-use domus::domain::{AudioFormat, JobState, OutputSettings, Page};
+use domus::application::{add_location, preview_album_replacements, scan_location};
+use domus::domain::{AudioFormat, JobState, OutputSettings, Page, ReplacementAction};
 use domus::infrastructure::artwork::CoverJpeg;
 use domus::infrastructure::catalog::{CatalogQuery, CatalogResult};
 use domus::infrastructure::media::{NormalizedAudio, normalize_audio};
 use domus::infrastructure::staging::StagingRoot;
-use domus::infrastructure::store::{JobClaim, NormalizationWork, PlanRequest, SourceFile, Store};
+use domus::infrastructure::store::{
+    AlbumReplacementDecision, JobClaim, NormalizationWork, PlanRequest, SourceFile, Store,
+};
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
@@ -75,6 +77,34 @@ impl Fixture {
         receive: bool,
         backup: Option<&std::path::Path>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::build_with_options(format, staged, approve_cover, receive, backup, None)
+    }
+
+    fn build_with_replacement(
+        format: AudioFormat,
+        staged: bool,
+        action: ReplacementAction,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::build_with_options(format, staged, true, true, None, Some(action))
+    }
+
+    fn build_with_backup_replacement(
+        format: AudioFormat,
+        staged: bool,
+        backup: &std::path::Path,
+        action: ReplacementAction,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::build_with_options(format, staged, true, true, Some(backup), Some(action))
+    }
+
+    fn build_with_options(
+        format: AudioFormat,
+        staged: bool,
+        approve_cover: bool,
+        receive: bool,
+        backup: Option<&std::path::Path>,
+        replacement_action: Option<ReplacementAction>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let state = tempdir()?;
         let library = tempdir()?;
         let scratch = tempdir()?;
@@ -125,6 +155,32 @@ impl Fixture {
             store.approve_artwork(job, plan.version, candidate.id, &candidate.sha256)?;
         }
         store.approve_plan(job, plan.version)?;
+        if let Some(action) = replacement_action {
+            for target in &plan.plan.destinations {
+                let folder = std::path::Path::new(&target.root).join(
+                    plan.plan.outputs[0]
+                        .relative_folder
+                        .replace('/', std::path::MAIN_SEPARATOR_STR),
+                );
+                std::fs::create_dir_all(&folder)?;
+                std::fs::write(folder.join("folder.jpg"), b"old cover")?;
+                std::fs::write(folder.join("manual.txt"), b"user extra")?;
+            }
+            let previews = preview_album_replacements(&store, job, plan.version)?;
+            for target in &plan.plan.destinations {
+                let preview = previews
+                    .iter()
+                    .find(|preview| preview.location_id == target.location_id)
+                    .ok_or("replacement preview")?;
+                store.record_album_replacement_decision(
+                    preview,
+                    AlbumReplacementDecision {
+                        action,
+                        expected_manifest_sha256: preview.manifest_sha256.clone(),
+                    },
+                )?;
+            }
+        }
         let claim = store
             .claim_approved_plan(job, plan.version, "worker", 300)?
             .ok_or("missing claim")?
@@ -469,7 +525,7 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
     fixture.store = Store::open_existing(&fixture.database)?;
     fixture.bind_roots()?;
     let version: i64 = raw.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 26);
+    assert_eq!(version, 27);
     let selected = fixture.store.prepare_artwork(
         fixture.job,
         fixture.version,
