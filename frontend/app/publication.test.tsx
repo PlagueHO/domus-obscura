@@ -1,8 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JobSummary } from "../src/generated/JobSummary";
 import type { PublicationDestination } from "../src/generated/PublicationDestination";
 import type { AlbumRestorePreview } from "../src/generated/AlbumRestorePreview";
+import type { RecoveryEntry } from "../src/generated/RecoveryEntry";
+import { useResource } from "./hooks";
 import {
   AlbumReplacementRestore,
   PublicationRecovery,
@@ -10,6 +12,37 @@ import {
   AlbumRestoreReview,
   restorePreviewMatches,
 } from "./PublicationRecovery";
+
+vi.mock("./hooks", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./hooks")>()),
+  useResource: vi.fn(),
+}));
+
+const retained: RecoveryEntry = {
+  id: 8,
+  job_id: 3,
+  plan_version: 2,
+  category: "retained",
+  location_id: 1,
+  folder: ".domus-retained-3-2-1-11",
+  recorded_bytes: 20,
+  version: "original-version",
+  state: "retained",
+  eligible: true,
+  last_error: null,
+  operation_id: null,
+};
+
+beforeEach(() => {
+  vi.mocked(useResource).mockReset();
+  vi.mocked(useResource).mockReturnValue({
+    data: [retained],
+    loading: false,
+    error: undefined,
+    refresh: vi.fn(),
+  });
+  afterEach(() => vi.unstubAllGlobals());
+});
 
 const job: JobSummary = {
   id: 3,
@@ -115,7 +148,7 @@ describe("retained publication recovery", () => {
     }
   });
 
-  it("offers a state-bound restore only after publication is complete", () => {
+  it("offers a state-bound restore after completion even when a job has over 50 inputs", async () => {
     const destination: PublicationDestination = {
       ...target,
       replacement: {
@@ -145,7 +178,16 @@ describe("retained publication recovery", () => {
     expect(markup).toContain("Review restore");
     expect(markup).toContain("manual.txt");
     expect(markup).toContain(destination.manifest_sha256);
+    expect(markup).toContain('href="#/recovery?job=3"');
+    expect(markup).toContain("does not prove that a retained version is still available");
     expect(markup).not.toContain("Confirm restore");
+    const fetch = vi.fn().mockResolvedValue(Response.json([retained]));
+    vi.stubGlobal("fetch", fetch);
+    await vi.mocked(useResource).mock.calls[0]![0](new AbortController().signal);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "/api/recovery?after=0&limit=1&job=3&category=retained&location=1",
+    );
     expect(
       renderToStaticMarkup(
         <AlbumReplacementRestore
@@ -181,6 +223,52 @@ describe("retained publication recovery", () => {
     preview_sha256: "c".repeat(64),
     status: null,
   };
+
+  it.each([
+    [[{ ...retained, state: "deleted" }], undefined, false],
+    [[{ ...retained, operation_id: 12 }], undefined, false],
+    [[retained], new Error("Inventory unavailable"), false],
+    [[retained], undefined, true],
+    [[], undefined, false],
+  ])(
+    "hides restore controls for deleted, admitted or unconfirmed retained data",
+    (data, error, loading) => {
+      vi.mocked(useResource).mockReturnValue({
+        data,
+        error,
+        loading,
+        refresh: vi.fn(),
+      });
+      const destination: PublicationDestination = {
+        ...target,
+        replacement: {
+          review_id: 11,
+          original_folder: preview.original_folder,
+          original_album_identity: preview.retained_album_identity,
+          original_files: preview.retained_files,
+          retained_folder: retained.folder,
+          restore_folder: preview.restore_folder,
+          state: "published",
+          restore_status: null,
+        },
+      };
+      const markup = renderToStaticMarkup(
+        <AlbumReplacementRestore
+          job={{ ...job, state: "complete" }}
+          version={2}
+          destinations={[destination]}
+          blocked={false}
+          command={command}
+          onChanged={() => {}}
+        />,
+      );
+      expect(markup).toContain("Restore is unavailable");
+      expect(markup).toContain('href="#/recovery?job=3"');
+      expect(markup).not.toContain(">Review restore</button>");
+      expect(markup).not.toContain(">Confirm restore</button>");
+      expect(vi.mocked(useResource).mock.calls[0]?.[1]).toBe("restore-inventory:3:2:1");
+    },
+  );
 
   describe("verified album restore review", () => {
     it("shows both exact versions and a separate approval control", () => {

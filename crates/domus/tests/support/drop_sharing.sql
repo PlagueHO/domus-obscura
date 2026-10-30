@@ -1,4 +1,12 @@
 -- Remove newer layers before rebuilding a legacy upgrade fixture.
+DROP VIEW recovery_inventory;
+DROP INDEX recovery_input_cursor;
+DROP INDEX recovery_normalization_cursor;
+DROP INDEX recovery_pending_cursor;
+DROP INDEX recovery_retained_cursor;
+DROP TABLE recovery_items;
+DROP TABLE recovery_operations;
+DROP TABLE scratch_cleanup_admissions;
 DROP TRIGGER immutable_album_restore_question_binding;
 DROP TRIGGER retained_album_restore_approval;
 DROP TRIGGER immutable_album_restore_approval;

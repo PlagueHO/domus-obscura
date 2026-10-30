@@ -250,6 +250,10 @@ export function RequestPage({
           Refresh request
         </Button>
       </header>
+      <p>
+        <a href={`#/recovery?job=${id}`}>Open request Recovery</a>
+        {" · "}Inspect retained versions and scratch cleanup separately from album completion.
+      </p>
       <Alert
         error={
           job.error ||

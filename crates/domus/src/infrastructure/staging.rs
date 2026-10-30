@@ -83,7 +83,7 @@ fn hex(hash: &[u8; 32]) -> String {
     hash.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn recipe(run: &NormalizationRun) -> Result<Vec<u8>> {
+pub(crate) fn recipe(run: &NormalizationRun) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&serde_json::json!({
         "run_id": run.id,
         "job_id": run.job_id,
@@ -227,6 +227,48 @@ fn check_directory(directory: &Dir, permissions: &FilePermissions) -> Result<()>
 }
 
 impl StagingRoot {
+    pub(crate) fn cleanup_binding(&self) -> Result<(String, String)> {
+        Ok((
+            self.path.to_str().ok_or_else(conflict)?.into(),
+            self.native.identity.clone(),
+        ))
+    }
+
+    pub(crate) fn cleanup_directory(&self, store: &Store) -> Result<Dir> {
+        self.check_store(store)?;
+        let opened = LibraryDirectory::open(&self.path)?;
+        if opened.native_root() != &self.native {
+            return Err(conflict());
+        }
+        let owner_options = options(false, false);
+        #[cfg(windows)]
+        let owner_options = {
+            use cap_std::fs::OpenOptionsExt;
+            let mut owner_options = owner_options;
+            owner_options.share_mode(3);
+            owner_options
+        };
+        let owner = regular(
+            self.directory
+                .open_with("owner.lock", &owner_options)?
+                .into_std(),
+            &self.permissions,
+        )?;
+        if super::filesystem::native_file_identity(&owner)?
+            != super::filesystem::native_file_identity(&self._owner)?
+        {
+            return Err(conflict());
+        }
+        self.directory.try_clone().map_err(Error::from)
+    }
+
+    pub(crate) fn cleanup_verify_input(&self, id: i64, bytes: u64, sha256: &str) -> Result<()> {
+        let input = self.read_received(id, bytes, &|| Ok(()))?;
+        if hex(input.sha256()) != sha256 {
+            return Err(conflict());
+        }
+        Ok(())
+    }
     /// Open an existing owner-only root, reserve it against media registration,
     /// and bind it to this database's durable identity. Never delete owner.lock.
     pub fn open(store: &mut Store, path: &Path) -> Result<Self> {

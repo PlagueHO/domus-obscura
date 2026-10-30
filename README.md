@@ -1270,7 +1270,9 @@ completed before its visibility receipt was saved.
 The primary is copied first. An unavailable backup leaves a verified primary
 and `backup_pending`, with its error in publication status. Retry the same
 command after restoring the original backup root. Retry uses the same
-normalization run and does not download, normalize or delete anything.
+normalization run and does not download or normalize again. Once every required
+destination completes, its separate scratch cleanup can remove verified,
+job-owned temporary input and output.
 Before completion, the command verifies all successful destinations again,
 with the primary last. Generic state changes cannot bypass the journal.
 The protected `GET /api/jobs/{id}/plans/{version}/publication` route returns
@@ -1280,7 +1282,68 @@ bounded destination status. There is no publication mutation API or browser UI.
 backup can leave a complete primary album and `backup_pending`. This is not a
 replacement, restore, cleanup or power-loss acceptance. File synchronization
 runs before receipts, but Windows directory durability and power-loss/reboot
-recovery are not proven. Staging and all failed copies are retained.
+recovery are not proven. Failed copies and backup-pending input remain retained.
+
+## Recovery inventory and deletion
+
+Open **Recovery** from the application navigation or from a request. Inventory
+uses bounded keyset pages (default 50, maximum 100). It reports journal-known
+retained versions, received input, normalization output and unfinished destination
+copies. Byte values are recorded logical sizes. They are not live allocated
+storage or free-space measurements. Incomplete and offline evidence must not be
+treated as zero use. Approved evidence and receipts remain separate from evictable
+scratch.
+
+Migration 29 adds immutable cleanup/deletion approval and per-file intent journals.
+Successful publication saves a scratch-cleanup admission with its completed job
+state. Cleanup runs under the same staging ownership and publication visibility
+lock, after source readers close. Only the completed run's verified normalization
+files and sealed transfer input/receipt pairs qualify. It does not remove older
+failed attempts, failed destination copies, playback exports, approved artwork
+evidence, recovery versions, `owner.lock` or unrelated files.
+
+Album completion does not imply cleanup completion. Publication/worker results
+include separate cleanup status and errors. The Recovery view also shows durable
+cleanup preparation failures. An interrupted or failed cleanup requires an
+explicit retry. There is no automatic age-based or startup deletion sweep.
+
+For retained content, select one version, load its fresh preview, then separately
+confirm irreversible deletion. The preview verifies the exact root, directory,
+file identities, hashes and current visible album. Each destination needs its own
+approval. The version displaced by restore is distinct from the original it
+replaces, even when both use the same retained folder name at different times.
+
+Deletion records intent before each effect. Partial failure keeps the journal
+and reports an error. Continuation uses the fixed approval and rejects changed
+files, extra entries, replaced roots and unapproved absence. A missing item can
+close an interruption gap only after durable removal intent exists. Such
+reconciliation confirms absence, not which process removed the bytes.
+Deletion intent blocks restoration immediately; it never deletes the visible
+library album. Historical approvals and receipts remain immutable.
+
+Protected API operations are:
+
+| Route                                      | Purpose                                     |
+| ------------------------------------------ | ------------------------------------------- |
+| `GET /api/recovery?after=0&limit=50&job=1` | Optional job-filtered recorded inventory    |
+| `GET /api/recovery/{id}/preview`           | Fresh exact retained-version evidence       |
+| `GET /api/recovery/{id}/operation`         | Saved cleanup/deletion progress             |
+| `POST /api/recovery/{id}/delete`           | Preview-bound irreversible deletion         |
+| `POST /api/recovery/{id}/continue`         | Continue the exact saved deletion operation |
+| `POST /api/recovery/{id}/cleanup`          | Explicit retry of admitted scratch cleanup  |
+
+Deletion requires `expected_preview_sha256` and
+`acknowledge_irreversible_deletion: true`. Continuation requires
+`expected_operation_id`. Cleanup preparation can fail before an operation exists;
+only an already-admitted pending scratch entry permits retry with operation ID
+`0`. Requests cannot supply roots or deletion manifests. Browser commands retain
+the exact Origin and CSRF checks. MCP remains read-only.
+
+Native operations use no-follow handles and exact manifest entries, not recursive
+path removal. Windows deletes the checked handle. Linux uses parent-relative
+operations and requires cooperative external writers. These locks do not prevent
+arbitrary external file changes. Physical power-loss and storage-device behavior
+need separate acceptance.
 
 ## Artwork approval
 

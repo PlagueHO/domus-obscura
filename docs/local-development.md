@@ -343,8 +343,27 @@ remain errors; they are not overwritten, adopted or recreated. A still-offline
 backup remains `backup_pending`. Refresh the request after the operation finishes
 to inspect its result before another explicit attempt. No automatic retry occurs.
 The CLI remains available for explicit publication before any journal exists.
-This browser action is not replacement, restore or cleanup.
+This browser action does not approve replacement, restore or recovery deletion.
+After every required destination verifies, publication can clean its exact
+job-owned scratch through a separate journal.
 An uncertain submission must not be reset.
+
+### Retained storage
+
+Use **Recovery**, or the Recovery link on a request, to list recorded retained
+storage. The view separates retained album versions, scratch, input and unfinished
+destination copies. Recorded byte values are not a current disk scan. Inspect
+one retained version before separately confirming irreversible deletion.
+
+Deletion never removes the visible album. It removes that exact retained version
+and its restore option. A version displaced by restore has separate evidence
+from the original. Changed or unavailable evidence blocks confirmation.
+
+If deletion stops, read its saved operation and error before explicit
+continuation. Continuation cannot approve changed files. If automatic scratch
+cleanup stops, the album can still be complete. Retry cleanup separately from
+Recovery; do not rerun acquisition or erase its receipts. Pending backups keep
+their retry input. Use only generated roots for local acceptance of these actions.
 All fully received, sealed inputs can finish locally without another peer
 connection. Supply `source_candidate: null` only for an existing source; an idle
 new job needs its exact approved source candidate.

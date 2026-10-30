@@ -15,6 +15,7 @@ import { RequestPage } from "./Request";
 import { Library } from "./Library";
 import { Inbox } from "./Inbox";
 import { Search } from "./Search";
+import { Recovery, recoveryJobFilter } from "./Recovery";
 import {
   FocusHeader,
   HomeQueue,
@@ -264,6 +265,9 @@ export function App() {
         />
       </>
     );
+  } else if (section === "recovery") {
+    const job = recoveryJobFilter(route);
+    page = <Recovery key={job ?? "all"} {...(job ? { job } : {})} />;
   } else if (parts[1] === "inbox") {
     const selectedId = Number(routeId);
     page = (
@@ -494,12 +498,22 @@ export function App() {
       <nav className="sidebar" aria-label="Music navigation">
         <a
           href="#/"
-          className={`side-link ${route !== "/settings" ? "selected" : ""}`}
+          className={`side-link ${route !== "/settings" && section !== "recovery" ? "selected" : ""}`}
           aria-label="Media"
           title="Media"
         >
           <Icon name="music" />
           <span className="sr-only">Media</span>
+        </a>
+        <a
+          href="#/recovery"
+          className={`side-link ${section === "recovery" ? "selected" : ""}`}
+          aria-label="Recovery"
+          title="Recovery"
+          aria-current={section === "recovery" ? "page" : undefined}
+        >
+          <Icon name="refresh" />
+          <span className="sr-only">Recovery</span>
         </a>
         <div className="sidebar-utilities">
           <a

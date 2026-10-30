@@ -4,6 +4,9 @@ use serde_json::json;
 use std::path::Path;
 use std::process::Command;
 
+#[path = "recovery.rs"]
+mod recovery;
+
 fn normalized(fixture: &mut Fixture) -> Result<i64, Box<dyn std::error::Error>> {
     Ok(normalize_album(
         &mut fixture.store,
@@ -280,20 +283,15 @@ fn verify_album(fixture: &Fixture, run: i64, root: &Path) -> TestResult {
         fixture.cover.bytes()
     );
     assert_eq!(folder.read_dir()?.count(), plan.plan.outputs.len() + 1);
+    let raw = Connection::open(&fixture.database)?;
     for (index, output) in plan.plan.outputs.iter().enumerate() {
-        let staged = fixture
-            .scratch
-            .path()
-            .join(format!("normalization-{run}"))
-            .join(format!(
-                "track-{:04}.{}",
-                index + 1,
-                plan.plan.format.extension()
-            ));
-        assert_eq!(
-            std::fs::read(folder.join(&output.filename))?,
-            std::fs::read(staged)?
-        );
+        let (bytes,sha256):(i64,String)=raw.query_row(
+            "SELECT output_bytes,output_sha256 FROM normalization_receipts WHERE run_id=?1 AND track_number=?2",
+            params![run,index as i64+1],|row|Ok((row.get(0)?,row.get(1)?)),
+        )?;
+        let actual = std::fs::read(folder.join(&output.filename))?;
+        assert_eq!(actual.len() as i64, bytes);
+        assert_eq!(format!("{:x}", Sha256::digest(&actual)), sha256);
     }
     Ok(())
 }
@@ -439,7 +437,15 @@ fn replacement_restore_is_state_bound_and_recovers_after_displacing_the_current_
     )?;
     std::fs::rename(&current, &temporary)?;
     raw.execute_batch(
-        "DROP TRIGGER immutable_album_restore_question_binding;
+        "DROP VIEW recovery_inventory;
+         DROP INDEX recovery_input_cursor;
+         DROP INDEX recovery_normalization_cursor;
+         DROP INDEX recovery_pending_cursor;
+         DROP INDEX recovery_retained_cursor;
+         DROP TABLE recovery_items;
+         DROP TABLE recovery_operations;
+         DROP TABLE scratch_cleanup_admissions;
+         DROP TRIGGER immutable_album_restore_question_binding;
          DROP TRIGGER retained_album_restore_approval;
          DROP TRIGGER immutable_album_restore_approval;
          DROP TABLE album_restore_questions;
@@ -1363,11 +1369,19 @@ fn publication_copies_only_verified_final_files_to_main_and_backup_for_both_form
             transfers
         );
         assert!(
-            fixture
+            !fixture
                 .scratch
                 .path()
                 .join(format!("normalization-{run}"))
-                .is_dir()
+                .exists()
+        );
+        assert_eq!(
+            fixture
+                .store
+                .recovery_operation(run * 8 + 1)?
+                .ok_or("scratch cleanup")?
+                .state,
+            "complete"
         );
         assert!(fixture.store.renew_claim(&fixture.claim, 300).is_err());
         let reopened = Store::open_existing(&fixture.database)?;
@@ -2120,7 +2134,7 @@ fn schema_fifteen_upgrade_preserves_completed_normalization_and_approval() -> Te
     fixture.store = Store::open(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        28
+        29
     );
     assert_eq!(
         raw.query_row(

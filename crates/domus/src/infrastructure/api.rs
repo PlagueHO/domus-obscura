@@ -30,6 +30,7 @@ use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 const SESSION_COOKIE: &str = "__Host-domus-session";
 mod library;
+mod recovery;
 use library::*;
 pub use library::{LibraryRefresh, RefreshLibraryFolder};
 #[cfg(test)]
@@ -50,6 +51,8 @@ struct Shared {
     system_settings_read_only: bool,
     backend_configuration: Option<Arc<super::server::configuration::ConfigurationService>>,
     request_slots: Semaphore,
+    recovery_slots: Arc<Semaphore>,
+    recovery_stopping: std::sync::atomic::AtomicBool,
     event_slots: Arc<Semaphore>,
     broker: Option<RwLock<Arc<EntraBroker>>>,
     pending: Mutex<LoginChallenges>,
@@ -62,6 +65,11 @@ struct Shared {
 pub struct ApiError(StatusCode, String, Option<u32>);
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
+
+pub(crate) struct ReloadPermit {
+    _local: Option<OwnedSemaphorePermit>,
+    _recovery: OwnedSemaphorePermit,
+}
 
 #[derive(Serialize, ts_rs::TS)]
 pub struct ApiMessage {
@@ -263,6 +271,8 @@ impl Api {
             system_settings_read_only: false,
             backend_configuration: None,
             request_slots: Semaphore::new(32),
+            recovery_slots: Arc::new(Semaphore::new(1)),
+            recovery_stopping: std::sync::atomic::AtomicBool::new(false),
             event_slots: Arc::new(Semaphore::new(4)),
             broker: broker.map(|broker| RwLock::new(Arc::new(broker))),
             pending: Mutex::new(LoginChallenges::default()),
@@ -279,6 +289,21 @@ impl Api {
             .route("/api/local/status", get(local_status))
             .route("/api/sharing/folders", get(inspect_share_folder))
             .route("/api/sharing/bindings", get(share_bindings))
+            .route("/api/recovery", get(recovery::inventory))
+            .route("/api/recovery/{id}/preview", get(recovery::preview))
+            .route("/api/recovery/{id}/operation", get(recovery::operation))
+            .route(
+                "/api/recovery/{id}/delete",
+                post(recovery::delete).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
+                "/api/recovery/{id}/continue",
+                post(recovery::continue_delete).layer(DefaultBodyLimit::max(512)),
+            )
+            .route(
+                "/api/recovery/{id}/cleanup",
+                post(recovery::cleanup).layer(DefaultBodyLimit::max(512)),
+            )
             .route(
                 "/api/sharing/folders/bind",
                 post(bind_share_folder).layer(DefaultBodyLimit::max(16_384)),
@@ -579,24 +604,52 @@ impl Api {
     }
 
     pub(crate) fn stop_local_operations(&self) {
+        self.0
+            .recovery_stopping
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Some(local) = &self.0.local {
             local.stop_accepting();
         }
     }
 
     pub(crate) async fn drain_local_operations(&self) -> Result<()> {
+        let _recovery = self
+            .0
+            .recovery_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::Internal("recovery operation slot closed"))?;
         if let Some(local) = &self.0.local {
             local.drain().await?;
         }
         Ok(())
     }
 
-    pub(crate) fn reload_permit(&self) -> Result<Option<tokio::sync::OwnedSemaphorePermit>> {
-        self.0
+    pub(crate) fn reload_permit(&self) -> Result<ReloadPermit> {
+        if self
+            .0
+            .recovery_stopping
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(Error::Busy("host media operations are stopping"));
+        }
+        let recovery = self
+            .0
+            .recovery_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::Busy("a recovery operation or API reload is active"))?;
+        let local = self
+            .0
             .local
             .as_ref()
             .map(|local| local.reload_permit())
-            .transpose()
+            .transpose()?;
+        Ok(ReloadPermit {
+            _local: local,
+            _recovery: recovery,
+        })
     }
 
     fn local(&self) -> ApiResult<&super::local_runtime::LocalRuntime> {
@@ -1453,8 +1506,10 @@ async fn preview_publication_restore(
     State(api): State<Api>,
     Path((job, version, location)): Path<(i64, i64, i64)>,
 ) -> ApiResult<Json<super::store::AlbumRestorePreview>> {
+    let permit = api.reload_permit()?;
     Ok(Json(
         api.database(move |store| {
+            let _permit = permit;
             crate::application::preview_album_restore(store, job, version, location)
         })
         .await?,
@@ -1466,8 +1521,10 @@ async fn restore_publication_replacement(
     Path((job, version, location)): Path<(i64, i64, i64)>,
     Json(decision): Json<super::store::AlbumReplacementRestoreDecision>,
 ) -> ApiResult<Json<super::store::PublicationDestination>> {
+    let permit = api.reload_permit()?;
     Ok(Json(
         api.database(move |store| {
+            let _permit = permit;
             crate::application::restore_album_replacement(store, job, version, location, decision)
         })
         .await?,

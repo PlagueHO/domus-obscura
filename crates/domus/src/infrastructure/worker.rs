@@ -44,6 +44,8 @@ struct PublicationConfiguration {
 pub struct PublicationOutcome {
     pub state: String,
     pub destinations: Vec<super::store::PublicationDestination>,
+    pub cleanup: Option<super::store::RecoveryOperation>,
+    pub cleanup_error: Option<String>,
 }
 
 #[derive(Deserialize, ts_rs::TS)]
@@ -180,6 +182,15 @@ fn publish_controlled(
     let state = result?;
     Ok(PublicationOutcome {
         state,
+        cleanup: store.recovery_operation(configuration.normalization_run * 8 + 1)?,
+        cleanup_error: store
+            .recovery_inventory(
+                crate::domain::Page::new(configuration.normalization_run * 8, 1)?,
+                Some(configuration.job_id),
+            )?
+            .into_iter()
+            .find(|e| e.id == configuration.normalization_run * 8 + 1)
+            .and_then(|e| e.last_error),
         destinations: store
             .publication_destinations(configuration.job_id, configuration.plan_version)?,
     })
@@ -596,6 +607,8 @@ pub struct WorkerOutcome {
     pub normalization_run: i64,
     pub playback_folder: Option<PathBuf>,
     pub publication_pending: bool,
+    pub cleanup: Option<super::store::RecoveryOperation>,
+    pub cleanup_error: Option<String>,
 }
 
 /// A successful check is local configuration evidence only. It does not prove
@@ -977,6 +990,16 @@ impl PreparedWorker {
             normalization_run: run,
             playback_folder,
             publication_pending,
+            cleanup: self.store.recovery_operation(run * 8 + 1)?,
+            cleanup_error: self
+                .store
+                .recovery_inventory(
+                    crate::domain::Page::new(run * 8, 1)?,
+                    Some(self.claim.job()),
+                )?
+                .into_iter()
+                .find(|e| e.id == run * 8 + 1)
+                .and_then(|e| e.last_error),
         })
     }
 }

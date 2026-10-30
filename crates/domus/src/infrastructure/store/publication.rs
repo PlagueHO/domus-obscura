@@ -973,6 +973,16 @@ impl Store {
             params![job, version, location_id],
             |row| row.get(0),
         )?;
+        let deleting: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recovery_operations WHERE entry_id IN (?1*8+3,?1*8+4))",
+            [id],
+            |r| r.get(0),
+        )?;
+        if deleting {
+            return Err(Error::Conflict(
+                "this retained version has deletion intent; restore is unavailable".into(),
+            ));
+        }
         let saved = destination(&transaction, id)?;
         let replacement = saved.replacement.as_ref().ok_or_else(conflict)?;
         if saved.verified_at.is_none()
@@ -1254,7 +1264,12 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn finish_publication(&mut self, claim: &JobClaim, run: i64) -> Result<String> {
+    pub(crate) fn finish_publication(
+        &mut self,
+        claim: &JobClaim,
+        run: i64,
+        staging: (&str, &str),
+    ) -> Result<String> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1273,6 +1288,12 @@ impl Store {
         } else {
             "backup_pending"
         };
+        if state == "complete" {
+            transaction.execute(
+                "INSERT INTO scratch_cleanup_admissions(run_id,root,root_identity) VALUES (?1,?2,?3)
+                 ON CONFLICT(run_id) DO NOTHING",params![run,staging.0,staging.1],
+            )?;
+        }
         transaction.execute(
             "UPDATE jobs SET state=?2,owner=NULL,lease_until=NULL WHERE id=?1",
             params![claim.job, state],

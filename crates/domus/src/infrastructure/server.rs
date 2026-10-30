@@ -414,7 +414,7 @@ impl Host {
         &self,
         revision: &str,
         listener: &TcpListener,
-    ) -> Result<(Host, TcpListener, Option<tokio::sync::OwnedSemaphorePermit>)> {
+    ) -> Result<(Host, TcpListener, super::api::ReloadPermit)> {
         let idle = self.api.reload_permit()?;
         let source = self.source.clone();
         let expected = revision.to_owned();

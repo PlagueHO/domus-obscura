@@ -38,6 +38,26 @@ Library browsing and setup views are read-only. Saved recovery questions and
 failed or uncertain transfers still require the existing operator recovery
 commands; this app does not bypass those controls.
 
+The Recovery navigation opens `#/recovery`. Request pages link to
+`#/recovery?job={id}`. The inventory uses 50-record cursor pages across jobs.
+It reports recorded bytes, not current disk allocation. Select one retained
+version to read a fresh file and identity preview. New deletion requires a
+verified preview, an irreversible-deletion acknowledgement and a separate final
+confirmation. The command carries the exact preview digest. No batch deletion
+or restoration of later displaced versions is offered here.
+
+Scratch cleanup starts automatically only after all destinations verify.
+Its status is separate from album completion. Recovery can explicitly retry an
+existing incomplete scratch operation or its admitted manifest preparation.
+An admitted `pending` scratch entry can be retried even without a saved error.
+Preparation retries send operation ID `0`; other retries use the saved operation ID.
+Protected inputs and pending publication folders are view-only. Failed reads hide
+old inventory and previews. Commands never retry automatically. Historical
+publication receipts do not prove that retained files remain available.
+Request restore controls query retained inventory for the exact job and location.
+They require a matching entry with no deletion intent. Inputs do not consume the
+filtered page. Missing or failed inventory reads hide those controls.
+
 Lists use bounded provider/database pages. The setup view loads the first 100
 registered roots. The request view loads up to 100 transfer receipts. Source and
 cover candidates have separate 50-record pages. Local continuation is offered only

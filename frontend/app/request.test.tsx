@@ -99,6 +99,12 @@ function renderRequest({
 
 beforeEach(() => vi.mocked(useResource).mockReset());
 
+it("links to request-scoped Recovery without inferring completion or retained availability", () => {
+  const markup = renderRequest();
+  expect(markup).toContain('href="#/recovery?job=3"');
+  expect(markup).toContain("separately from album completion");
+});
+
 describe("production worker request status", () => {
   const worker = {
     online: false,
