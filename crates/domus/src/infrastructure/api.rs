@@ -319,7 +319,9 @@ impl Api {
             )
             .route(
                 "/api/jobs/{id}/plans/{version}/publication/replacement/{location}/restore",
-                post(restore_publication_replacement).layer(DefaultBodyLimit::max(1024)),
+                get(preview_publication_restore).merge(
+                    post(restore_publication_replacement).layer(DefaultBodyLimit::max(1024)),
+                ),
             )
             .route(
                 "/api/jobs/{id}/plans/{version}/artwork/local",
@@ -1442,6 +1444,18 @@ async fn record_publication_replacement_decision(
                 ));
             }
             store.record_album_replacement_decision(&preview, decision)
+        })
+        .await?,
+    ))
+}
+
+async fn preview_publication_restore(
+    State(api): State<Api>,
+    Path((job, version, location)): Path<(i64, i64, i64)>,
+) -> ApiResult<Json<super::store::AlbumRestorePreview>> {
+    Ok(Json(
+        api.database(move |store| {
+            crate::application::preview_album_restore(store, job, version, location)
         })
         .await?,
     ))

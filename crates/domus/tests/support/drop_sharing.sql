@@ -1,4 +1,10 @@
 -- Remove newer layers before rebuilding a legacy upgrade fixture.
+DROP TRIGGER immutable_album_restore_question_binding;
+DROP TRIGGER retained_album_restore_approval;
+DROP TRIGGER immutable_album_restore_approval;
+DROP TABLE album_restore_questions;
+DROP TABLE album_restore_status;
+DROP TABLE album_restore_approvals;
 DROP TRIGGER retained_publication_replacement_journal;
 DROP TRIGGER immutable_publication_replacement_intent;
 DROP TRIGGER valid_publication_replacement_state;

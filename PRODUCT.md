@@ -54,6 +54,22 @@ answer and applying it are separate explicit actions. Both use the existing
 version-bound, guarded backend commands. Neither starts a worker or a transfer.
 Obsolete decisions are view-only.
 
+The request page has a separate retained-album restore review for each
+destination. It is not part of Library browsing or publication continuation.
+Restore is available only after publication is complete at every destination.
+A fresh preview verifies the retained original and the current files, with
+filenames, sizes, and detailed hash evidence. Confirmation binds to this exact
+state. Changed current files can be kept in recovery after a fresh preview and
+approval; the retained original must still match its saved replacement review.
+After restore starts, its approved state cannot change. Interrupted work checks
+all saved folder positions before an explicit continuation. Restore failures
+and destination-bound recovery questions remain visible across reloads without
+changing the completed acquisition state. An answer alone does not approve or
+move files. Destinations complete independently, without a cross-drive atomicity
+guarantee. Historical publication receipts remain distinct from restore results.
+General recovery inventory, deletion, and restoring later displaced versions
+remain separate work.
+
 A safely paused, current, unanswered artwork question can use the request's
 normal exact-JPEG preparation and approval interface. Answering requires the
 approved cover; recovery rechecks its saved binding and transfer safety. Source

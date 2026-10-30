@@ -301,6 +301,14 @@ fn run(args: &[String]) -> Result<()> {
                     "AlbumReplacementRestoreDecision.ts",
                     domus::infrastructure::store::AlbumReplacementRestoreDecision::export_to_string(&config),
                 ),
+                (
+                    "AlbumRestorePreview.ts",
+                    domus::infrastructure::store::AlbumRestorePreview::export_to_string(&config),
+                ),
+                (
+                    "AlbumRestoreStatus.ts",
+                    domus::infrastructure::store::AlbumRestoreStatus::export_to_string(&config),
+                ),
                 ("ArtworkIssue.ts", ArtworkIssue::export_to_string(&config)),
                 (
                     "JobControl.ts",

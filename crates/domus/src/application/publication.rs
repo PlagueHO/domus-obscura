@@ -39,6 +39,17 @@ pub fn restore_album_replacement(
         .ok_or_else(|| Error::Conflict("replacement destination is no longer planned".into()))
 }
 
+/// Inspect one destination without granting approval or changing media.
+pub fn preview_album_restore(
+    store: &mut Store,
+    job: i64,
+    plan_version: i64,
+    location_id: i64,
+) -> Result<crate::infrastructure::store::AlbumRestorePreview> {
+    let _visibility = crate::infrastructure::shares::publication_visibility_write(store)?;
+    crate::infrastructure::publication::preview_album_restore(store, job, plan_version, location_id)
+}
+
 pub(crate) fn preview_album_replacement_for_location(
     store: &Store,
     job: i64,

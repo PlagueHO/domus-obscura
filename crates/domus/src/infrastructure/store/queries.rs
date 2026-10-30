@@ -138,7 +138,9 @@ impl Store {
             "SELECT q.id, q.job_id, q.plan_version, q.prompt, q.choices, q.answer
              FROM questions q JOIN jobs j ON j.id = q.job_id
              WHERE q.id > ?1 AND q.answer IS NULL AND q.plan_version = j.plan_version
-             AND j.state = 'awaiting_input' ORDER BY q.id LIMIT ?2",
+             AND (j.state = 'awaiting_input' OR (j.state='complete' AND EXISTS(
+               SELECT 1 FROM album_restore_questions r WHERE r.question_id=q.id
+               AND r.resolved_at IS NULL))) ORDER BY q.id LIMIT ?2",
         )?;
         let rows = statement.query_map(params![page.after(), page.limit()], |row| {
             Ok((

@@ -2,10 +2,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { JobSummary } from "../src/generated/JobSummary";
 import type { PublicationDestination } from "../src/generated/PublicationDestination";
+import type { AlbumRestorePreview } from "../src/generated/AlbumRestorePreview";
 import {
   AlbumReplacementRestore,
   PublicationRecovery,
   retainedPublicationRun,
+  AlbumRestoreReview,
+  restorePreviewMatches,
 } from "./PublicationRecovery";
 
 const job: JobSummary = {
@@ -126,6 +129,7 @@ describe("retained publication recovery", () => {
         retained_folder: ".domus-retained-3-2-1-11",
         restore_folder: ".domus-restore-3-2-1-11",
         state: "published",
+        restore_status: null,
       },
     };
     const markup = renderToStaticMarkup(
@@ -141,6 +145,7 @@ describe("retained publication recovery", () => {
     expect(markup).toContain("Review restore");
     expect(markup).toContain("manual.txt");
     expect(markup).toContain(destination.manifest_sha256);
+    expect(markup).not.toContain("Confirm restore");
     expect(
       renderToStaticMarkup(
         <AlbumReplacementRestore
@@ -153,5 +158,103 @@ describe("retained publication recovery", () => {
         />,
       ),
     ).toBe("");
+  });
+
+  const preview: AlbumRestorePreview = {
+    job_id: 3,
+    plan_version: 2,
+    location_id: 1,
+    destination_id: 1,
+    review_id: 11,
+    root: target.root,
+    root_identity: target.root_identity,
+    original_folder: "Generated album",
+    retained_folder: ".domus-retained-3-2-1-11",
+    restore_folder: ".domus-restore-3-2-1-11",
+    state: "published",
+    retained_album_identity: "old-album",
+    current_album_identity: "new-album",
+    retained_files: [{ name: "original.mp3", bytes: 42, sha256: "a".repeat(64) }],
+    current_files: [{ name: "changed.txt", bytes: 23, sha256: "b".repeat(64) }],
+    verified: true,
+    unavailable_reason: null,
+    preview_sha256: "c".repeat(64),
+    status: null,
+  };
+
+  describe("verified album restore review", () => {
+    it("shows both exact versions and a separate approval control", () => {
+      const markup = renderToStaticMarkup(
+        <AlbumRestoreReview preview={preview} blocked={false} onConfirm={() => {}} />,
+      );
+      expect(markup).toContain("original.mp3");
+      expect(markup).toContain("42 bytes");
+      expect(markup).toContain("changed.txt");
+      expect(markup).toContain("23 bytes");
+      expect(markup).toContain("Confirm restore");
+      expect(markup).toContain(preview.retained_folder);
+      expect(markup).not.toMatch(/<button[^>]*disabled/);
+    });
+
+    it("never offers approval for unavailable or unverified evidence", () => {
+      const markup = renderToStaticMarkup(
+        <AlbumRestoreReview
+          preview={{
+            ...preview,
+            verified: false,
+            preview_sha256: null,
+            unavailable_reason: "offline",
+          }}
+          blocked={false}
+          onConfirm={() => {}}
+        />,
+      );
+      expect(markup).toContain("offline");
+      expect(markup).not.toContain("Confirm restore");
+      expect(markup).not.toContain("original.mp3");
+    });
+
+    it("blocks cached previews during failed reads and uses exact continuation after interruption", () => {
+      const markup = renderToStaticMarkup(
+        <AlbumRestoreReview
+          preview={{ ...preview, state: "restore_current_moved" }}
+          blocked={true}
+          onConfirm={() => {}}
+        />,
+      );
+      expect(markup).toContain("Continue exact restore");
+      expect(markup).toMatch(/<button[^>]*disabled/);
+      expect(markup).not.toContain("Confirm restore");
+    });
+
+    it("binds preview evidence to the exact selected job, plan, destination and retained review", () => {
+      const destination: PublicationDestination = {
+        ...target,
+        replacement: {
+          review_id: 11,
+          original_folder: preview.original_folder,
+          original_album_identity: preview.retained_album_identity,
+          original_files: preview.retained_files,
+          retained_folder: preview.retained_folder,
+          restore_folder: preview.restore_folder,
+          state: "published",
+          restore_status: null,
+        },
+      };
+      expect(restorePreviewMatches(preview, destination)).toBe(true);
+      for (const change of [
+        { job_id: 4 },
+        { plan_version: 3 },
+        { location_id: 2 },
+        { destination_id: 2 },
+        { review_id: 12 },
+        { root_identity: "different" },
+        { root: "other-root" },
+        { verified: false },
+        { preview_sha256: null },
+      ]) {
+        expect(restorePreviewMatches({ ...preview, ...change }, destination)).toBe(false);
+      }
+    });
   });
 });

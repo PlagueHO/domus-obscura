@@ -3,8 +3,9 @@ use super::filesystem::{
 };
 use super::permissions::FilePermissions;
 use super::store::{
-    AlbumReplacementPreview, AlbumReplacementRestoreDecision, PublicationDestination,
-    PublicationFile, PublicationPreparation, ReplacementFile, Store, replacement_hash,
+    AlbumReplacementPreview, AlbumReplacementRestore, AlbumReplacementRestoreDecision,
+    AlbumRestorePreview, PublicationDestination, PublicationFile, PublicationPreparation,
+    ReplacementFile, Store, replacement_hash,
 };
 use crate::domain::LibraryPath;
 use crate::{Error, Result};
@@ -45,6 +46,11 @@ fn options(create: bool) -> OpenOptions {
 fn read_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    }
     #[cfg(windows)]
     {
         use cap_std::fs::OpenOptionsExt;
@@ -99,41 +105,234 @@ pub(crate) fn restore_album_replacement(
     location_id: i64,
     decision: AlbumReplacementRestoreDecision,
 ) -> Result<()> {
-    let restore = store.prepare_album_replacement_restore(job, version, location_id, decision)?;
-    let root = LibraryDirectory::open(Path::new(&restore.root))?;
-    store.check_native_root(&restore.root, "media", root.native_root())?;
-    if root.native_root().identity != restore.root_identity {
-        return Err(conflict());
+    let mut restore =
+        store.prepare_album_replacement_restore(job, version, location_id, Some(&decision))?;
+    let result = (|| {
+        let preview = inspect_album_restore(store, job, version, location_id, &restore)?;
+        if !preview.verified {
+            return Err(Error::Conflict(format!(
+                "restore cannot verify this destination: {}",
+                preview
+                    .unavailable_reason
+                    .as_deref()
+                    .unwrap_or("file state is unavailable"),
+            )));
+        }
+        if decision
+            .expected_preview_sha256
+            .as_ref()
+            .is_some_and(|expected| preview.preview_sha256.as_ref() != Some(expected))
+            || ((restore.state == "published" || restore.approved_preview.is_some())
+                && decision.expected_preview_sha256.is_none())
+        {
+            return Err(Error::Conflict(
+                "restore preview changed or is unavailable; review this destination again".into(),
+            ));
+        }
+        if restore.state == "published" {
+            store.approve_album_restore(&restore, &preview)?;
+            restore.replacement_album_identity = preview.current_album_identity;
+            restore.replacement_files = preview.current_files;
+            restore.state = "restore_prepared".into();
+        }
+        run_album_restore(store, &restore)
+    })();
+    match result {
+        Ok(()) => store.album_restore_result(restore.destination_id, None).map_err(|error| {
+            Error::Conflict(format!(
+                "restore files were verified but final recovery status could not be saved: {error}; inspect the journal before retry"
+            ))
+        }),
+        Err(error) => {
+            store
+                .album_restore_result(restore.destination_id, Some(&error.to_string()))
+                .map_err(|record| {
+                    Error::Conflict(format!(
+                        "{error}; restore status could not be saved: {record}; inspect saved folders before retry"
+                    ))
+                })?;
+            Err(error)
+        }
     }
+}
 
-    let original = LibraryPath::parse(&restore.original_folder)?;
-    let retained = LibraryPath::parse(&restore.retained_folder)?;
-    let temporary = LibraryPath::parse(&restore.restore_folder)?;
-    let parent_path = original.parent();
-    let final_name = original.as_str().rsplit('/').next().ok_or_else(conflict)?;
-    let retained_name = retained.as_str().rsplit('/').next().ok_or_else(conflict)?;
-    let temporary_name = temporary.as_str().rsplit('/').next().ok_or_else(conflict)?;
-    if original.as_str().is_empty()
-        || retained.parent() != parent_path
-        || temporary.parent() != parent_path
-        || !retained_name.starts_with(".domus-retained-")
-        || !temporary_name.starts_with(".domus-restore-")
-        || restore.original_album_identity == restore.replacement_album_identity
-    {
-        return Err(conflict());
+pub(crate) fn preview_album_restore(
+    store: &mut Store,
+    job: i64,
+    version: i64,
+    location_id: i64,
+) -> Result<AlbumRestorePreview> {
+    let restore = store.prepare_album_replacement_restore(job, version, location_id, None)?;
+    inspect_album_restore(store, job, version, location_id, &restore)
+}
+
+fn inspect_album_restore(
+    store: &Store,
+    job: i64,
+    version: i64,
+    location_id: i64,
+    restore: &AlbumReplacementRestore,
+) -> Result<AlbumRestorePreview> {
+    let destination = store
+        .publication_destinations(job, version)?
+        .into_iter()
+        .find(|destination| destination.id == restore.destination_id)
+        .ok_or_else(conflict)?;
+    let mut preview = AlbumRestorePreview {
+        job_id: job,
+        plan_version: version,
+        location_id,
+        destination_id: restore.destination_id,
+        review_id: restore.review_id,
+        root: restore.root.clone(),
+        root_identity: restore.root_identity.clone(),
+        original_folder: restore.original_folder.clone(),
+        retained_folder: restore.retained_folder.clone(),
+        restore_folder: restore.restore_folder.clone(),
+        state: restore.state.clone(),
+        retained_album_identity: restore.original_album_identity.clone(),
+        current_album_identity: restore.replacement_album_identity.clone(),
+        retained_files: restore.original_files.clone(),
+        current_files: restore.replacement_files.clone(),
+        verified: false,
+        unavailable_reason: None,
+        preview_sha256: None,
+        status: destination
+            .replacement
+            .and_then(|replacement| replacement.restore_status),
+    };
+    let inspected: Result<()> = (|| {
+        let folders = RestoreFolders::open(store, restore)?;
+        let old = (
+            restore.original_album_identity.as_str(),
+            restore.original_files.as_slice(),
+        );
+        if restore.state == "published" && restore.approved_preview.is_none() {
+            let current =
+                open_child_directory(&folders.parent, &folders.final_name)?.ok_or_else(conflict)?;
+            let (identity, files) = replacement_snapshot(&current, &folders.permissions)?;
+            if identity == restore.original_album_identity
+                || folder_version(
+                    &folders.parent,
+                    &folders.retained_name,
+                    old,
+                    (&identity, &files),
+                    &folders.permissions,
+                )? != Some(FolderVersion::Old)
+                || open_child_directory(&folders.parent, &folders.temporary_name)?.is_some()
+            {
+                return Err(conflict());
+            }
+            verify_replacement(&current, &files)?;
+            preview.current_album_identity = identity;
+            preview.current_files = files;
+        } else {
+            let new = (
+                restore.replacement_album_identity.as_str(),
+                restore.replacement_files.as_slice(),
+            );
+            let layout = (
+                folder_version(
+                    &folders.parent,
+                    &folders.final_name,
+                    old,
+                    new,
+                    &folders.permissions,
+                )?,
+                folder_version(
+                    &folders.parent,
+                    &folders.retained_name,
+                    old,
+                    new,
+                    &folders.permissions,
+                )?,
+                folder_version(
+                    &folders.parent,
+                    &folders.temporary_name,
+                    old,
+                    new,
+                    &folders.permissions,
+                )?,
+            );
+            restore_step(&restore.state, layout.0, layout.1, layout.2)?;
+        }
+        Ok(())
+    })();
+    match inspected {
+        Ok(()) => {
+            preview.verified = true;
+            preview.preview_sha256 = Some(preview.digest()?);
+        }
+        Err(error) => preview.unavailable_reason = Some(error.to_string()),
     }
+    Ok(preview)
+}
 
-    let permissions = FilePermissions::current()?;
-    let mut parent = root.into_directory();
-    checked(&parent, &permissions)?;
-    for name in parent_path.split('/').filter(|part| !part.is_empty()) {
-        check_case(&parent, name)?;
-        parent = parent.open_dir_nofollow(name)?;
+struct RestoreFolders {
+    parent: Dir,
+    permissions: FilePermissions,
+    final_name: String,
+    retained_name: String,
+    temporary_name: String,
+}
+
+impl RestoreFolders {
+    fn open(store: &Store, restore: &AlbumReplacementRestore) -> Result<Self> {
+        let root = LibraryDirectory::open(Path::new(&restore.root))?;
+        store.check_native_root(&restore.root, "media", root.native_root())?;
+        if root.native_root().identity != restore.root_identity {
+            return Err(conflict());
+        }
+
+        let original = LibraryPath::parse(&restore.original_folder)?;
+        let retained = LibraryPath::parse(&restore.retained_folder)?;
+        let temporary = LibraryPath::parse(&restore.restore_folder)?;
+        let parent_path = original.parent();
+        let final_name = original.as_str().rsplit('/').next().ok_or_else(conflict)?;
+        let retained_name = retained.as_str().rsplit('/').next().ok_or_else(conflict)?;
+        let temporary_name = temporary.as_str().rsplit('/').next().ok_or_else(conflict)?;
+        if original.as_str().is_empty()
+            || retained.parent() != parent_path
+            || temporary.parent() != parent_path
+            || !retained_name.starts_with(".domus-retained-")
+            || !temporary_name.starts_with(".domus-restore-")
+            || restore.original_album_identity == restore.replacement_album_identity
+        {
+            return Err(conflict());
+        }
+
+        let permissions = FilePermissions::current()?;
+        let mut parent = root.into_directory();
         checked(&parent, &permissions)?;
+        for name in parent_path.split('/').filter(|part| !part.is_empty()) {
+            check_case(&parent, name)?;
+            parent = parent.open_dir_nofollow(name)?;
+            checked(&parent, &permissions)?;
+        }
+        for name in [final_name, retained_name, temporary_name] {
+            check_case(&parent, name)?;
+        }
+        Ok(Self {
+            parent,
+            permissions,
+            final_name: final_name.into(),
+            retained_name: retained_name.into(),
+            temporary_name: temporary_name.into(),
+        })
     }
-    for name in [final_name, retained_name, temporary_name] {
-        check_case(&parent, name)?;
-    }
+}
+
+fn run_album_restore(store: &mut Store, restore: &AlbumReplacementRestore) -> Result<()> {
+    let RestoreFolders {
+        parent,
+        permissions,
+        final_name,
+        retained_name,
+        temporary_name,
+    } = RestoreFolders::open(store, restore)?;
+    let final_name = final_name.as_str();
+    let retained_name = retained_name.as_str();
+    let temporary_name = temporary_name.as_str();
     let old = (
         restore.original_album_identity.as_str(),
         restore.original_files.as_slice(),
@@ -144,103 +343,62 @@ pub(crate) fn restore_album_replacement(
     );
 
     let mut state = restore.state.as_str();
-    if state == "published" {
-        if (
-            folder_version(&parent, final_name, old, new, &permissions)?,
-            folder_version(&parent, retained_name, old, new, &permissions)?,
-            folder_version(&parent, temporary_name, old, new, &permissions)?,
-        ) != (Some(FolderVersion::New), Some(FolderVersion::Old), None)
-        {
-            return Err(conflict());
-        }
-        store.record_album_replacement_restore_state(
-            restore.destination_id,
-            "published",
-            "restore_prepared",
-        )?;
-        state = "restore_prepared";
-    }
     loop {
         let final_version = folder_version(&parent, final_name, old, new, &permissions)?;
         let retained_version = folder_version(&parent, retained_name, old, new, &permissions)?;
         let temporary_version = folder_version(&parent, temporary_name, old, new, &permissions)?;
-        match state {
-            "restore_prepared" => {
-                match (final_version, retained_version, temporary_version) {
-                    (Some(FolderVersion::New), Some(FolderVersion::Old), None) => {
-                        rename_no_replace(&parent, final_name, temporary_name)?;
-                        sync(&parent)?;
-                        if folder_version(&parent, temporary_name, old, new, &permissions)?
-                            != Some(FolderVersion::New)
-                        {
-                            return Err(conflict());
-                        }
-                    }
-                    (None, Some(FolderVersion::Old), Some(FolderVersion::New)) => {}
-                    _ => return Err(conflict()),
-                }
+        let rename = match restore_step(state, final_version, retained_version, temporary_version)?
+        {
+            RestoreStep::MoveCurrent => (final_name, temporary_name),
+            RestoreStep::MoveOriginal => (retained_name, final_name),
+            RestoreStep::RetainCurrent => (temporary_name, retained_name),
+            RestoreStep::Record(next) => {
                 sync(&parent)?;
                 store.record_album_replacement_restore_state(
                     restore.destination_id,
-                    "restore_prepared",
-                    "restore_current_moved",
+                    state,
+                    next,
                 )?;
-                state = "restore_current_moved";
+                state = next;
+                continue;
             }
-            "restore_current_moved" => {
-                match (final_version, retained_version, temporary_version) {
-                    (None, Some(FolderVersion::Old), Some(FolderVersion::New)) => {
-                        rename_no_replace(&parent, retained_name, final_name)?;
-                        sync(&parent)?;
-                        if folder_version(&parent, final_name, old, new, &permissions)?
-                            != Some(FolderVersion::Old)
-                        {
-                            return Err(conflict());
-                        }
-                    }
-                    (Some(FolderVersion::Old), None, Some(FolderVersion::New)) => {}
-                    _ => return Err(conflict()),
-                }
-                sync(&parent)?;
-                store.record_album_replacement_restore_state(
-                    restore.destination_id,
-                    "restore_current_moved",
-                    "restore_original_visible",
-                )?;
-                state = "restore_original_visible";
-            }
-            "restore_original_visible" => {
-                match (final_version, retained_version, temporary_version) {
-                    (Some(FolderVersion::Old), None, Some(FolderVersion::New)) => {
-                        rename_no_replace(&parent, temporary_name, retained_name)?;
-                        sync(&parent)?;
-                        if folder_version(&parent, retained_name, old, new, &permissions)?
-                            != Some(FolderVersion::New)
-                        {
-                            return Err(conflict());
-                        }
-                    }
-                    (Some(FolderVersion::Old), Some(FolderVersion::New), None) => {}
-                    _ => return Err(conflict()),
-                }
-                sync(&parent)?;
-                store.record_album_replacement_restore_state(
-                    restore.destination_id,
-                    "restore_original_visible",
-                    "restored",
-                )?;
-                state = "restored";
-            }
-            "restored" => {
-                if (final_version, retained_version, temporary_version)
-                    != (Some(FolderVersion::Old), Some(FolderVersion::New), None)
-                {
-                    return Err(conflict());
-                }
-                return Ok(());
-            }
-            _ => return Err(conflict()),
+            RestoreStep::Complete => return Ok(()),
+        };
+        rename_no_replace(&parent, rename.0, rename.1)?;
+        sync(&parent)?;
+    }
+}
+
+enum RestoreStep {
+    MoveCurrent,
+    MoveOriginal,
+    RetainCurrent,
+    Record(&'static str),
+    Complete,
+}
+
+fn restore_step(
+    state: &str,
+    visible: Option<FolderVersion>,
+    retained: Option<FolderVersion>,
+    temporary: Option<FolderVersion>,
+) -> Result<RestoreStep> {
+    use FolderVersion::{New, Old};
+    match (state, visible, retained, temporary) {
+        ("restore_prepared", Some(New), Some(Old), None) => Ok(RestoreStep::MoveCurrent),
+        ("restore_prepared", None, Some(Old), Some(New)) => {
+            Ok(RestoreStep::Record("restore_current_moved"))
         }
+        ("restore_current_moved", None, Some(Old), Some(New)) => Ok(RestoreStep::MoveOriginal),
+        ("restore_current_moved", Some(Old), None, Some(New)) => {
+            Ok(RestoreStep::Record("restore_original_visible"))
+        }
+        ("restore_original_visible", Some(Old), None, Some(New)) => Ok(RestoreStep::RetainCurrent),
+        ("restore_original_visible", Some(Old), Some(New), None) => {
+            Ok(RestoreStep::Record("restored"))
+        }
+        ("restored", Some(Old), Some(New), None) => Ok(RestoreStep::Complete),
+        _ => Err(conflict()),
     }
 }
 
@@ -272,6 +430,71 @@ fn folder_version(
     };
     verify_replacement(&directory, files)?;
     Ok(Some(version))
+}
+
+fn replacement_snapshot(
+    directory: &Dir,
+    permissions: &FilePermissions,
+) -> Result<(String, Vec<ReplacementFile>)> {
+    checked(directory, permissions)?;
+    let identity =
+        super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
+    let mut files = Vec::new();
+    let mut names = HashSet::new();
+    for entry in directory.entries()? {
+        if files.len() == 1001 {
+            return Err(Error::Conflict(
+                "existing album exceeds the replacement file limit".into(),
+            ));
+        }
+        let entry = entry?;
+        let name = entry.file_name().into_string().map_err(|_| conflict())?;
+        LibraryPath::parse(&name)?;
+        let metadata = entry.metadata()?;
+        if name.is_empty()
+            || name.contains('/')
+            || !metadata.is_file()
+            || is_unsafe_cap_link(&metadata)
+            || !names.insert(name.to_uppercase())
+        {
+            return Err(conflict());
+        }
+        let mut file = directory.open_with(&name, &read_options())?.into_std();
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || is_unsafe_link(&metadata) || metadata.len() > i64::MAX as u64 {
+            return Err(conflict());
+        }
+        let bytes = metadata.len();
+        let mut hash = Sha256::new();
+        let mut buffer = [0; 65_536];
+        let mut total = 0u64;
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            total = total.checked_add(count as u64).ok_or_else(conflict)?;
+            if total > bytes {
+                return Err(conflict());
+            }
+            hash.update(&buffer[..count]);
+        }
+        if total != bytes || file.metadata()?.len() != bytes {
+            return Err(conflict());
+        }
+        files.push(ReplacementFile {
+            name,
+            bytes,
+            sha256: format!("{:x}", hash.finalize()),
+        });
+    }
+    files.sort_by(|left, right| {
+        left.name
+            .to_uppercase()
+            .cmp(&right.name.to_uppercase())
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok((identity, files))
 }
 
 fn album_replacement_previews_for_location(
@@ -343,68 +566,8 @@ fn album_replacement_previews_for_location(
             Err(error) => return Err(error),
         };
         let (album_identity, existing_files) = if let Some(album) = album {
-            let identity = album.native_root().identity.clone();
-            let mut files = Vec::new();
-            let mut names = HashSet::new();
-            for entry in album.entries()? {
-                if files.len() == 1001 {
-                    return Err(Error::Conflict(
-                        "existing album exceeds the replacement file limit".into(),
-                    ));
-                }
-                let entry = entry?;
-                let name = entry.file_name().into_string().map_err(|_| {
-                    Error::Conflict("existing album has a non-Unicode filename".into())
-                })?;
-                LibraryPath::parse(&name)?;
-                let metadata = entry.metadata()?;
-                if !metadata.is_file() || is_unsafe_cap_link(&metadata) || name.contains('/') {
-                    return Err(Error::Conflict(
-                        "existing album contains a non-file or unsafe entry".into(),
-                    ));
-                }
-                if !names.insert(name.to_uppercase()) {
-                    return Err(Error::Conflict(
-                        "existing album contains case-colliding filenames".into(),
-                    ));
-                }
-                let mut file = album.open_file(entry.file_name().as_os_str())?;
-                let bytes = file.metadata()?.len();
-                let mut hash = Sha256::new();
-                let mut buffer = [0; 65_536];
-                let mut total = 0u64;
-                loop {
-                    let count = file.read(&mut buffer)?;
-                    if count == 0 {
-                        break;
-                    }
-                    total = total
-                        .checked_add(count as u64)
-                        .ok_or_else(|| Error::Conflict("existing file size overflowed".into()))?;
-                    if total > bytes {
-                        return Err(Error::Conflict(
-                            "existing file changed during replacement review".into(),
-                        ));
-                    }
-                    hash.update(&buffer[..count]);
-                }
-                if total != bytes || file.metadata()?.len() != bytes {
-                    return Err(Error::Conflict(
-                        "existing file changed during replacement review".into(),
-                    ));
-                }
-                files.push(ReplacementFile {
-                    name,
-                    bytes,
-                    sha256: format!("{:x}", hash.finalize()),
-                });
-            }
-            files.sort_by(|left, right| {
-                left.name
-                    .to_uppercase()
-                    .cmp(&right.name.to_uppercase())
-                    .then_with(|| left.name.cmp(&right.name))
-            });
+            let (identity, files) =
+                replacement_snapshot(&album.into_directory(), &FilePermissions::current()?)?;
             (Some(identity), files)
         } else {
             (None, Vec::new())

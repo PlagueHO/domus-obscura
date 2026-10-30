@@ -21,6 +21,7 @@ mod private_roots;
 mod publication;
 mod queries;
 mod queue;
+mod restore;
 mod sessions;
 mod source_candidates;
 mod transfer_evidence;
@@ -38,15 +39,16 @@ pub use normalization::{NormalizationRun, NormalizationWork};
 pub use planning::{
     ClaimedPlan, PlanDestination, PlanRequest, PreparedPlan, SettingsVersion, StoredPlan,
 };
-pub(crate) use publication::PublicationPreparation;
 pub(crate) use publication::replacement_hash;
 pub use publication::{
     AlbumReplacementDecision, AlbumReplacementPreview, AlbumReplacementRestoreDecision,
     AlbumReplacementReview, PublicationDestination, PublicationDestinationReplacement,
     PublicationFile, ReplacementFile,
 };
+pub(crate) use publication::{AlbumReplacementRestore, PublicationPreparation};
 pub use queries::{JobEvent, JobSummary};
 pub use queue::QueueSelection;
+pub use restore::{AlbumRestorePreview, AlbumRestoreStatus};
 pub use sessions::{CreatedSession, SessionCredential, SessionIdentity};
 pub use source_candidates::SourceCandidate;
 pub use transfer_evidence::{TransferEvidence, TransferObservation};
@@ -81,6 +83,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/025_library_metadata.sql"),
     include_str!("../../migrations/026_atomic_publication.sql"),
     include_str!("../../migrations/027_album_replacement.sql"),
+    include_str!("../../migrations/028_album_restore.sql"),
 ];
 
 pub struct Store {
@@ -1037,7 +1040,10 @@ impl Store {
             "UPDATE questions SET answer = ?3, answered_at = unixepoch()
              WHERE id = ?1 AND plan_version = ?2 AND answer IS NULL
              AND EXISTS(SELECT 1 FROM jobs WHERE id = questions.job_id
-                        AND plan_version = ?2 AND state = 'awaiting_input')",
+                        AND plan_version = ?2 AND (state = 'awaiting_input'
+                          OR (state='complete' AND EXISTS(
+                            SELECT 1 FROM album_restore_questions r
+                            WHERE r.question_id=questions.id AND r.resolved_at IS NULL))))",
             params![id, plan_version, choice],
         )?;
         if changed != 1 {

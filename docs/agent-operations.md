@@ -214,15 +214,42 @@ Library scans, direct refresh and sharing exclude pending, retained and
 album.
 
 After every destination completes, the connected API offers explicit restore
-of a retained original. It binds to the exact review, currently published
-manifest and native folder identity. Restore uses the same visibility lock and
-a durable multi-step journal. It moves the current published folder to a
+of a retained original, with a separate preview and confirmation for each
+destination. The GET on
+`/api/jobs/{id}/plans/{version}/publication/replacement/{location}/restore`
+reads and hashes both versions through checked native handles. A failed preview
+returns an explicit unverified result; its saved file lists are not current
+evidence. Preview does not approve or move files.
+
+The POST on the same route requires `expected_preview_sha256` for new restores,
+in addition to the saved review and publication binding. It repeats verification
+under the visibility lock before saving immutable approval and journal intent.
+Changed current files and supported flat-folder extras can be preserved after a
+fresh preview and approval. The retained original must still match its exact
+saved review. Missing folders, unsafe entries, changed roots, or changed retained
+originals block restore. Never accept a client-supplied replacement manifest.
+
+Restore uses the same visibility lock and a durable multi-step journal. It moves
+the current folder to a
 hidden `.domus-restore-*` sibling, restores the exact reviewed original, then
-retains the displaced publication. On retry, inspect and hash all possible
+retains the approved displaced current version. On retry, inspect and hash all possible
 folders before advancing a state. Never overwrite, delete or infer approval
 when a folder identity, manifest or saved transition differs. The API does not
-offer restoration while any destination remains pending. These safeguards do
-not constitute power-loss acceptance.
+offer restoration while any destination remains pending. Once intent is saved,
+continuation cannot approve changed files. Legacy interrupted restores remain
+bound to their original publication and replacement evidence; they do not gain
+permission to preserve different files.
+
+Restore errors and recovery questions are saved per destination and remain in
+Decisions across reloads. Saving an answer does not approve files or continue
+restore. Completed acquisition state and historical publication receipts remain
+unchanged. Inspect the restore journal to determine which version is visible.
+After a lost command response, read status and prepare a fresh preview before
+an explicit continuation. Repeated completed commands verify the saved result
+without another rename. Destinations complete independently; there is no
+cross-drive atomicity guarantee. These safeguards do not constitute power-loss
+acceptance. Recovery inventory, deletion, and restoring a later displaced version
+remain separate work.
 The sharing boundary hides incomplete publication destinations. Publication
 holds the stable native exclusive visibility lock before journal intent and
 media changes. Browse responses and uploads hold the matching shared lock.

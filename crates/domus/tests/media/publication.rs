@@ -398,6 +398,7 @@ fn replacement_restore_is_state_bound_and_recovers_after_displacing_the_current_
         .as_ref()
         .ok_or("replacement journal")?;
     let decision = domus::infrastructure::store::AlbumReplacementRestoreDecision {
+        expected_preview_sha256: None,
         review_id: replacement.review_id,
         expected_manifest_sha256: destination.manifest_sha256.clone(),
         expected_album_identity: destination
@@ -437,6 +438,16 @@ fn replacement_restore_is_state_bound_and_recovers_after_displacing_the_current_
         [destination.id],
     )?;
     std::fs::rename(&current, &temporary)?;
+    raw.execute_batch(
+        "DROP TRIGGER immutable_album_restore_question_binding;
+         DROP TRIGGER retained_album_restore_approval;
+         DROP TRIGGER immutable_album_restore_approval;
+         DROP TABLE album_restore_questions;
+         DROP TABLE album_restore_status;
+         DROP TABLE album_restore_approvals;
+         PRAGMA user_version=27;",
+    )?;
+    fixture.store = Store::open(&fixture.database)?;
     assert!(
         domus::application::sharing::inspect_share_folder(
             &fixture.store,
@@ -497,6 +508,12 @@ fn replacement_restore_is_state_bound_and_recovers_after_displacing_the_current_
             .state,
         "restored"
     );
+    assert_eq!(
+        raw.query_row("SELECT COUNT(*) FROM album_restore_approvals", [], |row| {
+            row.get::<_, i64>(0)
+        })?,
+        0,
+    );
     Ok(())
 }
 
@@ -531,6 +548,671 @@ fn replacement_rejects_changed_original_files_without_displacing_them() -> TestR
                 .file_name()
                 .to_string_lossy()
                 .starts_with(".domus-retained-"))
+    );
+    Ok(())
+}
+
+fn restore_fixture() -> Result<
+    (
+        Fixture,
+        domus::infrastructure::store::PublicationDestination,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let mut fixture = Fixture::build_with_replacement(
+        AudioFormat::Flac,
+        true,
+        super::ReplacementAction::Replace,
+    )?;
+    let run = normalized(&mut fixture)?;
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run,
+        )?,
+        "complete"
+    );
+    let destination = fixture
+        .store
+        .publication_destinations(fixture.job, fixture.version)?
+        .into_iter()
+        .find(|destination| destination.location_id == fixture.main)
+        .ok_or("main destination")?;
+    Ok((fixture, destination))
+}
+
+fn restore_decision(
+    fixture: &mut Fixture,
+    destination: &domus::infrastructure::store::PublicationDestination,
+) -> Result<domus::infrastructure::store::AlbumReplacementRestoreDecision, Box<dyn std::error::Error>>
+{
+    let preview = domus::application::preview_album_restore(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        destination.location_id,
+    )?;
+    assert!(preview.verified, "{:?}", preview.unavailable_reason);
+    Ok(
+        domus::infrastructure::store::AlbumReplacementRestoreDecision {
+            review_id: destination
+                .replacement
+                .as_ref()
+                .ok_or("replacement")?
+                .review_id,
+            expected_manifest_sha256: destination.manifest_sha256.clone(),
+            expected_album_identity: destination.album_identity.clone().ok_or("album identity")?,
+            expected_preview_sha256: preview.preview_sha256,
+        },
+    )
+}
+
+#[test]
+fn replacement_restore_previews_changed_current_files_and_keeps_them_after_fresh_approval()
+-> TestResult {
+    use domus::domain::Page;
+    use domus::infrastructure::store::QuestionRecovery;
+    let (mut fixture, destination) = restore_fixture()?;
+    let before = restore_decision(&mut fixture, &destination)?;
+    let current = album(&fixture, fixture._library.path())?;
+    std::fs::write(current.join("new extra.txt"), b"keep this changed file")?;
+    std::fs::write(current.join("folder.jpg"), b"user changed current cover")?;
+    assert!(
+        domus::application::restore_album_replacement(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+            before,
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(current.join("new extra.txt"))?,
+        b"keep this changed file"
+    );
+    let raw = Connection::open(&fixture.database)?;
+    assert_eq!(
+        raw.query_row("SELECT COUNT(*) FROM album_restore_approvals", [], |row| {
+            row.get::<_, i64>(0)
+        })?,
+        0
+    );
+    let mut reopened = Store::open(&fixture.database)?;
+    let inbox = reopened.inbox(Page::new(0, 10)?)?;
+    assert_eq!(inbox.len(), 1);
+    let question = &inbox[0];
+    let details = reopened.question_details(question.id)?;
+    assert!(details.current);
+    assert_eq!(details.job_state, "complete");
+    assert!(
+        matches!(details.recovery, QuestionRecovery::AlbumRestore { destination_id, .. } if destination_id == destination.id)
+    );
+    assert!(
+        reopened
+            .answer(question.id, fixture.version + 1, "Review restore state")
+            .is_err()
+    );
+    reopened.answer(question.id, fixture.version, "Review restore state")?;
+    assert_eq!(reopened.inbox(Page::new(0, 10)?)?.len(), 1);
+    assert_eq!(
+        std::fs::read(current.join("new extra.txt"))?,
+        b"keep this changed file"
+    );
+    let preview = domus::application::preview_album_restore(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        fixture.main,
+    )?;
+    assert!(preview.verified);
+    assert!(
+        preview
+            .current_files
+            .iter()
+            .any(|file| file.name == "new extra.txt" && file.bytes == 22)
+    );
+    assert!(
+        preview
+            .retained_files
+            .iter()
+            .any(|file| file.name == "manual.txt")
+    );
+    let decision = restore_decision(&mut fixture, &destination)?;
+    let result = domus::application::restore_album_replacement(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        fixture.main,
+        decision,
+    )?;
+    let replacement = result.replacement.ok_or("replacement")?;
+    assert_eq!(replacement.state, "restored");
+    let retained = fixture._library.path().join(
+        replacement
+            .retained_folder
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    assert_eq!(
+        std::fs::read(retained.join("new extra.txt"))?,
+        b"keep this changed file"
+    );
+    assert_eq!(
+        std::fs::read(retained.join("folder.jpg"))?,
+        b"user changed current cover"
+    );
+    assert_eq!(std::fs::read(current.join("manual.txt"))?, b"user extra");
+    assert!(reopened.inbox(Page::new(0, 10)?)?.is_empty());
+    assert!(!reopened.question_details(question.id)?.current);
+    assert!(
+        raw.execute(
+            "UPDATE album_restore_approvals SET album_identity='different'",
+            []
+        )
+        .is_err()
+    );
+    assert!(
+        raw.execute("DELETE FROM album_restore_approvals", [])
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn replacement_restore_rejects_old_commands_and_changed_retained_files() -> TestResult {
+    let (mut fixture, destination) = restore_fixture()?;
+    let mut decision = restore_decision(&mut fixture, &destination)?;
+    decision.expected_preview_sha256 = None;
+    assert!(
+        domus::application::restore_album_replacement(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+            decision,
+        )
+        .is_err()
+    );
+    let replacement = destination.replacement.as_ref().ok_or("replacement")?;
+    let retained = fixture._library.path().join(
+        replacement
+            .retained_folder
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    std::fs::write(retained.join("manual.txt"), b"changed original")?;
+    let preview = domus::application::preview_album_restore(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        fixture.main,
+    )?;
+    assert!(!preview.verified);
+    assert!(preview.preview_sha256.is_none());
+    assert!(preview.unavailable_reason.is_some());
+    assert_eq!(
+        std::fs::read(retained.join("manual.txt"))?,
+        b"changed original"
+    );
+    assert_eq!(
+        std::fs::read(album(&fixture, fixture._library.path())?.join("folder.jpg"))?,
+        fixture.cover.bytes()
+    );
+    Ok(())
+}
+
+#[test]
+fn replacement_restore_recovers_each_journal_boundary_without_duplicate_effects() -> TestResult {
+    for next in [
+        "restore_prepared",
+        "restore_current_moved",
+        "restore_original_visible",
+        "restored",
+    ] {
+        let (mut fixture, destination) = restore_fixture()?;
+        let decision = restore_decision(&mut fixture, &destination)?;
+        let raw = Connection::open(&fixture.database)?;
+        raw.execute_batch(&format!(
+            "CREATE TRIGGER interrupt_restore BEFORE UPDATE OF state ON publication_replacement_journal
+             WHEN NEW.state='{next}' BEGIN SELECT RAISE(ABORT,'injected restore interruption'); END;"
+        ))?;
+        for _ in 0..2 {
+            assert!(
+                domus::application::restore_album_replacement(
+                    &mut fixture.store,
+                    fixture.job,
+                    fixture.version,
+                    fixture.main,
+                    decision.clone(),
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            raw.query_row(
+                "SELECT COUNT(*) FROM album_restore_questions WHERE resolved_at IS NULL",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1
+        );
+        raw.execute_batch("DROP TRIGGER interrupt_restore")?;
+        fixture.store = Store::open(&fixture.database)?;
+        let decision = restore_decision(&mut fixture, &destination)?;
+        domus::application::restore_album_replacement(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+            decision,
+        )?;
+        let completed = restore_decision(&mut fixture, &destination)?;
+        for _ in 0..2 {
+            domus::application::restore_album_replacement(
+                &mut fixture.store,
+                fixture.job,
+                fixture.version,
+                fixture.main,
+                completed.clone(),
+            )?;
+        }
+        assert_eq!(
+            std::fs::read(album(&fixture, fixture._library.path())?.join("manual.txt"))?,
+            b"user extra"
+        );
+        assert_eq!(
+            raw.query_row("SELECT COUNT(*) FROM album_restore_approvals", [], |row| {
+                row.get::<_, i64>(0)
+            })?,
+            1
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn replacement_restore_keeps_fixed_approval_when_interrupted_files_change() -> TestResult {
+    let (mut fixture, destination) = restore_fixture()?;
+    let decision = restore_decision(&mut fixture, &destination)?;
+    let raw = Connection::open(&fixture.database)?;
+    raw.execute_batch(
+        "CREATE TRIGGER interrupt_restore BEFORE UPDATE OF state ON publication_replacement_journal
+         WHEN NEW.state='restore_current_moved' BEGIN SELECT RAISE(ABORT,'interrupt'); END;",
+    )?;
+    assert!(
+        domus::application::restore_album_replacement(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+            decision.clone(),
+        )
+        .is_err()
+    );
+    raw.execute_batch("DROP TRIGGER interrupt_restore")?;
+    let replacement = destination.replacement.as_ref().ok_or("replacement")?;
+    let temporary = fixture._library.path().join(
+        replacement
+            .restore_folder
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    std::fs::write(temporary.join("unexpected.txt"), b"external change")?;
+    let preview = domus::application::preview_album_restore(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        fixture.main,
+    )?;
+    assert!(!preview.verified);
+    assert!(
+        domus::application::restore_album_replacement(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+            decision,
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(temporary.join("unexpected.txt"))?,
+        b"external change"
+    );
+    assert_eq!(
+        raw.query_row("SELECT COUNT(*) FROM album_restore_approvals", [], |row| {
+            row.get::<_, i64>(0)
+        })?,
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn replacement_restore_continues_committed_states_before_the_next_rename() -> TestResult {
+    for state in [
+        "restore_prepared",
+        "restore_current_moved",
+        "restore_original_visible",
+    ] {
+        let (mut fixture, destination) = restore_fixture()?;
+        let preview = domus::application::preview_album_restore(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+        )?;
+        assert!(preview.verified);
+        let replacement = destination.replacement.as_ref().ok_or("replacement")?;
+        let native = |relative: &str| {
+            fixture
+                ._library
+                .path()
+                .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR))
+        };
+        let current = native(&replacement.original_folder);
+        let retained = native(&replacement.retained_folder);
+        let temporary = native(&replacement.restore_folder);
+        let raw = Connection::open(&fixture.database)?;
+        raw.execute(
+            "INSERT INTO album_restore_approvals
+             (destination_id,preview_sha256,album_identity,current_files) VALUES (?1,?2,?3,?4)",
+            params![
+                destination.id,
+                preview.preview_sha256,
+                preview.current_album_identity,
+                serde_json::to_string(&preview.current_files)?,
+            ],
+        )?;
+        raw.execute(
+            "UPDATE publication_replacement_journal SET state='restore_prepared'
+             WHERE destination_id=?1",
+            [destination.id],
+        )?;
+        if state != "restore_prepared" {
+            std::fs::rename(&current, &temporary)?;
+            raw.execute(
+                "UPDATE publication_replacement_journal SET state='restore_current_moved'
+                 WHERE destination_id=?1",
+                [destination.id],
+            )?;
+        }
+        if state == "restore_original_visible" {
+            std::fs::rename(&retained, &current)?;
+            raw.execute(
+                "UPDATE publication_replacement_journal SET state='restore_original_visible'
+                 WHERE destination_id=?1",
+                [destination.id],
+            )?;
+        }
+        fixture.store = Store::open(&fixture.database)?;
+        let decision = restore_decision(&mut fixture, &destination)?;
+        domus::application::restore_album_replacement(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+            decision,
+        )?;
+        assert_eq!(std::fs::read(current.join("manual.txt"))?, b"user extra");
+        assert_eq!(
+            std::fs::read(retained.join("folder.jpg"))?,
+            fixture.cover.bytes()
+        );
+        assert!(!temporary.exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn replacement_restore_reports_offline_destinations_and_continues_them_independently() -> TestResult
+{
+    let backup = tempdir()?;
+    let offline = backup.path().with_extension("restore-offline");
+    let mut fixture = Fixture::build_with_backup_replacement(
+        AudioFormat::Flac,
+        true,
+        backup.path(),
+        super::ReplacementAction::Replace,
+    )?;
+    let run = normalized(&mut fixture)?;
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run,
+        )?,
+        "complete"
+    );
+    let destinations = fixture
+        .store
+        .publication_destinations(fixture.job, fixture.version)?;
+    let main = destinations
+        .iter()
+        .find(|item| item.kind == "main")
+        .ok_or("main")?;
+    let other = destinations
+        .iter()
+        .find(|item| item.kind == "backup")
+        .ok_or("backup")?;
+    let main_decision = restore_decision(&mut fixture, main)?;
+    domus::application::restore_album_replacement(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        main.location_id,
+        main_decision,
+    )?;
+    let decision = restore_decision(&mut fixture, other)?;
+    let raw = Connection::open(&fixture.database)?;
+    raw.execute_batch(
+        "CREATE TRIGGER interrupt_restore BEFORE UPDATE OF state ON publication_replacement_journal
+         WHEN NEW.state='restore_current_moved' BEGIN SELECT RAISE(ABORT,'interrupt'); END;",
+    )?;
+    assert!(
+        domus::application::restore_album_replacement(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            other.location_id,
+            decision.clone(),
+        )
+        .is_err()
+    );
+    raw.execute_batch("DROP TRIGGER interrupt_restore")?;
+    std::fs::rename(backup.path(), &offline)?;
+    let preview = domus::application::preview_album_restore(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        other.location_id,
+    );
+    let result = domus::application::restore_album_replacement(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        other.location_id,
+        decision,
+    );
+    std::fs::rename(&offline, backup.path())?;
+    assert!(!preview?.verified);
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read(album(&fixture, fixture._library.path())?.join("manual.txt"))?,
+        b"user extra"
+    );
+    fixture.store = Store::open(&fixture.database)?;
+    let next = restore_decision(&mut fixture, other)?;
+    let restored = domus::application::restore_album_replacement(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        other.location_id,
+        next,
+    )?;
+    assert_eq!(restored.replacement.ok_or("replacement")?.state, "restored");
+    assert_eq!(
+        std::fs::read(album(&fixture, backup.path())?.join("manual.txt"))?,
+        b"user extra"
+    );
+    Ok(())
+}
+
+#[test]
+fn replacement_restore_rejects_replaced_folder_identity_and_nested_entries() -> TestResult {
+    for invalid in [
+        "retained_identity",
+        "nested_current",
+        "missing_retained",
+        "case_collision",
+    ] {
+        let (mut fixture, destination) = restore_fixture()?;
+        let decision = restore_decision(&mut fixture, &destination)?;
+        let replacement = destination.replacement.as_ref().ok_or("replacement")?;
+        let retained = fixture._library.path().join(
+            replacement
+                .retained_folder
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
+        let current = album(&fixture, fixture._library.path())?;
+        match invalid {
+            "retained_identity" => {
+                std::fs::rename(&retained, retained.with_extension("preserved"))?;
+                std::fs::create_dir(&retained)?;
+            }
+            "nested_current" => std::fs::create_dir(current.join("nested"))?,
+            "missing_retained" => std::fs::rename(&retained, retained.with_extension("preserved"))?,
+            "case_collision" => {
+                // Linux permits both spellings; Windows replaces the same file.
+                std::fs::write(current.join("FOLDER.JPG"), b"changed cover")?;
+            }
+            _ => unreachable!(),
+        }
+        let preview = domus::application::preview_album_restore(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+        )?;
+        if invalid != "case_collision" || cfg!(unix) {
+            assert!(!preview.verified);
+        }
+        assert!(
+            domus::application::restore_album_replacement(
+                &mut fixture.store,
+                fixture.job,
+                fixture.version,
+                fixture.main,
+                decision,
+            )
+            .is_err()
+        );
+        assert!(current.exists());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn replacement_restore_rejects_symlinks_in_current_and_retained_versions() -> TestResult {
+    for retained_version in [false, true] {
+        let (mut fixture, destination) = restore_fixture()?;
+        let replacement = destination.replacement.as_ref().ok_or("replacement")?;
+        let folder = if retained_version {
+            fixture._library.path().join(&replacement.retained_folder)
+        } else {
+            album(&fixture, fixture._library.path())?
+        };
+        std::os::unix::fs::symlink(fixture.scratch.path(), folder.join("unsafe"))?;
+        let preview = domus::application::preview_album_restore(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+        )?;
+        assert!(!preview.verified);
+        assert!(preview.preview_sha256.is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn replacement_restore_api_requires_guards_and_exact_preview() -> TestResult {
+    use axum::body::{Body, to_bytes};
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+    let (mut fixture, destination) = restore_fixture()?;
+    let router = domus::infrastructure::api::Api::development(
+        "https://localhost:8443",
+        Store::open(&fixture.database)?,
+    )?
+    .router();
+    let path = format!(
+        "/api/jobs/{}/plans/{}/publication/replacement/{}/restore",
+        fixture.job, fixture.version, fixture.main
+    );
+    let peer = ConnectInfo("127.0.0.1:32100".parse::<std::net::SocketAddr>()?);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header("host", "localhost:8443")
+                .extension(peer)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: domus::infrastructure::store::AlbumRestorePreview =
+        serde_json::from_slice(&to_bytes(response.into_body(), 2_000_000).await?)?;
+    assert!(preview.verified);
+    let decision = restore_decision(&mut fixture, &destination)?;
+    let body = serde_json::to_string(&decision)?;
+    for (origin, csrf) in [
+        (None, None),
+        (Some("https://wrong.invalid"), Some("1")),
+        (Some("https://localhost:8443"), None),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(&path)
+            .header("host", "localhost:8443")
+            .extension(peer)
+            .header("content-type", "application/json");
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        if let Some(csrf) = csrf {
+            request = request.header("x-domus-csrf", csrf);
+        }
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request.body(Body::from(body.clone()))?)
+                .await?
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header("host", "localhost:8443")
+                .extension(peer)
+                .header("content-type", "application/json")
+                .header("origin", "https://localhost:8443")
+                .header("x-domus-csrf", "1")
+                .body(Body::from(body))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read(album(&fixture, fixture._library.path())?.join("manual.txt"))?,
+        b"user extra"
     );
     Ok(())
 }
@@ -833,6 +1515,15 @@ fn replacement_keeps_backup_pending_when_offline_and_reuses_its_saved_decision()
         "backup_pending"
     );
     verify_album(&fixture, run, fixture._library.path())?;
+    assert!(
+        domus::application::preview_album_restore(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+        )
+        .is_err()
+    );
     std::fs::rename(&offline, backup.path())?;
     let reclaimed = fixture
         .store
@@ -1429,7 +2120,7 @@ fn schema_fifteen_upgrade_preserves_completed_normalization_and_approval() -> Te
     fixture.store = Store::open(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        27
+        28
     );
     assert_eq!(
         raw.query_row(
