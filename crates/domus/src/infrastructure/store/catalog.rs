@@ -6,6 +6,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 /// A single-use network capability. The OS lock survives suspension and wall
@@ -14,11 +18,48 @@ pub struct CatalogPermit {
     generation: i64,
     issued: Instant,
     started: bool,
+    observed_retry_after: u32,
     database: PathBuf,
-    _lock: File,
+    cancelled: Option<Arc<AtomicBool>>,
+    _lock: Arc<File>,
 }
 
 impl CatalogPermit {
+    pub(crate) fn cancel_before_start(&mut self, cancelled: Arc<AtomicBool>) {
+        self.cancelled = Some(cancelled);
+    }
+
+    /// Persist header evidence before body I/O. The caller retains the native
+    /// lock while the independent blocking connection fences this update.
+    pub async fn record_retry_after(&mut self, seconds: u32) -> Result<()> {
+        if !self.started {
+            return Err(Error::Conflict("provider request has not started".into()));
+        }
+        if seconds == 0 {
+            return Ok(());
+        }
+        self.observed_retry_after = self.observed_retry_after.max(seconds);
+        let path = self.database.clone();
+        let generation = self.generation;
+        let lock = self._lock.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = lock;
+            let store = Store::open_current_existing(&path)?;
+            let changed = store.connection.execute(
+                "UPDATE catalog_gate SET delay_seconds=max(delay_seconds,?1),
+                     next_request_ms=CASE WHEN ?1=4294967295 THEN 9223372036854775807 ELSE next_request_ms END
+                 WHERE id=1 AND generation=?2 AND lease_until_ms>0",
+                params![seconds, generation],
+            )?;
+            if changed != 1 {
+                return Err(Error::Conflict("provider header claim is stale".into()));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::Internal("provider header persistence task failed"))?
+    }
+
     pub(crate) async fn start(&mut self) -> Result<()> {
         if !self.started {
             tokio::time::sleep_until(tokio::time::Instant::from_std(
@@ -30,6 +71,13 @@ impl CatalogPermit {
     }
 
     pub(crate) fn check_start(&mut self) -> Result<()> {
+        if self
+            .cancelled
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            return Err(Error::Busy("metadata request cancelled before submission"));
+        }
         let elapsed = self.issued.elapsed();
         if self.started || !(Duration::from_secs(1)..Duration::from_secs(5)).contains(&elapsed) {
             return Err(Error::Catalog {
@@ -61,12 +109,15 @@ pub enum CatalogProviderState {
     Active,
     Backoff,
     Paused,
+    Saturated,
 }
 
+/// Provider status. A missing known interval means no ready time is known.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct CatalogStatus {
     pub state: CatalogProviderState,
     pub retry_after_seconds: u32,
+    pub known_retry_after_seconds: Option<u32>,
     pub failures: u32,
 }
 
@@ -101,7 +152,7 @@ impl Store {
                 &self.path,
                 generation,
                 lease != 0,
-                if lease != 0 { 60 } else { delay },
+                if lease != 0 { delay.max(60) } else { delay },
             )?
         };
         let state = if next == i64::MAX {
@@ -116,6 +167,11 @@ impl Store {
         Ok(CatalogStatus {
             state,
             retry_after_seconds: remaining.max(u32::from(owned)),
+            known_retry_after_seconds: if owned || next == i64::MAX {
+                None
+            } else {
+                Some(remaining)
+            },
             failures,
         })
     }
@@ -128,11 +184,14 @@ impl Store {
                 "explicit provider-pause acknowledgment is required".into(),
             ));
         }
-        let _lock = self.lock_catalog_request()?;
+        let _lock = self.lock_catalog_request().map_err(|error| match error {
+            Error::Catalog { .. } => Error::ProviderActive,
+            error => error,
+        })?;
         let changed = self.connection.execute(
             "UPDATE catalog_gate SET generation=generation+1, lease_until_ms=0, failures=0,
                  next_request_ms=CAST(unixepoch('subsec') * 1000 AS INTEGER)+1000, delay_seconds=1
-             WHERE id=1 AND next_request_ms=?1 AND lease_until_ms=0
+             WHERE id=1 AND next_request_ms=?1
                  AND generation<9223372036854775807",
             [i64::MAX],
         )?;
@@ -254,7 +313,7 @@ impl Store {
                 &self.path,
                 generation,
                 lease != 0,
-                if lease != 0 { 60 } else { delay },
+                if lease != 0 { delay.max(60) } else { delay },
             )?
         };
         if remaining > 0 {
@@ -267,7 +326,7 @@ impl Store {
             .checked_add(1)
             .ok_or(Error::Internal("catalog request generation exhausted"))?;
         transaction.execute(
-            "UPDATE catalog_gate SET generation = ?1, lease_until_ms = ?2 WHERE id = 1",
+            "UPDATE catalog_gate SET generation = ?1, lease_until_ms = ?2, delay_seconds=0 WHERE id = 1",
             params![generation, now + 60000],
         )?;
         transaction.commit()?;
@@ -275,8 +334,10 @@ impl Store {
             generation,
             issued: Instant::now(),
             started: false,
+            observed_retry_after: 0,
             database: self.path.clone(),
-            _lock: lock,
+            cancelled: None,
+            _lock: Arc::new(lock),
         })
     }
 
@@ -356,16 +417,19 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (now, generation, lease, failures): (i64, i64, i64, u32) = transaction.query_row(
-            "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER), generation, lease_until_ms, failures
+        let (now, generation, lease, failures, saved): (i64, i64, i64, u32, u32) = transaction.query_row(
+            "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER), generation, lease_until_ms, failures, delay_seconds
              FROM catalog_gate WHERE id = 1", [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )?;
         if generation != permit.generation || lease <= 0 {
             return Err(Error::Conflict(
                 "catalog request lease changed or expired".into(),
             ));
         }
+        let retry_after_seconds = retry_after_seconds
+            .max(saved)
+            .max(permit.observed_retry_after);
         let (cooldown, failures) = if successful {
             (retry_after_seconds.max(1), 0)
         } else {
@@ -449,6 +513,99 @@ impl Store {
 
 fn catalog_key(source: &str) -> Result<crate::application::services::cache::CacheKey> {
     crate::application::services::cache::CacheKey::new("musicbrainz", "responses-v1", source)
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn provider_header_persistence_failure_cannot_shorten_completion_backoff() -> Result<()> {
+        for seconds in [120, u32::MAX] {
+            let root = tempfile::tempdir()?;
+            let mut store = Store::open(&root.path().join("state.db"))?;
+            let mut permit = store.claim_catalog_request()?;
+            permit.issued -= Duration::from_secs(1);
+            permit.check_start()?;
+            store.connection.execute_batch(
+                "CREATE TRIGGER reject_provider_headers BEFORE UPDATE OF delay_seconds ON catalog_gate
+                 WHEN NEW.lease_until_ms>0
+                 BEGIN SELECT RAISE(ABORT, 'isolated header persistence failure'); END;",
+            )?;
+            let Err(error) = permit.record_retry_after(seconds).await else {
+                return Err(Error::Internal("the fixture must reject the header write"));
+            };
+            assert!(matches!(error, Error::Database(_)));
+            let query = CatalogQuery::artists("fixture", 0, 25)?;
+            let result = crate::application::catalog::complete_catalog(
+                &mut store,
+                query,
+                permit,
+                Err(error),
+                CatalogQuery::parse_artists,
+            );
+            assert!(matches!(result, Err(Error::Database(_))));
+            assert!(store.catalog_status()?.retry_after_seconds >= seconds.saturating_sub(1));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_headers_survive_abandonment_and_shorter_completion() -> Result<()> {
+        for seconds in [120, u32::MAX] {
+            let root = tempfile::tempdir()?;
+            let path = root.path().join("state.db");
+            let mut store = Store::open(&path)?;
+            let mut permit = store.claim_catalog_request()?;
+            permit.issued -= Duration::from_secs(1);
+            permit.check_start()?;
+            permit.record_retry_after(seconds).await?;
+            assert!(store.catalog_status()?.known_retry_after_seconds.is_none());
+            if seconds == u32::MAX {
+                assert!(matches!(
+                    store.resume_catalog_requests(true),
+                    Err(Error::ProviderActive)
+                ));
+                drop(permit);
+                assert_eq!(store.catalog_status()?.retry_after_seconds, u32::MAX);
+                assert!(store.resume_catalog_requests(false).is_err());
+                store.resume_catalog_requests(true)?;
+            } else {
+                let completion = store.complete_catalog_request(permit, 5, None)?;
+                assert_eq!(completion.retry_after_seconds, seconds);
+                assert!(store.catalog_status()?.retry_after_seconds >= seconds - 1);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_header_claims_are_started_fenced_and_preserve_the_longest_interval()
+    -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let mut store = Store::open(&root.path().join("state.db"))?;
+        let mut permit = store.claim_catalog_request()?;
+        assert!(permit.record_retry_after(120).await.is_err());
+        permit.issued -= Duration::from_secs(1);
+        permit.check_start()?;
+        permit.record_retry_after(240).await?;
+        permit.record_retry_after(120).await?;
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT delay_seconds FROM catalog_gate", [], |row| row
+                    .get::<_, u32>(0))?,
+            240
+        );
+        store
+            .connection
+            .execute("UPDATE catalog_gate SET generation=generation+1", [])?;
+        assert!(matches!(
+            permit.record_retry_after(600).await,
+            Err(Error::Conflict(_))
+        ));
+        Ok(())
+    }
 }
 
 fn shared_catalog(

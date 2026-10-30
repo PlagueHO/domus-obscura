@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Search, nextArtistOffset, searchGap } from "./Search";
+import { Search, nextArtistOffset } from "./Search";
 import { EditionChoices, editionLabel } from "./Catalog";
 
 afterEach(() => vi.useRealTimers());
@@ -55,32 +55,5 @@ describe("grouped provider search", () => {
     expect(nextArtistOffset({ offset: 24, count: 40, items: [artist] })).toBe(25);
     expect(nextArtistOffset({ offset: 39, count: 40, items: [artist] })).toBeNull();
     expect(nextArtistOffset({ offset: 24, count: 40, items: [] })).toBeNull();
-  });
-
-  it("spaces distinct requests without retrying any failed operation", async () => {
-    vi.useFakeTimers();
-    const controller = new AbortController();
-    let ready = false;
-    const gap = searchGap(controller.signal).then(() => {
-      ready = true;
-    });
-    await vi.advanceTimersByTimeAsync(1099);
-    expect(ready).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    await gap;
-    expect(ready).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it("cancels pending scheduling on navigation before a provider request starts", async () => {
-    vi.useFakeTimers();
-    const controller = new AbortController();
-    const gap = searchGap(controller.signal);
-    const rejected = expect(gap).rejects.toMatchObject({ name: "AbortError" });
-    controller.abort(new DOMException("Navigation changed", "AbortError"));
-    await rejected;
-    expect(vi.getTimerCount()).toBe(0);
-    await expect(searchGap(controller.signal)).rejects.toMatchObject({ name: "AbortError" });
-    expect(vi.getTimerCount()).toBe(0);
   });
 });

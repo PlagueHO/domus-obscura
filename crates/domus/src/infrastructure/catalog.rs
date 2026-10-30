@@ -493,7 +493,17 @@ impl MusicBrainzClient {
             .send()
             .await
             .map_err(|_| bad("MusicBrainz HTTPS request failed"))?;
-        let retry_after_seconds = response_retry_after(response.headers())?;
+        let retry = response_retry_after(response.headers());
+        let observed = match &retry {
+            Ok(seconds) => *seconds,
+            Err(Error::Catalog {
+                retry_after_seconds,
+                ..
+            }) => *retry_after_seconds,
+            Err(_) => 0,
+        };
+        permit.record_retry_after(observed).await?;
+        let retry_after_seconds = retry?;
         let failure = |reason| Error::Catalog {
             reason,
             retry_after_seconds: retry_after_seconds.max(5),

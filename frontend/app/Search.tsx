@@ -4,31 +4,11 @@ import type { CatalogPage } from "../src/generated/CatalogPage";
 import type { CatalogReleasePage } from "../src/generated/CatalogReleasePage";
 import type { CatalogResult } from "../src/generated/CatalogResult";
 import { query, request } from "./api";
-import { useResource } from "./hooks";
+import { useMetadataResource } from "./hooks";
 import { AlbumCard, ArtistCard } from "./components/Media";
 import { Alert, Button, Check, Empty, Pager } from "./components/ui";
 import type { Location } from "../src/generated/Location";
 import { LocalMatches } from "./LocalMatches";
-
-/** Space distinct search operations, not retries. The server's durable provider
- * budget remains authoritative, including any longer pause or backoff. */
-export function searchGap(signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    const abort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", abort);
-      resolve();
-    }, 1100);
-    signal.addEventListener("abort", abort, { once: true });
-  });
-}
 
 export function nextArtistOffset(page: CatalogPage<CatalogArtist>): number | null {
   const next = page.offset + page.items.length;
@@ -39,8 +19,7 @@ function SearchAlbums({ term, locations }: { term: string; locations: Location[]
   const [pages, setPages] = useState([0]);
   const offset = pages.at(-1) ?? 0;
   const [expanded, setExpanded] = useState(false);
-  const albums = useResource(async (signal) => {
-    await searchGap(signal);
+  const albums = useMetadataResource(async (signal) => {
     return request<CatalogResult<CatalogReleasePage>>(
       `/api/discovery/releases?${query({
         query: term,
@@ -108,7 +87,7 @@ function SearchResults({ term, locations }: { term: string; locations: Location[
   const [pages, setPages] = useState([0]);
   const offset = pages.at(-1) ?? 0;
   const [albumsReady, setAlbumsReady] = useState(false);
-  const artists = useResource(
+  const artists = useMetadataResource(
     (signal) =>
       request<CatalogResult<CatalogPage<CatalogArtist>>>(
         `/api/discovery/artists?${query({ query: term, offset, limit: 6 })}`,

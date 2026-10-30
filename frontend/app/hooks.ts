@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+/** Retained metadata is not fresh provider evidence after a failed refresh. */
+export function useMetadataResource<T>(load: (signal: AbortSignal) => Promise<T>, key: string) {
+  const resource = useResource(load, key);
+  return { ...resource, data: resource.loading || resource.error ? undefined : resource.data };
+}
+
 export function useResource<T>(
   load: (signal: AbortSignal) => Promise<T>,
   key: string,

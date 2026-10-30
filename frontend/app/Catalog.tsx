@@ -14,10 +14,9 @@ import type { StoredPlan } from "../src/generated/StoredPlan";
 import type { AudioProfile } from "../src/generated/AudioProfile";
 import type { RegisterLocation } from "../src/generated/RegisterLocation";
 import { query, request } from "./api";
-import { useCommand, useResource } from "./hooks";
+import { useCommand, useMetadataResource } from "./hooks";
 import { Alert, Badge, Button, Check, Cover, Empty, Pager } from "./components/ui";
 import { AlbumCard } from "./components/Media";
-import { searchGap } from "./Search";
 import { BackendConfiguration, ConfigurationCard } from "./BackendConfiguration";
 import { LocalMatches } from "./LocalMatches";
 import { AudioProfileSelect, audioProfileLabel, outputWithAudioPolicy } from "./audio-profiles";
@@ -28,7 +27,7 @@ export function ReleaseCard({ release }: { release: CatalogReleaseSummary }) {
 
 export function Artist({ id, locations = [] }: { id: string; locations?: Location[] }) {
   const [albumsReady, setAlbumsReady] = useState(false);
-  const artist = useResource(
+  const artist = useMetadataResource(
     (signal) =>
       request<CatalogResult<CatalogArtist>>(`/api/discovery/artists/${encodeURIComponent(id)}`, {
         signal,
@@ -80,8 +79,7 @@ function ArtistAlbums({ id }: { id: string }) {
   const [pages, setPages] = useState([0]);
   const offset = pages.at(-1) ?? 0;
   const [expanded, setExpanded] = useState(false);
-  const result = useResource(async (signal) => {
-    await searchGap(signal);
+  const result = useMetadataResource(async (signal) => {
     return request<CatalogResult<CatalogReleasePage>>(
       `/api/discovery/artists/${encodeURIComponent(id)}/releases?${query({
         offset,
@@ -187,8 +185,7 @@ function EditionBrowser({ current, group }: { current: CatalogReleaseSummary; gr
   const [pages, setPages] = useState([0]);
   const offset = pages.at(-1) ?? 0;
   const [unofficial, setUnofficial] = useState(false);
-  const editions = useResource(async (signal) => {
-    await searchGap(signal);
+  const editions = useMetadataResource(async (signal) => {
     return request<CatalogResult<CatalogReleasePage>>(
       `/api/discovery/release-groups/${encodeURIComponent(group)}/releases?${query({
         offset,
@@ -253,7 +250,7 @@ export function Album({
   onCreated: (job: number, version: number) => void;
 }) {
   const drawer = useRef<HTMLDialogElement>(null);
-  const release = useResource(
+  const release = useMetadataResource(
     (signal) =>
       request<CatalogResult<CatalogRelease>>(`/api/discovery/releases/${encodeURIComponent(id)}`, {
         signal,

@@ -1,5 +1,53 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { ApiError, errorText } from "../api";
+import { useSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
+import {
+  ApiError,
+  errorText,
+  getProviderSnapshot,
+  getIdleProviderSnapshot,
+  subscribeProvider,
+} from "../api";
+import type { CatalogStatus } from "../../src/generated/CatalogStatus";
+
+export function providerWaitText(status?: CatalogStatus): string {
+  if (!status)
+    return "Checking the shared provider budget. Metadata requests can wait up to 15 seconds before submission.";
+  if (status.state === "paused")
+    return "Provider requests are paused. Review the service before resuming.";
+  if (status.state === "saturated")
+    return "Provider request capacity is full. Try the metadata action later.";
+  if (status.state === "active" && status.known_retry_after_seconds === null)
+    return "A provider request is active. Its completion time is unknown.";
+  if (status.known_retry_after_seconds !== null && status.known_retry_after_seconds > 0)
+    return `Waiting for the shared provider budget. At the last check, at least ${status.known_retry_after_seconds} seconds remained. This estimate can change.`;
+  return "The provider budget is available. The metadata request is pending.";
+}
+
+export function ProviderWaiting() {
+  const snapshot = useSyncExternalStore(
+    subscribeProvider,
+    getProviderSnapshot,
+    getIdleProviderSnapshot,
+  );
+  if (!snapshot.pending) return null;
+  return <ProviderWaitNotice status={snapshot.status} error={snapshot.error} />;
+}
+
+export function ProviderWaitNotice({
+  status,
+  error,
+}: {
+  status?: CatalogStatus | undefined;
+  error?: unknown;
+}) {
+  return (
+    <div className="alert" data-slot="provider-wait" role="status">
+      <strong>Metadata request pending</strong>
+      <p>{providerWaitText(status)}</p>
+      {error !== undefined && <p>Provider status could not be read: {errorText(error)}</p>}
+      <p>No download or approval starts from this wait.</p>
+    </div>
+  );
+}
 
 // shadcn/ui-style owned primitives: native semantics, data slots and variants.
 // No runtime CSS injection or third-party component installation is required.
@@ -45,7 +93,18 @@ export function Alert({ error }: { error: unknown }) {
       <p>{errorText(error)}</p>
       {error instanceof ApiError && error.status === 401 ? (
         <a href="/auth/login">Sign in with Microsoft</a>
-      ) : error instanceof ApiError && error.retryAfterSeconds === 4294967295 ? (
+      ) : error instanceof ApiError && error.providerState === "active" ? (
+        <p>
+          A provider request is active. Its completion time is unknown. Try the metadata action
+          later. It will not retry automatically.
+        </p>
+      ) : error instanceof ApiError && error.providerState === "saturated" ? (
+        <p>
+          Provider request capacity is full. Try the metadata action later. It will not retry
+          automatically.
+        </p>
+      ) : error instanceof ApiError &&
+        (error.providerState === "paused" || error.retryAfterSeconds === 4294967295) ? (
         <p>
           Provider requests are paused. Review the service before resuming. Repeating the action
           will not clear this pause.

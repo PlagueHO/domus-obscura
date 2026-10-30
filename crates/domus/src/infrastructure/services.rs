@@ -10,8 +10,73 @@ use crate::infrastructure::catalog::{CatalogQuery, CatalogResult, MusicBrainzCli
 use crate::infrastructure::store::Store;
 use crate::{Error, Result};
 use futures_util::future::BoxFuture;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+
+/// One operation has a total bounded admission wait, including CAA redirects.
+/// This does not grant network authority; only CatalogPermit can do that.
+pub(crate) struct ProviderWait {
+    remaining: Duration,
+    pub(crate) cancelled: Arc<AtomicBool>,
+}
+
+impl ProviderWait {
+    pub(crate) fn new(cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            remaining: Duration::from_secs(15),
+            cancelled,
+        }
+    }
+
+    pub(crate) fn check(&self) -> Result<()> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(Error::Busy("metadata request cancelled before submission"));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn pause(&mut self, status: super::store::CatalogStatus) -> Result<()> {
+        use super::store::CatalogProviderState;
+        self.check()?;
+        if matches!(status.state, CatalogProviderState::Paused) {
+            return Err(Error::Catalog {
+                reason: "provider requests are paused; explicit review is required",
+                retry_after_seconds: u32::MAX,
+            });
+        }
+        let delay = status
+            .known_retry_after_seconds
+            .map(|seconds| Duration::from_secs(u64::from(seconds)).max(Duration::from_millis(100)))
+            .unwrap_or(Duration::from_millis(100));
+        if delay.saturating_add(Duration::from_secs(1)) > self.remaining {
+            return Err(match status.known_retry_after_seconds {
+                Some(seconds) => Error::Catalog {
+                    reason: "provider admission wait ended; retry metadata manually later",
+                    retry_after_seconds: seconds,
+                },
+                None => Error::ProviderActive,
+            });
+        }
+        let started = Instant::now();
+        tokio::time::sleep(delay).await;
+        self.remaining = self.remaining.saturating_sub(started.elapsed());
+        self.check()
+    }
+
+    pub(crate) fn reserve_start(&mut self) {
+        self.remaining = self.remaining.saturating_sub(Duration::from_secs(1));
+    }
+}
+
+struct CancelPending(Arc<AtomicBool>);
+
+impl Drop for CancelPending {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ServiceStore {
@@ -47,12 +112,30 @@ impl ServiceStore {
         .await
         .map_err(|_| Error::Internal("database task failed"))?
     }
+
+    /// Started provider work must persist even when normal database admission
+    /// is full. Provider admission bounds the number of these completion tasks.
+    async fn complete<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Store) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut store = store
+                .lock()
+                .map_err(|_| Error::Internal("database lock failed"))?;
+            operation(&mut store)
+        })
+        .await
+        .map_err(|_| Error::Internal("provider completion task failed"))?
+    }
 }
 
 pub struct MusicBrainzService {
     database: ServiceStore,
     client: MusicBrainzClient,
     configuration: ServiceConfiguration,
+    slots: Arc<Semaphore>,
 }
 
 impl MusicBrainzService {
@@ -60,11 +143,13 @@ impl MusicBrainzService {
         database: ServiceStore,
         client: MusicBrainzClient,
         configuration: ServiceConfiguration,
+        slots: Arc<Semaphore>,
     ) -> Self {
         Self {
             database,
             client,
             configuration,
+            slots,
         }
     }
 
@@ -93,13 +178,65 @@ impl MusicBrainzService {
         if let Some(cached) = cached {
             return Ok(cached);
         }
-        let mut permit = self.database.run(Store::claim_catalog_request).await?;
-        let outcome = self.client.execute(&query, &mut permit).await;
-        self.database
-            .run(move |store| {
-                crate::application::catalog::complete_catalog(store, query, permit, outcome, parse)
-            })
-            .await
+        let slot = self
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::ProviderSaturated)?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel = CancelPending(cancelled.clone());
+        let mut wait = ProviderWait::new(cancelled.clone());
+        enum Admission<T> {
+            Cached(CatalogResult<T>),
+            Permit(super::store::CatalogPermit),
+        }
+        let mut permit = loop {
+            wait.check()?;
+            let candidate = query.clone();
+            let admitted = self
+                .database
+                .run(move |store| {
+                    if let Some(cached) =
+                        crate::application::catalog::cached_catalog(store, &candidate, parse)?
+                    {
+                        return Ok(Admission::Cached(cached));
+                    }
+                    store.claim_catalog_request().map(Admission::Permit)
+                })
+                .await;
+            match admitted {
+                Ok(Admission::Cached(cached)) => return Ok(cached),
+                Ok(Admission::Permit(permit)) => break permit,
+                Err(Error::Catalog { .. }) => {
+                    wait.pause(self.database.run(|store| store.catalog_status()).await?)
+                        .await?;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        wait.reserve_start();
+        permit.cancel_before_start(cancelled);
+        let database = self.database.clone();
+        let client = self.client.clone();
+        // A dropped browser future cannot abandon a started response or its
+        // durable backoff. Cancellation is checked immediately before send.
+        tokio::spawn(async move {
+            let _slot = slot;
+            let outcome = client.execute(&query, &mut permit).await;
+            let result = database
+                .complete(move |store| {
+                    crate::application::catalog::complete_catalog(
+                        store, query, permit, outcome, parse,
+                    )
+                })
+                .await;
+            if let Err(error) = &result {
+                eprintln!("provider operation failed: {error}");
+            }
+            result
+        })
+        .await
+        .map_err(|_| Error::Internal("provider operation task failed"))?
     }
 }
 
@@ -252,6 +389,7 @@ pub struct CaaArtworkService {
     database: std::path::PathBuf,
     client: super::caa::CaaHttpClient,
     slots: Arc<Semaphore>,
+    cache_slots: Arc<Semaphore>,
     cache: Option<Arc<dyn crate::application::services::cache::Cache>>,
 }
 
@@ -261,6 +399,7 @@ impl CaaArtworkService {
             database: database.into(),
             client,
             slots: Arc::new(Semaphore::new(4)),
+            cache_slots: Arc::new(Semaphore::new(4)),
             cache: None,
         }
     }
@@ -295,11 +434,35 @@ impl ArtworkProvider for CaaArtworkService {
             {
                 return Err(Error::InvalidInput("CAA image ID is invalid".into()));
             }
+            let cache_slot = self
+                .cache_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Error::Busy("artwork cache reads are busy; retry later"))?;
+            let path = self.database.clone();
+            let cache = self.cache.clone();
+            let cached_request = request.clone();
+            let cached_listing = listing_request.clone();
+            let cached = tokio::task::spawn_blocking(move || {
+                let _slot = cache_slot;
+                let mut store = Store::open_current_existing(&path)?;
+                if let Some(cache) = cache {
+                    store = store.with_cache(cache);
+                }
+                cached_artwork(&mut store, &cached_listing, cached_request)
+            })
+            .await
+            .map_err(|_| Error::Internal("artwork cache read task failed"))??;
+            if let Some(cached) = cached {
+                return Ok(cached);
+            }
             let permit = self
                 .slots
                 .clone()
                 .try_acquire_owned()
-                .map_err(|_| Error::Busy("artwork service is busy; retry later"))?;
+                .map_err(|_| Error::ProviderSaturated)?;
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let _cancel = CancelPending(cancelled.clone());
             let path = self.database.clone();
             let client = self.client.clone();
             let cache = self.cache.clone();
@@ -314,26 +477,22 @@ impl ArtworkProvider for CaaArtworkService {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?;
-                runtime.block_on(async move {
+                let result = runtime.block_on(async move {
                     use super::caa::{CaaPayload, CaaRequest};
-                    let listing = client.fetch_cached(&mut store, listing_request).await?.fetch;
+                    let mut wait = ProviderWait::new(cancelled);
+                    let listing = client
+                        .fetch_cached_with_wait(&mut store, listing_request, &mut wait)
+                        .await?
+                        .fetch;
                     let mut sources = listing.sources;
                     let content = match listing.payload {
                         CaaPayload::Listing { listing, .. } => {
                             if let Some(id) = request.image_id {
                                 let image_request = CaaRequest::image(&listing, &id)?;
-                                let delay = if store.caa_cache(&image_request)?.is_some() { 0 }
-                                    else { store.catalog_status()?.retry_after_seconds };
-                                if delay > 15 {
-                                    return Err(Error::Catalog {
-                                        reason: "CAA image requires provider backoff before a new request",
-                                        retry_after_seconds: delay,
-                                    });
-                                }
-                                tokio::time::sleep(std::time::Duration::from_secs(u64::from(delay))).await;
                                 let fetched = client
-                                    .fetch_cached(&mut store, image_request)
-                                    .await?.fetch;
+                                    .fetch_cached_with_wait(&mut store, image_request, &mut wait)
+                                    .await?
+                                    .fetch;
                                 sources.extend(fetched.sources);
                                 match fetched.payload {
                                     CaaPayload::Image { bytes, sha256 } => {
@@ -347,26 +506,14 @@ impl ArtworkProvider for CaaArtworkService {
                                     }
                                 }
                             } else {
-                                ArtworkContent::Listing(
-                                    listing
-                                        .images()
-                                        .iter()
-                                        .map(|image| ArtworkImage {
-                                            entity: EntityRef {
-                                                provider: "cover-art-archive".into(),
-                                                id: image.id.clone(),
-                                            },
-                                            source: image.source.clone(),
-                                            front: image.front,
-                                            provider_approved: Some(image.provider_approved),
-                                        })
-                                        .collect(),
-                                )
+                                artwork_listing(&listing)
                             }
                         }
                         CaaPayload::Missing => ArtworkContent::Missing,
                         _ => {
-                            return Err(Error::Internal("CAA listing request returned image bytes"));
+                            return Err(Error::Internal(
+                                "CAA listing request returned image bytes",
+                            ));
                         }
                     };
                     Ok(ArtworkResult {
@@ -375,12 +522,74 @@ impl ArtworkProvider for CaaArtworkService {
                         sources,
                         content,
                     })
-                })
+                });
+                if let Err(error) = &result {
+                    eprintln!("artwork provider operation failed: {error}");
+                }
+                result
             })
             .await
             .map_err(|_| Error::Internal("artwork service task failed"))?
         })
     }
+}
+
+fn artwork_listing(listing: &super::caa::CaaListing) -> ArtworkContent {
+    ArtworkContent::Listing(
+        listing
+            .images()
+            .iter()
+            .map(|image| ArtworkImage {
+                entity: EntityRef {
+                    provider: "cover-art-archive".into(),
+                    id: image.id.clone(),
+                },
+                source: image.source.clone(),
+                front: image.front,
+                provider_approved: Some(image.provider_approved),
+            })
+            .collect(),
+    )
+}
+
+fn cached_artwork(
+    store: &mut Store,
+    listing_request: &super::caa::CaaRequest,
+    request: ArtworkRequest,
+) -> Result<Option<ArtworkResult>> {
+    use super::caa::{CaaPayload, CaaRequest};
+    let Some(cached) = store.caa_cache(listing_request)? else {
+        return Ok(None);
+    };
+    let CaaPayload::Listing { listing, .. } = cached.fetch.payload else {
+        return Err(Error::Internal(
+            "CAA listing cache contains a different payload",
+        ));
+    };
+    let mut sources = cached.fetch.sources;
+    let content = if let Some(id) = &request.image_id {
+        let image_request = CaaRequest::image(&listing, id)?;
+        let Some(image) = store.caa_cache(&image_request)? else {
+            return Ok(None);
+        };
+        let CaaPayload::Image { bytes, sha256 } = image.fetch.payload else {
+            return Err(Error::Internal(
+                "CAA image cache contains a different payload",
+            ));
+        };
+        store.touch_caa_cache(&image_request)?;
+        sources.extend(image.fetch.sources);
+        ArtworkContent::Image { bytes, sha256 }
+    } else {
+        artwork_listing(&listing)
+    };
+    store.touch_caa_cache(listing_request)?;
+    Ok(Some(ArtworkResult {
+        release: request.release,
+        provider: request.provider,
+        sources,
+        content,
+    }))
 }
 
 /// A host owns private state. Tool requests carry entity IDs, not database
@@ -415,6 +624,8 @@ impl ServiceHost {
         let processor = Arc::new(super::artwork::NativeImageProcessor::new(store.cache()));
         let mut artwork =
             CaaArtworkService::new(store.database_path(), super::caa::CaaHttpClient::new()?);
+        let slots = Arc::new(Semaphore::new(4));
+        artwork.slots = slots.clone();
         if let Some(cache) = store.cache() {
             artwork = artwork.with_cache(cache);
         }
@@ -424,6 +635,7 @@ impl ServiceHost {
             database.clone(),
             client,
             configuration.clone(),
+            slots,
         ));
         let artwork = Arc::new(ArtworkService::new(configuration.clone(), vec![artwork])?);
         let images =
@@ -510,5 +722,108 @@ impl crate::application::services::acquisition::AcquisitionProvider for Soulseek
     ) -> Result<i64> {
         let mut peer = self.session.connect_peer(&self.peer)?;
         crate::application::acquire_album(store, claim, staging, &mut peer)
+    }
+}
+
+#[cfg(test)]
+mod provider_wait_tests {
+    use super::*;
+    use crate::infrastructure::store::{CatalogProviderState, CatalogStatus};
+
+    fn status(state: CatalogProviderState, seconds: Option<u32>) -> CatalogStatus {
+        CatalogStatus {
+            state,
+            retry_after_seconds: seconds.unwrap_or(1),
+            known_retry_after_seconds: seconds,
+            failures: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_wait_never_shortens_long_backoff_or_clears_a_pause() -> Result<()> {
+        let mut wait = ProviderWait::new(Arc::new(AtomicBool::new(false)));
+        assert!(matches!(
+            wait.pause(status(CatalogProviderState::Backoff, Some(120)))
+                .await,
+            Err(Error::Catalog {
+                retry_after_seconds: 120,
+                ..
+            })
+        ));
+        assert!(matches!(
+            wait.pause(status(CatalogProviderState::Paused, None)).await,
+            Err(Error::Catalog {
+                retry_after_seconds: u32::MAX,
+                ..
+            })
+        ));
+        assert_eq!(wait.remaining, Duration::from_secs(15));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_wait_spends_one_shared_allowance_and_cancels_pending_work() -> Result<()> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut wait = ProviderWait::new(cancelled.clone());
+        wait.remaining = Duration::from_millis(1150);
+        wait.pause(status(CatalogProviderState::Active, None))
+            .await?;
+        assert!(wait.remaining <= Duration::from_millis(1050));
+        assert!(matches!(
+            wait.pause(status(CatalogProviderState::Active, None)).await,
+            Err(Error::ProviderActive)
+        ));
+        cancelled.store(true, Ordering::Release);
+        assert!(matches!(wait.check(), Err(Error::Busy(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_completion_is_not_rejected_by_database_admission() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let database = ServiceStore::new(Store::open(&root.path().join("state.db"))?);
+        let _slots = database
+            .slots
+            .acquire_many(4)
+            .await
+            .map_err(|_| Error::Internal("test semaphore closed"))?;
+        assert!(matches!(
+            database.run(|_| Ok(())).await,
+            Err(Error::Busy(_))
+        ));
+        database
+            .complete(|store| {
+                store.catalog_status()?;
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn provider_host_shares_capacity_between_musicbrainz_and_caa() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let host = ServiceHost::new(
+            Store::open(&root.path().join("state.db"))?,
+            Default::default(),
+        )?;
+        let _slots = host
+            .musicbrainz
+            .slots
+            .acquire_many(4)
+            .await
+            .map_err(|_| Error::Internal("test semaphore closed"))?;
+        let result = host
+            .artwork
+            .fetch(ArtworkRequest {
+                release: EntityRef {
+                    provider: "musicbrainz".into(),
+                    id: "20000000-0000-4000-8000-000000000001".into(),
+                },
+                provider: "cover-art-archive".into(),
+                image_id: None,
+            })
+            .await;
+        assert!(matches!(result, Err(Error::ProviderSaturated)));
+        Ok(())
     }
 }

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api";
-import { Alert, Button, Cover } from "./ui";
+import { Alert, Button, Cover, providerWaitText } from "./ui";
 import { ArtworkReview } from "../ArtworkReview";
 import { OutputPreview } from "../../src/OutputPreview";
 import type { ArtworkCandidate } from "../../src/generated/ArtworkCandidate";
@@ -9,6 +9,35 @@ import type { SourceCandidate } from "../../src/generated/SourceCandidate";
 import { SourceReview } from "../SourceReview";
 
 describe("production components", () => {
+  it("keeps active ownership, saturation and unknown timing separate from empty results", () => {
+    for (const state of ["active", "saturated"] as const) {
+      const markup = renderToStaticMarkup(
+        <Alert error={new ApiError(503, "Metadata is waiting.", null, state)} />,
+      );
+      expect(markup).toContain(
+        state === "active" ? "completion time is unknown" : "capacity is full",
+      );
+      expect(markup).toContain("It will not retry automatically");
+      expect(markup).not.toContain("at least");
+      expect(markup).not.toContain("No results");
+    }
+    const status = {
+      state: "active" as const,
+      retry_after_seconds: 1,
+      known_retry_after_seconds: null,
+      failures: 0,
+    };
+    expect(providerWaitText(status)).toContain("completion time is unknown");
+    expect(
+      providerWaitText({ ...status, state: "paused", retry_after_seconds: 4294967295 }),
+    ).not.toContain("4294967295");
+    expect(
+      providerWaitText({ ...status, state: "backoff", known_retry_after_seconds: 120 }),
+    ).toContain("at least 120 seconds");
+    expect(
+      providerWaitText({ ...status, state: "available", known_retry_after_seconds: 0 }),
+    ).toContain("available");
+  });
   it.each([true, false])(
     "keeps unknown quality distinct from mismatches (can approve: %s)",
     (canApprove) => {

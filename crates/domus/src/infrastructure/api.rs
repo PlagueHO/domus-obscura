@@ -62,7 +62,12 @@ struct Shared {
 }
 
 #[derive(Debug)]
-pub struct ApiError(StatusCode, String, Option<u32>);
+pub struct ApiError(
+    StatusCode,
+    String,
+    Option<u32>,
+    Option<super::store::CatalogProviderState>,
+);
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
@@ -74,6 +79,9 @@ pub(crate) struct ReloadPermit {
 #[derive(Serialize, ts_rs::TS)]
 pub struct ApiMessage {
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub provider_state: Option<super::store::CatalogProviderState>,
 }
 
 #[derive(Serialize, ts_rs::TS)]
@@ -88,7 +96,7 @@ pub struct SystemSettingsPolicy {
 
 impl ApiError {
     fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self(status, message.into(), None)
+        Self(status, message.into(), None, None)
     }
 }
 
@@ -108,6 +116,18 @@ impl From<Error> for ApiError {
             ),
             Error::Conflict(message) => Self::new(StatusCode::CONFLICT, message),
             Error::Busy(message) => Self::new(StatusCode::SERVICE_UNAVAILABLE, message),
+            Error::ProviderActive => Self(
+                StatusCode::SERVICE_UNAVAILABLE,
+                error.to_string(),
+                None,
+                Some(super::store::CatalogProviderState::Active),
+            ),
+            Error::ProviderSaturated => Self(
+                StatusCode::SERVICE_UNAVAILABLE,
+                error.to_string(),
+                None,
+                Some(super::store::CatalogProviderState::Saturated),
+            ),
             Error::WorkerStopping => {
                 Self::new(StatusCode::SERVICE_UNAVAILABLE, "worker is stopping")
             }
@@ -131,6 +151,11 @@ impl From<Error> for ApiError {
                     StatusCode::SERVICE_UNAVAILABLE,
                     reason.into(),
                     Some(retry_after_seconds),
+                    Some(if retry_after_seconds == u32::MAX {
+                        super::store::CatalogProviderState::Paused
+                    } else {
+                        super::store::CatalogProviderState::Backoff
+                    }),
                 )
             }
             Error::Internal(message) => {
@@ -153,7 +178,14 @@ impl From<Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let mut response = (self.0, Json(ApiMessage { error: self.1 })).into_response();
+        let mut response = (
+            self.0,
+            Json(ApiMessage {
+                error: self.1,
+                provider_state: self.3,
+            }),
+        )
+            .into_response();
         if let Some(seconds) = self.2 {
             response
                 .headers_mut()
@@ -2640,6 +2672,7 @@ async fn event_stream(
 fn stream_error(message: &str) -> Event {
     match Event::default().event("error").json_data(ApiMessage {
         error: message.into(),
+        provider_state: None,
     }) {
         Ok(event) => event,
         Err(_) => {
