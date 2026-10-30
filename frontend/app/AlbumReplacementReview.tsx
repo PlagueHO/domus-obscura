@@ -70,7 +70,11 @@ export function AlbumReplacementReview({
                 ))}
               </ul>
               {isApproved && <p role="status">Decision saved for this exact review.</p>}
-              <div className="actions" role="group" aria-label={`Choose action for ${preview.kind}`}>
+              <div
+                className="actions"
+                role="group"
+                aria-label={`Choose action for ${preview.kind}`}
+              >
                 <Button
                   variant="secondary"
                   disabled={blocked || command.busy}
