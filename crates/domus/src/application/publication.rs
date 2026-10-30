@@ -1,9 +1,57 @@
+use crate::domain::ReplacementAction;
 use crate::infrastructure::publication::PublicationDirectory;
 use crate::infrastructure::staging::StagingRoot;
-use crate::infrastructure::store::{JobClaim, PublicationDestination, Store};
+use crate::infrastructure::store::{
+    AlbumReplacementPreview, AlbumReplacementRestoreDecision, JobClaim, PublicationDestination,
+    Store,
+};
 use crate::{Error, Result};
 use std::cell::Cell;
 use std::time::{Duration, Instant};
+
+pub fn preview_album_replacements(
+    store: &Store,
+    job: i64,
+    plan_version: i64,
+) -> Result<Vec<AlbumReplacementPreview>> {
+    crate::infrastructure::publication::album_replacement_previews(store, job, plan_version)
+}
+
+pub fn restore_album_replacement(
+    store: &mut Store,
+    job: i64,
+    plan_version: i64,
+    location_id: i64,
+    decision: AlbumReplacementRestoreDecision,
+) -> Result<PublicationDestination> {
+    let _visibility = crate::infrastructure::shares::publication_visibility_write(store)?;
+    crate::infrastructure::publication::restore_album_replacement(
+        store,
+        job,
+        plan_version,
+        location_id,
+        decision,
+    )?;
+    store
+        .publication_destinations(job, plan_version)?
+        .into_iter()
+        .find(|destination| destination.location_id == location_id)
+        .ok_or_else(|| Error::Conflict("replacement destination is no longer planned".into()))
+}
+
+pub(crate) fn preview_album_replacement_for_location(
+    store: &Store,
+    job: i64,
+    plan_version: i64,
+    location_id: i64,
+) -> Result<AlbumReplacementPreview> {
+    crate::infrastructure::publication::album_replacement_preview_for_location(
+        store,
+        job,
+        plan_version,
+        location_id,
+    )
+}
 
 struct Heartbeat {
     checked: Cell<Instant>,
@@ -58,12 +106,35 @@ pub fn publish_new_album(
         }
     }
     let mut targets = store.begin_publication(claim, run)?;
+    let reviews = store.album_replacement_reviews(claim.job(), claim.plan_version())?;
     targets.sort_by_key(|target| (target.kind != "main", target.id));
     for target in targets {
         store.check_worker_stop()?;
         let result: Result<()> = (|| {
             store.renew_claim(claim, 300)?;
             let files = store.publication_files(claim, target.id)?;
+            if target.verified_at.is_none()
+                && target.replacement.is_none()
+                && let Some(review) = reviews.iter().find(|review| {
+                    review.location_id == target.location_id
+                        && review.action == ReplacementAction::Copy
+                })
+            {
+                let current = preview_album_replacement_for_location(
+                    store,
+                    claim.job(),
+                    claim.plan_version(),
+                    target.location_id,
+                )?;
+                if current.manifest_sha256 != review.manifest_sha256
+                    || current.album_identity.as_deref() != Some(review.album_identity.as_str())
+                    || current.root_identity != review.root_identity
+                {
+                    return Err(Error::Conflict(
+                        "the reviewed album changed; save a new replacement decision".into(),
+                    ));
+                }
+            }
             let mut preparation = store.prepare_publication_path(claim, target.id)?;
             let mut opened = None;
             for _ in 0..32 {
@@ -87,6 +158,16 @@ pub fn publish_new_album(
                     heartbeat.tick(|| check(store, claim, staging, &directory, &target))
                 })?;
                 check(store, claim, staging, &directory, &target)?;
+                if target.replacement.is_some() {
+                    if target
+                        .replacement
+                        .as_ref()
+                        .is_some_and(|replacement| replacement.state == "planned")
+                    {
+                        store.record_publication_replacement_state(claim, target.id, "retained")?;
+                    }
+                    store.record_publication_replacement_state(claim, target.id, "published")?;
+                }
                 store.record_publication_visible(claim, target.id)?;
                 return store.finish_publication_destination(claim, target.id);
             }
@@ -119,7 +200,7 @@ pub fn publish_new_album(
                 heartbeat.tick(|| check(store, claim, staging, &directory, &target))
             })?;
             check(store, claim, staging, &directory, &target)?;
-            directory.publish(store, &target)?;
+            directory.publish(store, claim, &target)?;
             let heartbeat = Heartbeat::new();
             directory.verify(&files, &|| {
                 heartbeat.tick(|| check(store, claim, staging, &directory, &target))

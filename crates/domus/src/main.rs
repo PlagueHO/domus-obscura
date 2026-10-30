@@ -273,6 +273,34 @@ fn run(args: &[String]) -> Result<()> {
                     "PublicationDestination.ts",
                     domus::infrastructure::store::PublicationDestination::export_to_string(&config),
                 ),
+                (
+                    "PublicationDestinationReplacement.ts",
+                    domus::infrastructure::store::PublicationDestinationReplacement::export_to_string(&config),
+                ),
+                (
+                    "ReplacementAction.ts",
+                    domus::domain::ReplacementAction::export_to_string(&config),
+                ),
+                (
+                    "ReplacementFile.ts",
+                    domus::infrastructure::store::ReplacementFile::export_to_string(&config),
+                ),
+                (
+                    "AlbumReplacementPreview.ts",
+                    domus::infrastructure::store::AlbumReplacementPreview::export_to_string(&config),
+                ),
+                (
+                    "AlbumReplacementDecision.ts",
+                    domus::infrastructure::store::AlbumReplacementDecision::export_to_string(&config),
+                ),
+                (
+                    "AlbumReplacementReview.ts",
+                    domus::infrastructure::store::AlbumReplacementReview::export_to_string(&config),
+                ),
+                (
+                    "AlbumReplacementRestoreDecision.ts",
+                    domus::infrastructure::store::AlbumReplacementRestoreDecision::export_to_string(&config),
+                ),
                 ("ArtworkIssue.ts", ArtworkIssue::export_to_string(&config)),
                 (
                     "JobControl.ts",

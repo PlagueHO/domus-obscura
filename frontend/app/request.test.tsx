@@ -76,6 +76,7 @@ function renderRequest({
     [],
     covers,
     { publication: [], transfers, summary },
+    [],
     null,
     [],
   ].entries()) {

@@ -299,6 +299,345 @@ fn verify_album(fixture: &Fixture, run: i64, root: &Path) -> TestResult {
 }
 
 #[test]
+fn replacement_retains_the_exact_original_folder_and_excludes_it_from_library() -> TestResult {
+    let mut fixture = Fixture::build_with_replacement(
+        AudioFormat::Flac,
+        true,
+        super::ReplacementAction::Replace,
+    )?;
+    let run = normalized(&mut fixture)?;
+
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )?,
+        "complete"
+    );
+    verify_album(&fixture, run, fixture._library.path())?;
+
+    let raw = Connection::open(&fixture.database)?;
+    let retained_relative: String = raw.query_row(
+        "SELECT retained_folder FROM publication_replacement_journal",
+        [],
+        |row| row.get(0),
+    )?;
+    let retained = fixture
+        ._library
+        .path()
+        .join(retained_relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    assert_eq!(std::fs::read(retained.join("folder.jpg"))?, b"old cover");
+    assert_eq!(std::fs::read(retained.join("manual.txt"))?, b"user extra");
+    assert_eq!(
+        raw.query_row(
+            "SELECT state FROM publication_replacement_journal",
+            [],
+            |row| row.get::<_, String>(0)
+        )?,
+        "published"
+    );
+
+    domus::application::scan_location(&mut fixture.store, fixture.main)?;
+    let plan = fixture.store.plan(fixture.job, fixture.version)?;
+    let parent = plan.plan.outputs[0]
+        .relative_folder
+        .rsplit_once('/')
+        .map_or("", |(parent, _)| parent);
+    let entries = fixture.store.browse(
+        fixture.main,
+        &domus::domain::LibraryPath::parse(parent)?,
+        Page::new(0, 100)?,
+    )?;
+    assert!(entries.iter().all(|entry| {
+        !entry
+            .relative_path
+            .split('/')
+            .any(|part| part.starts_with(".domus-retained-"))
+    }));
+    assert!(
+        domus::application::sharing::inspect_share_folder(
+            &fixture.store,
+            &domus::application::sharing::InspectShareFolder {
+                location_id: fixture.main,
+                relative_path: retained_relative,
+            },
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn replacement_restore_is_state_bound_and_recovers_after_displacing_the_current_folder()
+-> TestResult {
+    let mut fixture = Fixture::build_with_replacement(
+        AudioFormat::Flac,
+        true,
+        super::ReplacementAction::Replace,
+    )?;
+    let run = normalized(&mut fixture)?;
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )?,
+        "complete"
+    );
+    let destination = fixture
+        .store
+        .publication_destinations(fixture.job, fixture.version)?
+        .into_iter()
+        .find(|destination| destination.location_id == fixture.main)
+        .ok_or("main destination")?;
+    let replacement = destination
+        .replacement
+        .as_ref()
+        .ok_or("replacement journal")?;
+    let decision = domus::infrastructure::store::AlbumReplacementRestoreDecision {
+        review_id: replacement.review_id,
+        expected_manifest_sha256: destination.manifest_sha256.clone(),
+        expected_album_identity: destination
+            .album_identity
+            .clone()
+            .ok_or("published album identity")?,
+    };
+
+    let mut stale = decision.clone();
+    stale.expected_manifest_sha256 = "0".repeat(64);
+    assert!(
+        domus::application::restore_album_replacement(
+            &mut fixture.store,
+            fixture.job,
+            fixture.version,
+            fixture.main,
+            stale
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(album(&fixture, fixture._library.path())?.join("folder.jpg"))?,
+        fixture.cover.bytes()
+    );
+
+    let current = album(&fixture, fixture._library.path())?;
+    let temporary = fixture._library.path().join(
+        replacement
+            .restore_folder
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    let raw = Connection::open(&fixture.database)?;
+    raw.execute(
+        "UPDATE publication_replacement_journal
+         SET state='restore_prepared',restore_started_at=unixepoch()
+         WHERE destination_id=?1 AND state='published'",
+        [destination.id],
+    )?;
+    std::fs::rename(&current, &temporary)?;
+    assert!(
+        domus::application::sharing::inspect_share_folder(
+            &fixture.store,
+            &domus::application::sharing::InspectShareFolder {
+                location_id: fixture.main,
+                relative_path: replacement.restore_folder.clone(),
+            },
+        )
+        .is_err()
+    );
+    let restored = domus::application::restore_album_replacement(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        fixture.main,
+        decision.clone(),
+    )?;
+    assert_eq!(
+        restored
+            .replacement
+            .as_ref()
+            .ok_or("replacement journal")?
+            .state,
+        "restored"
+    );
+
+    let restored_album = album(&fixture, fixture._library.path())?;
+    assert_eq!(
+        std::fs::read(restored_album.join("folder.jpg"))?,
+        b"old cover"
+    );
+    assert_eq!(
+        std::fs::read(restored_album.join("manual.txt"))?,
+        b"user extra"
+    );
+    let retained = fixture._library.path().join(
+        replacement
+            .retained_folder
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    assert_eq!(
+        std::fs::read(retained.join("folder.jpg"))?,
+        fixture.cover.bytes()
+    );
+    assert!(!temporary.exists());
+    let restored_again = domus::application::restore_album_replacement(
+        &mut fixture.store,
+        fixture.job,
+        fixture.version,
+        fixture.main,
+        decision,
+    )?;
+    assert_eq!(
+        restored_again
+            .replacement
+            .as_ref()
+            .ok_or("replacement journal")?
+            .state,
+        "restored"
+    );
+    Ok(())
+}
+
+#[test]
+fn replacement_rejects_changed_original_files_without_displacing_them() -> TestResult {
+    let mut fixture = Fixture::build_with_replacement(
+        AudioFormat::Flac,
+        true,
+        super::ReplacementAction::Replace,
+    )?;
+    let original = album(&fixture, fixture._library.path())?;
+    std::fs::write(original.join("manual.txt"), b"changed content")?;
+    let run = normalized(&mut fixture)?;
+
+    assert!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(original.join("manual.txt"))?,
+        b"changed content"
+    );
+    assert!(
+        std::fs::read_dir(original.parent().ok_or("album parent")?)?
+            .filter_map(std::result::Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".domus-retained-"))
+    );
+    Ok(())
+}
+
+#[test]
+fn separate_copy_publishes_to_its_saved_folder_without_changing_original_files() -> TestResult {
+    let mut fixture =
+        Fixture::build_with_replacement(AudioFormat::Flac, true, super::ReplacementAction::Copy)?;
+    let original = album(&fixture, fixture._library.path())?;
+    let review = fixture
+        .store
+        .album_replacement_reviews(fixture.job, fixture.version)?
+        .into_iter()
+        .find(|review| review.location_id == fixture.main)
+        .ok_or("saved replacement review")?;
+    let copy_folder = review.output_folder.ok_or("separate output folder")?;
+    let run = normalized(&mut fixture)?;
+
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )?,
+        "complete"
+    );
+    assert_eq!(std::fs::read(original.join("folder.jpg"))?, b"old cover");
+    assert_eq!(std::fs::read(original.join("manual.txt"))?, b"user extra");
+    let copy = fixture
+        ._library
+        .path()
+        .join(copy_folder.replace('/', std::path::MAIN_SEPARATOR_STR));
+    assert_eq!(
+        std::fs::read(copy.join("folder.jpg"))?,
+        fixture.cover.bytes()
+    );
+    assert_eq!(
+        std::fs::read_dir(&copy)?.count(),
+        fixture
+            .store
+            .plan(fixture.job, fixture.version)?
+            .plan
+            .outputs
+            .len()
+            + 1
+    );
+    Ok(())
+}
+
+#[test]
+fn replacement_recovers_when_database_receipt_fails_after_the_album_switch() -> TestResult {
+    let mut fixture = Fixture::build_with_replacement(
+        AudioFormat::Flac,
+        true,
+        super::ReplacementAction::Replace,
+    )?;
+    let run = normalized(&mut fixture)?;
+    let raw = Connection::open(&fixture.database)?;
+    raw.execute_batch(
+        "CREATE TRIGGER fail_replacement_receipt
+         BEFORE UPDATE OF state ON publication_replacement_journal
+         WHEN NEW.state='published'
+         BEGIN SELECT RAISE(ABORT,'injected replacement interruption'); END;",
+    )?;
+    assert!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )
+        .is_err()
+    );
+    verify_album(&fixture, run, fixture._library.path())?;
+    let retained_relative: String = raw.query_row(
+        "SELECT retained_folder FROM publication_replacement_journal",
+        [],
+        |row| row.get(0),
+    )?;
+    let retained = fixture
+        ._library
+        .path()
+        .join(retained_relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    assert_eq!(std::fs::read(retained.join("folder.jpg"))?, b"old cover");
+    raw.execute_batch("DROP TRIGGER fail_replacement_receipt")?;
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )?,
+        "complete"
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT state FROM publication_replacement_journal",
+            [],
+            |row| row.get::<_, String>(0)
+        )?,
+        "published"
+    );
+    Ok(())
+}
+
+#[test]
 fn publication_copies_only_verified_final_files_to_main_and_backup_for_both_formats() -> TestResult
 {
     for format in [AudioFormat::Mp3, AudioFormat::Flac] {
@@ -423,6 +762,109 @@ fn offline_backup_leaves_verified_primary_and_retries_without_normalizing_or_dow
             .get::<_, i64>(0))?,
         runs
     );
+    Ok(())
+}
+
+#[test]
+fn replacement_rejects_changed_backup_content_after_primary_publication() -> TestResult {
+    let backup = tempdir()?;
+    let mut fixture = Fixture::build_with_backup_replacement(
+        AudioFormat::Flac,
+        true,
+        backup.path(),
+        super::ReplacementAction::Replace,
+    )?;
+    let run = normalized(&mut fixture)?;
+    let original_backup = album(&fixture, backup.path())?;
+    std::fs::write(original_backup.join("manual.txt"), b"changed backup extra")?;
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )?,
+        "backup_pending"
+    );
+    verify_album(&fixture, run, fixture._library.path())?;
+    assert_eq!(
+        std::fs::read(original_backup.join("manual.txt"))?,
+        b"changed backup extra"
+    );
+    assert!(
+        std::fs::read_dir(original_backup.parent().ok_or("backup parent")?)?
+            .filter_map(std::result::Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".domus-retained-"))
+    );
+    let raw = Connection::open(&fixture.database)?;
+    let state: String = raw.query_row(
+        "SELECT j.state FROM publication_replacement_journal j
+         JOIN publication_destinations d ON d.id=j.destination_id
+         WHERE d.kind='backup'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(state, "planned");
+    Ok(())
+}
+
+#[test]
+fn replacement_keeps_backup_pending_when_offline_and_reuses_its_saved_decision() -> TestResult {
+    let backup = tempdir()?;
+    let offline = backup.path().with_extension("offline");
+    let mut fixture = Fixture::build_with_backup_replacement(
+        AudioFormat::Flac,
+        true,
+        backup.path(),
+        super::ReplacementAction::Replace,
+    )?;
+    let run = normalized(&mut fixture)?;
+    std::fs::rename(backup.path(), &offline)?;
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &fixture.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )?,
+        "backup_pending"
+    );
+    verify_album(&fixture, run, fixture._library.path())?;
+    std::fs::rename(&offline, backup.path())?;
+    let reclaimed = fixture
+        .store
+        .claim_approved_plan(fixture.job, fixture.version, "replacement-retry", 300)?
+        .ok_or("retry claim")?;
+    assert_eq!(
+        publish_new_album(
+            &mut fixture.store,
+            &reclaimed.claim,
+            fixture.staging.as_ref().ok_or("staging")?,
+            run
+        )?,
+        "complete"
+    );
+    let current_backup = album(&fixture, backup.path())?;
+    assert_eq!(
+        std::fs::read(current_backup.join("folder.jpg"))?,
+        fixture.cover.bytes()
+    );
+    let raw = Connection::open(&fixture.database)?;
+    let retained: String = raw.query_row(
+        "SELECT j.retained_folder
+         FROM publication_replacement_journal j
+         JOIN publication_destinations d ON d.id=j.destination_id
+         WHERE d.kind='backup'",
+        [],
+        |row| row.get(0),
+    )?;
+    let retained = backup
+        .path()
+        .join(retained.replace('/', std::path::MAIN_SEPARATOR_STR));
+    assert_eq!(std::fs::read(retained.join("manual.txt"))?, b"user extra");
     Ok(())
 }
 
@@ -987,7 +1429,7 @@ fn schema_fifteen_upgrade_preserves_completed_normalization_and_approval() -> Te
     fixture.store = Store::open(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        26
+        27
     );
     assert_eq!(
         raw.query_row(

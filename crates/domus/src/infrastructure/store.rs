@@ -39,7 +39,12 @@ pub use planning::{
     ClaimedPlan, PlanDestination, PlanRequest, PreparedPlan, SettingsVersion, StoredPlan,
 };
 pub(crate) use publication::PublicationPreparation;
-pub use publication::{PublicationDestination, PublicationFile};
+pub(crate) use publication::replacement_hash;
+pub use publication::{
+    AlbumReplacementDecision, AlbumReplacementPreview, AlbumReplacementRestoreDecision,
+    AlbumReplacementReview, PublicationDestination, PublicationDestinationReplacement,
+    PublicationFile, ReplacementFile,
+};
 pub use queries::{JobEvent, JobSummary};
 pub use queue::QueueSelection;
 pub use sessions::{CreatedSession, SessionCredential, SessionIdentity};
@@ -75,6 +80,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/024_sharing.sql"),
     include_str!("../../migrations/025_library_metadata.sql"),
     include_str!("../../migrations/026_atomic_publication.sql"),
+    include_str!("../../migrations/027_album_replacement.sql"),
 ];
 
 pub struct Store {

@@ -2,7 +2,10 @@ use super::filesystem::{
     LibraryDirectory, is_unsafe_cap_link, is_unsafe_link, sync_directory as sync,
 };
 use super::permissions::FilePermissions;
-use super::store::{PublicationDestination, PublicationFile, PublicationPreparation, Store};
+use super::store::{
+    AlbumReplacementPreview, AlbumReplacementRestoreDecision, PublicationDestination,
+    PublicationFile, PublicationPreparation, ReplacementFile, Store, replacement_hash,
+};
 use crate::domain::LibraryPath;
 use crate::{Error, Result};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
@@ -39,6 +42,17 @@ fn options(create: bool) -> OpenOptions {
     options
 }
 
+fn read_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.share_mode(0);
+    }
+    options
+}
+
 fn checked(directory: &Dir, permissions: &FilePermissions) -> Result<()> {
     if is_unsafe_cap_link(&directory.dir_metadata()?) {
         return Err(conflict());
@@ -58,6 +72,373 @@ fn check_case(directory: &Dir, name: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn album_replacement_previews(
+    store: &Store,
+    job: i64,
+    version: i64,
+) -> Result<Vec<AlbumReplacementPreview>> {
+    album_replacement_previews_for_location(store, job, version, None)
+}
+
+pub(crate) fn album_replacement_preview_for_location(
+    store: &Store,
+    job: i64,
+    version: i64,
+    location_id: i64,
+) -> Result<AlbumReplacementPreview> {
+    album_replacement_previews_for_location(store, job, version, Some(location_id))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Conflict("replacement destination is no longer planned".into()))
+}
+
+pub(crate) fn restore_album_replacement(
+    store: &mut Store,
+    job: i64,
+    version: i64,
+    location_id: i64,
+    decision: AlbumReplacementRestoreDecision,
+) -> Result<()> {
+    let restore = store.prepare_album_replacement_restore(job, version, location_id, decision)?;
+    let root = LibraryDirectory::open(Path::new(&restore.root))?;
+    store.check_native_root(&restore.root, "media", root.native_root())?;
+    if root.native_root().identity != restore.root_identity {
+        return Err(conflict());
+    }
+
+    let original = LibraryPath::parse(&restore.original_folder)?;
+    let retained = LibraryPath::parse(&restore.retained_folder)?;
+    let temporary = LibraryPath::parse(&restore.restore_folder)?;
+    let parent_path = original.parent();
+    let final_name = original.as_str().rsplit('/').next().ok_or_else(conflict)?;
+    let retained_name = retained.as_str().rsplit('/').next().ok_or_else(conflict)?;
+    let temporary_name = temporary.as_str().rsplit('/').next().ok_or_else(conflict)?;
+    if original.as_str().is_empty()
+        || retained.parent() != parent_path
+        || temporary.parent() != parent_path
+        || !retained_name.starts_with(".domus-retained-")
+        || !temporary_name.starts_with(".domus-restore-")
+        || restore.original_album_identity == restore.replacement_album_identity
+    {
+        return Err(conflict());
+    }
+
+    let permissions = FilePermissions::current()?;
+    let mut parent = root.into_directory();
+    checked(&parent, &permissions)?;
+    for name in parent_path.split('/').filter(|part| !part.is_empty()) {
+        check_case(&parent, name)?;
+        parent = parent.open_dir_nofollow(name)?;
+        checked(&parent, &permissions)?;
+    }
+    for name in [final_name, retained_name, temporary_name] {
+        check_case(&parent, name)?;
+    }
+    let old = (
+        restore.original_album_identity.as_str(),
+        restore.original_files.as_slice(),
+    );
+    let new = (
+        restore.replacement_album_identity.as_str(),
+        restore.replacement_files.as_slice(),
+    );
+
+    let mut state = restore.state.as_str();
+    if state == "published" {
+        if (
+            folder_version(&parent, final_name, old, new, &permissions)?,
+            folder_version(&parent, retained_name, old, new, &permissions)?,
+            folder_version(&parent, temporary_name, old, new, &permissions)?,
+        ) != (Some(FolderVersion::New), Some(FolderVersion::Old), None)
+        {
+            return Err(conflict());
+        }
+        store.record_album_replacement_restore_state(
+            restore.destination_id,
+            "published",
+            "restore_prepared",
+        )?;
+        state = "restore_prepared";
+    }
+    loop {
+        let final_version = folder_version(&parent, final_name, old, new, &permissions)?;
+        let retained_version = folder_version(&parent, retained_name, old, new, &permissions)?;
+        let temporary_version = folder_version(&parent, temporary_name, old, new, &permissions)?;
+        match state {
+            "restore_prepared" => {
+                match (final_version, retained_version, temporary_version) {
+                    (Some(FolderVersion::New), Some(FolderVersion::Old), None) => {
+                        rename_no_replace(&parent, final_name, temporary_name)?;
+                        sync(&parent)?;
+                        if folder_version(&parent, temporary_name, old, new, &permissions)?
+                            != Some(FolderVersion::New)
+                        {
+                            return Err(conflict());
+                        }
+                    }
+                    (None, Some(FolderVersion::Old), Some(FolderVersion::New)) => {}
+                    _ => return Err(conflict()),
+                }
+                sync(&parent)?;
+                store.record_album_replacement_restore_state(
+                    restore.destination_id,
+                    "restore_prepared",
+                    "restore_current_moved",
+                )?;
+                state = "restore_current_moved";
+            }
+            "restore_current_moved" => {
+                match (final_version, retained_version, temporary_version) {
+                    (None, Some(FolderVersion::Old), Some(FolderVersion::New)) => {
+                        rename_no_replace(&parent, retained_name, final_name)?;
+                        sync(&parent)?;
+                        if folder_version(&parent, final_name, old, new, &permissions)?
+                            != Some(FolderVersion::Old)
+                        {
+                            return Err(conflict());
+                        }
+                    }
+                    (Some(FolderVersion::Old), None, Some(FolderVersion::New)) => {}
+                    _ => return Err(conflict()),
+                }
+                sync(&parent)?;
+                store.record_album_replacement_restore_state(
+                    restore.destination_id,
+                    "restore_current_moved",
+                    "restore_original_visible",
+                )?;
+                state = "restore_original_visible";
+            }
+            "restore_original_visible" => {
+                match (final_version, retained_version, temporary_version) {
+                    (Some(FolderVersion::Old), None, Some(FolderVersion::New)) => {
+                        rename_no_replace(&parent, temporary_name, retained_name)?;
+                        sync(&parent)?;
+                        if folder_version(&parent, retained_name, old, new, &permissions)?
+                            != Some(FolderVersion::New)
+                        {
+                            return Err(conflict());
+                        }
+                    }
+                    (Some(FolderVersion::Old), Some(FolderVersion::New), None) => {}
+                    _ => return Err(conflict()),
+                }
+                sync(&parent)?;
+                store.record_album_replacement_restore_state(
+                    restore.destination_id,
+                    "restore_original_visible",
+                    "restored",
+                )?;
+                state = "restored";
+            }
+            "restored" => {
+                if (final_version, retained_version, temporary_version)
+                    != (Some(FolderVersion::Old), Some(FolderVersion::New), None)
+                {
+                    return Err(conflict());
+                }
+                return Ok(());
+            }
+            _ => return Err(conflict()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FolderVersion {
+    Old,
+    New,
+}
+
+fn folder_version(
+    parent: &Dir,
+    name: &str,
+    old: (&str, &[ReplacementFile]),
+    new: (&str, &[ReplacementFile]),
+    permissions: &FilePermissions,
+) -> Result<Option<FolderVersion>> {
+    let Some(directory) = open_child_directory(parent, name)? else {
+        return Ok(None);
+    };
+    checked(&directory, permissions)?;
+    let identity =
+        super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
+    let (version, files) = if identity == old.0 {
+        (FolderVersion::Old, old.1)
+    } else if identity == new.0 {
+        (FolderVersion::New, new.1)
+    } else {
+        return Err(conflict());
+    };
+    verify_replacement(&directory, files)?;
+    Ok(Some(version))
+}
+
+fn album_replacement_previews_for_location(
+    store: &Store,
+    job: i64,
+    version: i64,
+    location_id: Option<i64>,
+) -> Result<Vec<AlbumReplacementPreview>> {
+    let plan = store.plan(job, version)?;
+    let folder = plan
+        .plan
+        .outputs
+        .first()
+        .ok_or(Error::Internal("publication plan has no outputs"))?
+        .relative_folder
+        .clone();
+    let relative = LibraryPath::parse(&folder)?;
+    let mut output_files = vec!["folder.jpg".to_owned()];
+    output_files.extend(
+        plan.plan
+            .outputs
+            .iter()
+            .map(|output| output.filename.clone()),
+    );
+    if output_files.len() > 1001 {
+        return Err(Error::Conflict(
+            "replacement preview exceeds its file limit".into(),
+        ));
+    }
+
+    let mut previews = Vec::with_capacity(plan.plan.destinations.len());
+    let saved_reviews = store.album_replacement_reviews(job, version)?;
+    for target in plan
+        .plan
+        .destinations
+        .into_iter()
+        .filter(|target| location_id.is_none_or(|location| target.location_id == location))
+    {
+        let root = match super::filesystem::LibraryDirectory::open(Path::new(&target.root)) {
+            Ok(root) => root,
+            Err(Error::Io(error)) => {
+                let mut preview = AlbumReplacementPreview {
+                    job_id: job,
+                    plan_version: version,
+                    location_id: target.location_id,
+                    root: target.root,
+                    root_identity: String::new(),
+                    kind: target.kind,
+                    relative_folder: folder.clone(),
+                    output_files: output_files.clone(),
+                    destination_available: false,
+                    unavailable_reason: Some(error.to_string()),
+                    album_identity: None,
+                    manifest_sha256: String::new(),
+                    existing_files: Vec::new(),
+                    decision_saved: false,
+                    saved_action: None,
+                };
+                preview.manifest_sha256 = replacement_hash(&preview)?;
+                previews.push(preview);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        store.check_native_root(&target.root, "media", root.native_root())?;
+        let album = match root.open_directory(&relative) {
+            Ok(album) => Some(album),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let (album_identity, existing_files) = if let Some(album) = album {
+            let identity = album.native_root().identity.clone();
+            let mut files = Vec::new();
+            let mut names = HashSet::new();
+            for entry in album.entries()? {
+                if files.len() == 1001 {
+                    return Err(Error::Conflict(
+                        "existing album exceeds the replacement file limit".into(),
+                    ));
+                }
+                let entry = entry?;
+                let name = entry.file_name().into_string().map_err(|_| {
+                    Error::Conflict("existing album has a non-Unicode filename".into())
+                })?;
+                LibraryPath::parse(&name)?;
+                let metadata = entry.metadata()?;
+                if !metadata.is_file() || is_unsafe_cap_link(&metadata) || name.contains('/') {
+                    return Err(Error::Conflict(
+                        "existing album contains a non-file or unsafe entry".into(),
+                    ));
+                }
+                if !names.insert(name.to_uppercase()) {
+                    return Err(Error::Conflict(
+                        "existing album contains case-colliding filenames".into(),
+                    ));
+                }
+                let mut file = album.open_file(entry.file_name().as_os_str())?;
+                let bytes = file.metadata()?.len();
+                let mut hash = Sha256::new();
+                let mut buffer = [0; 65_536];
+                let mut total = 0u64;
+                loop {
+                    let count = file.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    total = total
+                        .checked_add(count as u64)
+                        .ok_or_else(|| Error::Conflict("existing file size overflowed".into()))?;
+                    if total > bytes {
+                        return Err(Error::Conflict(
+                            "existing file changed during replacement review".into(),
+                        ));
+                    }
+                    hash.update(&buffer[..count]);
+                }
+                if total != bytes || file.metadata()?.len() != bytes {
+                    return Err(Error::Conflict(
+                        "existing file changed during replacement review".into(),
+                    ));
+                }
+                files.push(ReplacementFile {
+                    name,
+                    bytes,
+                    sha256: format!("{:x}", hash.finalize()),
+                });
+            }
+            files.sort_by(|left, right| {
+                left.name
+                    .to_uppercase()
+                    .cmp(&right.name.to_uppercase())
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+            (Some(identity), files)
+        } else {
+            (None, Vec::new())
+        };
+        let mut preview = AlbumReplacementPreview {
+            job_id: job,
+            plan_version: version,
+            location_id: target.location_id,
+            root: target.root,
+            root_identity: root.native_root().identity.clone(),
+            kind: target.kind,
+            relative_folder: folder.clone(),
+            output_files: output_files.clone(),
+            destination_available: true,
+            unavailable_reason: None,
+            album_identity,
+            manifest_sha256: String::new(),
+            existing_files,
+            decision_saved: false,
+            saved_action: None,
+        };
+        preview.manifest_sha256 = replacement_hash(&preview)?;
+        if let Some(review) = saved_reviews.iter().find(|review| {
+            review.location_id == preview.location_id
+                && review.manifest_sha256 == preview.manifest_sha256
+        }) {
+            preview.decision_saved = true;
+            preview.saved_action = Some(review.action);
+        }
+        previews.push(preview);
+    }
+    Ok(previews)
+}
+
 pub(crate) struct PublicationDirectory {
     directory: Dir,
     parent: Dir,
@@ -67,6 +448,7 @@ pub(crate) struct PublicationDirectory {
     prepared_name: String,
     final_folder: String,
     final_name: String,
+    retained_name: Option<String>,
     visible: bool,
 }
 
@@ -124,44 +506,140 @@ impl PublicationDirectory {
         check_case(&parent, prepared_name)?;
         let mut final_directory = open_child_directory(&parent, final_name)?;
         let mut prepared_directory = open_child_directory(&parent, prepared_name)?;
-        if final_directory.is_some() && prepared_directory.is_some() {
-            return Err(conflict());
-        }
+        let mut retained_name = None;
         let mut visible = preparation.published_at.is_some();
-        let directory = if visible {
-            if prepared_directory.is_some() {
+        let directory = if let Some(replacement) = target.replacement.as_ref() {
+            let retained_path = LibraryPath::parse(&replacement.retained_folder)?;
+            if replacement.original_folder != target.relative_folder
+                || retained_path.parent() != final_parent
+                || !retained_path
+                    .as_str()
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|name| name.starts_with(".domus-retained-"))
+            {
                 return Err(conflict());
             }
-            final_directory.take().ok_or_else(conflict)?
-        } else if let Some(directory) = prepared_directory.take() {
-            directory
-        } else if let Some(directory) = final_directory.take() {
-            let identity =
-                super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
-            if target.album_identity.as_deref() != Some(identity.as_str()) {
+            let name = retained_path
+                .as_str()
+                .rsplit('/')
+                .next()
+                .ok_or_else(conflict)?;
+            check_case(&parent, name)?;
+            let retained_directory = open_child_directory(&parent, name)?;
+            let original_at = |directory: &Dir| -> Result<bool> {
+                let identity = super::filesystem::native_file_identity(
+                    &directory.try_clone()?.into_std_file(),
+                )?;
+                if identity != replacement.original_album_identity {
+                    return Ok(false);
+                }
+                verify_replacement(directory, &replacement.original_files)?;
+                Ok(true)
+            };
+            if let Some(directory) = retained_directory.as_ref()
+                && !original_at(directory)?
+            {
                 return Err(conflict());
             }
-            if preparation.atomic {
-                visible = true;
-                directory
+            let final_is_original = final_directory
+                .as_ref()
+                .map(original_at)
+                .transpose()?
+                .unwrap_or(false);
+            let final_is_new = if let Some(directory) = final_directory.as_ref() {
+                let identity = super::filesystem::native_file_identity(
+                    &directory.try_clone()?.into_std_file(),
+                )?;
+                target.album_identity.as_deref() == Some(identity.as_str())
             } else {
-                drop(directory);
-                rename_no_replace(&parent, final_name, prepared_name)?;
-                sync(&parent)?;
-                parent.open_dir_nofollow(prepared_name)?
+                false
+            };
+            if final_directory.is_some() && !final_is_original && !final_is_new {
+                return Err(conflict());
             }
-        } else if target.album_identity.is_some() {
-            return Err(conflict());
+            if final_is_original && retained_directory.is_some() {
+                return Err(conflict());
+            }
+            if final_is_new {
+                if retained_directory.is_none() || prepared_directory.is_some() {
+                    return Err(conflict());
+                }
+                visible = true;
+                retained_name = Some(name.to_owned());
+                final_directory.take().ok_or_else(conflict)?
+            } else {
+                if preparation.published_at.is_some() {
+                    return Err(conflict());
+                }
+                if final_directory.is_none() && retained_directory.is_none() {
+                    return Err(conflict());
+                }
+                if final_directory.is_none() && prepared_directory.is_none() {
+                    return Err(conflict());
+                }
+                if final_is_original {
+                    verify_replacement(
+                        final_directory.as_ref().ok_or_else(conflict)?,
+                        &replacement.original_files,
+                    )?;
+                }
+                retained_name = Some(name.to_owned());
+                if let Some(directory) = prepared_directory.take() {
+                    directory
+                } else {
+                    match parent.create_dir(prepared_name) {
+                        Ok(()) => {
+                            sync(&parent)?;
+                            parent.open_dir_nofollow(prepared_name)?
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            return Ok(None);
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
         } else {
-            match parent.create_dir(prepared_name) {
-                Ok(()) => {
+            if final_directory.is_some() && prepared_directory.is_some() {
+                return Err(conflict());
+            }
+            if visible {
+                if prepared_directory.is_some() {
+                    return Err(conflict());
+                }
+                final_directory.take().ok_or_else(conflict)?
+            } else if let Some(directory) = prepared_directory.take() {
+                directory
+            } else if let Some(directory) = final_directory.take() {
+                let identity = super::filesystem::native_file_identity(
+                    &directory.try_clone()?.into_std_file(),
+                )?;
+                if target.album_identity.as_deref() != Some(identity.as_str()) {
+                    return Err(conflict());
+                }
+                if preparation.atomic {
+                    visible = true;
+                    directory
+                } else {
+                    drop(directory);
+                    rename_no_replace(&parent, final_name, prepared_name)?;
                     sync(&parent)?;
                     parent.open_dir_nofollow(prepared_name)?
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return Ok(None);
+            } else if target.album_identity.is_some() {
+                return Err(conflict());
+            } else {
+                match parent.create_dir(prepared_name) {
+                    Ok(()) => {
+                        sync(&parent)?;
+                        parent.open_dir_nofollow(prepared_name)?
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error.into()),
                 }
-                Err(error) => return Err(error.into()),
             }
         };
         let identity =
@@ -183,6 +661,7 @@ impl PublicationDirectory {
             prepared_name: prepared_name.to_owned(),
             final_folder: target.relative_folder.clone(),
             final_name: final_name.to_owned(),
+            retained_name,
             visible,
         }))
     }
@@ -215,10 +694,69 @@ impl PublicationDirectory {
         self.visible
     }
 
-    pub(crate) fn publish(&mut self, store: &Store, target: &PublicationDestination) -> Result<()> {
+    pub(crate) fn publish(
+        &mut self,
+        store: &mut Store,
+        claim: &crate::infrastructure::store::JobClaim,
+        target: &PublicationDestination,
+    ) -> Result<()> {
         self.check(store, target)?;
+        if let Some(replacement) = target.replacement.as_ref() {
+            if self.visible {
+                if replacement.state == "planned" {
+                    store.record_publication_replacement_state(claim, target.id, "retained")?;
+                }
+                store.record_publication_replacement_state(claim, target.id, "published")?;
+                return self.check(store, target);
+            }
+            let retained_name = self.retained_name.as_deref().ok_or_else(conflict)?;
+            if let Some(retained) = open_child_directory(&self.parent, retained_name)? {
+                let identity = super::filesystem::native_file_identity(
+                    &retained.try_clone()?.into_std_file(),
+                )?;
+                if identity != replacement.original_album_identity {
+                    return Err(conflict());
+                }
+                verify_replacement(&retained, &replacement.original_files)?;
+                if self.target_original_at_final(target)? {
+                    return Err(conflict());
+                }
+            } else {
+                let original =
+                    open_child_directory(&self.parent, &self.final_name)?.ok_or_else(conflict)?;
+                let identity = super::filesystem::native_file_identity(
+                    &original.try_clone()?.into_std_file(),
+                )?;
+                if identity != replacement.original_album_identity {
+                    return Err(conflict());
+                }
+                verify_replacement(&original, &replacement.original_files)?;
+                drop(original);
+                rename_no_replace(&self.parent, &self.final_name, retained_name)?;
+                sync(&self.parent)?;
+            }
+            store.record_publication_replacement_state(claim, target.id, "retained")?;
+            if open_child_directory(&self.parent, &self.final_name)?.is_some() {
+                return Err(conflict());
+            }
+            let directory = std::mem::replace(&mut self.directory, self.parent.try_clone()?);
+            drop(directory);
+            if let Err(error) =
+                rename_no_replace(&self.parent, &self.prepared_name, &self.final_name)
+            {
+                self.directory = self.parent.open_dir_nofollow(&self.prepared_name)?;
+                return Err(error);
+            }
+            sync(&self.parent)?;
+            self.directory = self.parent.open_dir_nofollow(&self.final_name)?;
+            self.visible = true;
+            store.record_publication_replacement_state(claim, target.id, "published")?;
+            return self.check(store, target);
+        }
         check_case(&self.parent, &self.final_name)?;
-        if open_child_directory(&self.parent, &self.final_name)?.is_some() {
+        if open_child_directory(&self.parent, &self.final_name)?.is_some()
+            && (target.replacement.is_none() || !self.visible)
+        {
             return Err(conflict());
         }
         let directory = std::mem::replace(&mut self.directory, self.parent.try_clone()?);
@@ -232,6 +770,22 @@ impl PublicationDirectory {
         self.directory = self.parent.open_dir_nofollow(&self.final_name)?;
         self.visible = true;
         self.check(store, target)
+    }
+
+    fn target_original_at_final(&self, target: &PublicationDestination) -> Result<bool> {
+        let Some(replacement) = target.replacement.as_ref() else {
+            return Ok(false);
+        };
+        let Some(directory) = open_child_directory(&self.parent, &self.final_name)? else {
+            return Ok(false);
+        };
+        let identity =
+            super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
+        if identity != replacement.original_album_identity {
+            return Err(conflict());
+        }
+        verify_replacement(&directory, &replacement.original_files)?;
+        Ok(true)
     }
 
     fn regular(&self, file: File) -> Result<File> {
@@ -347,6 +901,57 @@ fn open_child_directory(parent: &Dir, name: &str) -> Result<Option<Dir>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn verify_replacement(directory: &Dir, files: &[ReplacementFile]) -> Result<()> {
+    let mut names = files
+        .iter()
+        .map(|file| file.name.as_str())
+        .collect::<HashSet<_>>();
+    for entry in directory.entries()? {
+        let entry = entry?;
+        let name = entry.file_name().into_string().map_err(|_| conflict())?;
+        if !names.remove(name.as_str()) || is_unsafe_cap_link(&entry.metadata()?) {
+            return Err(conflict());
+        }
+    }
+    if !names.is_empty() {
+        return Err(conflict());
+    }
+    for entry in files {
+        LibraryPath::parse(&entry.name)?;
+        if entry.name.is_empty() || entry.name.contains('/') || entry.bytes > i64::MAX as u64 {
+            return Err(conflict());
+        }
+        let mut file = directory
+            .open_with(&entry.name, &read_options())?
+            .into_std();
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || is_unsafe_link(&metadata) || metadata.len() != entry.bytes {
+            return Err(conflict());
+        }
+        let mut hash = Sha256::new();
+        let mut total = 0u64;
+        let mut buffer = [0; 65_536];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            total = total.checked_add(count as u64).ok_or_else(conflict)?;
+            if total > entry.bytes {
+                return Err(conflict());
+            }
+            hash.update(&buffer[..count]);
+        }
+        if total != entry.bytes
+            || file.metadata()?.len() != entry.bytes
+            || format!("{:x}", hash.finalize()) != entry.sha256
+        {
+            return Err(conflict());
+        }
+    }
+    Ok(())
 }
 
 fn rename_no_replace(directory: &Dir, from: &str, to: &str) -> Result<()> {

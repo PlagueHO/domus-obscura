@@ -206,17 +206,18 @@ fn library_tags_counts_locations_and_read_only_files() -> TestResult {
 }
 
 #[test]
-fn library_scan_ignores_prepared_publication_folders() -> TestResult {
+fn library_scan_ignores_pending_retained_and_restore_folders() -> TestResult {
     let state = tempdir()?;
     let media = tempdir()?;
-    let pending = media.path().join(".domus-pending-7-1");
-    std::fs::create_dir(&pending)?;
-    mp3(
-        &pending.join("one.mp3"),
-        9,
-        Some("Hidden artist"),
-        Some("Incomplete album"),
-    )?;
+    for (folder, artist, album) in [
+        (".domus-pending-7-1", "Pending artist", "Pending album"),
+        (".domus-retained-7-1", "Retained artist", "Retained album"),
+        (".domus-restore-7-1", "Restore artist", "Restore album"),
+    ] {
+        let hidden = media.path().join(folder);
+        std::fs::create_dir(&hidden)?;
+        mp3(&hidden.join("one.mp3"), 9, Some(artist), Some(album))?;
+    }
     let visible = media.path().join("visible");
     std::fs::create_dir(&visible)?;
     mp3(
@@ -233,7 +234,7 @@ fn library_scan_ignores_prepared_publication_folders() -> TestResult {
     let root = store.browse(location, &LibraryPath::parse("")?, page()?)?;
     assert!(
         root.iter()
-            .all(|entry| entry.relative_path != ".domus-pending-7-1")
+            .all(|entry| !entry.relative_path.starts_with(".domus-"))
     );
     let artists = store.library_artists(location, page()?)?;
     assert_eq!(artists.len(), 1);
@@ -241,6 +242,14 @@ fn library_scan_ignores_prepared_publication_folders() -> TestResult {
     let albums = store.library_albums(location, None, page()?)?;
     assert_eq!(albums.len(), 1);
     assert_eq!(albums[0].title, "Complete album");
+    assert!(
+        domus::application::refresh_library_folder(
+            &mut store,
+            location,
+            &LibraryPath::parse(".domus-restore-7-1")?
+        )
+        .is_err()
+    );
     Ok(())
 }
 

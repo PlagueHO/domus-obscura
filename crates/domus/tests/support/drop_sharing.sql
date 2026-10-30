@@ -1,4 +1,14 @@
 -- Remove newer layers before rebuilding a legacy upgrade fixture.
+DROP TRIGGER retained_publication_replacement_journal;
+DROP TRIGGER immutable_publication_replacement_intent;
+DROP TRIGGER valid_publication_replacement_state;
+DROP TRIGGER retained_album_replacement_review_file;
+DROP TRIGGER immutable_album_replacement_review_file;
+DROP TRIGGER retained_album_replacement_review;
+DROP TRIGGER immutable_album_replacement_review;
+DROP TABLE publication_replacement_journal;
+DROP TABLE album_replacement_review_files;
+DROP TABLE album_replacement_reviews;
 DROP TRIGGER immutable_publication_prepared_folder;
 DROP TRIGGER monotonic_publication_published;
 DROP TRIGGER immutable_publication_mode;

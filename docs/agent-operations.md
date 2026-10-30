@@ -178,22 +178,51 @@ Keep incomplete files unchanged and require operator review when evidence cannot
 resolve uncertainty.
 It is not production publication, peer search or a complete setup workflow.
 
-`domus publish-new-once <absolute-configuration-file>` is a separate, explicit
-local publication command. It requires a current approved plan, completed
-normalization, the private staging lock and new-only acknowledgement.
-Commit all destination/file intents before library effects. Create only new
-album folders. Never adopt an unbound existing folder, overwrite a partial file
-or recreate a missing receipted file. Preserve staging and all failed copies.
-Reclaim can verify exact synced files without another download or normalization.
-A verified primary with an unavailable backup remains `backup_pending`.
-Recheck successful destinations, with the primary last, before completion.
-`publication-status` and the protected publication GET route are read-only.
+`domus publish-new-once <absolute-configuration-file>` remains a separate,
+explicit local new-only publication command. It requires a current approved
+plan, completed normalization, the private staging lock and new-only
+acknowledgement. It cannot grant replacement permission. The connected API
+requires a separate decision for each existing destination before acquisition.
+Commit all destination/file intents before library effects. The default action
+creates only new album folders. Never adopt an unbound existing folder,
+overwrite a partial file or recreate a missing receipted file. Preserve staging
+and all failed copies. Reclaim can verify exact synced files without another
+download or normalization. A verified primary with an unavailable backup
+remains `backup_pending`. Recheck successful destinations, with the primary
+last, before completion. `publication-status` and the protected publication GET
+route are read-only.
+
+The connected API exposes a bounded preview of the existing files and planned
+outputs. Each saved decision binds the approved plan version, native root and
+root identity, destination folder identity, exact file hashes and action.
+`skip` cancels the queued album request; `copy` selects a deterministic
+separate destination; `replace` retains the exact reviewed folder before
+publishing the complete new album. Never infer replacement permission from
+source, cover, new-only or incomplete-index acknowledgements. Re-open and
+recheck the exact review immediately before each effect. Changed files or root
+identity are conflicts. An offline backup remains pending; when it returns,
+apply its saved decision only if its review is still exact.
+
 The command copies each album into a hidden `.domus-pending-*` sibling folder.
 It verifies every file before it atomically renames the complete folder to its
-final name without replacing an item that appeared at the destination.
-Library scans ignore prepared folders. Recovery verifies a final folder when a
-crash occurs after the rename but before its visibility receipt.
-This is not a replacement, restore, cleanup or power-loss acceptance.
+final name without replacing an item that appeared at the destination. A
+replacement first moves the complete reviewed original directory to its
+`.domus-retained-*` sibling with a handle-relative no-replace rename. The
+publication and replacement journal preserve each transition across restart.
+Library scans, direct refresh and sharing exclude pending, retained and
+`.domus-restore-*` folders. Never merge tracks or adopt extras into the new
+album.
+
+After every destination completes, the connected API offers explicit restore
+of a retained original. It binds to the exact review, currently published
+manifest and native folder identity. Restore uses the same visibility lock and
+a durable multi-step journal. It moves the current published folder to a
+hidden `.domus-restore-*` sibling, restores the exact reviewed original, then
+retains the displaced publication. On retry, inspect and hash all possible
+folders before advancing a state. Never overwrite, delete or infer approval
+when a folder identity, manifest or saved transition differs. The API does not
+offer restoration while any destination remains pending. These safeguards do
+not constitute power-loss acceptance.
 The sharing boundary hides incomplete publication destinations. Publication
 holds the stable native exclusive visibility lock before journal intent and
 media changes. Browse responses and uploads hold the matching shared lock.
@@ -203,10 +232,10 @@ copies hidden after restart. A verified primary does not need a backup receipt
 to become eligible. Catalog generation and native file evidence are rechecked
 before reads. These advisory locks do not prevent external programs from
 changing files on Linux.
-Future replacement and recovery entry points in #9 must acquire this
-same visibility lock before intent and filesystem effects. They must preserve
-incomplete exclusions and invalidate old catalog generations. This boundary
-does not implement replacement or restore.
+Replacement and restoration acquire this same visibility lock before durable
+intent and filesystem effects. Keep retained and temporary paths out of scans,
+sharing and direct refresh. Do not remove recovery folders or invalidate their
+journal as part of ordinary publication.
 Do not run it against existing library roots without separate approval.
 
 `domus job-control <local-database> <job-id> <plan-version> <pause|cancel>`
