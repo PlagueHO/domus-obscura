@@ -1,3 +1,4 @@
+use crate::domain::{AudioFormat, AudioProfile};
 use crate::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -212,6 +213,15 @@ fn info_frame(frame: &[u8], header: Header) -> Result<Option<InfoFrame>> {
 /// check. The hash covers the complete unchanged MPEG range, including its
 /// optional first Xing/Info frame. Existing tag contents are not trusted.
 pub fn inspect_mp3_320(source: &mut (impl Read + Seek)) -> Result<Mp3Evidence> {
+    inspect_mp3(source, AudioProfile::Mp3Cbr320)
+}
+
+/// Validate the selected MPEG-1 profile from every decoded audio frame.
+/// A metadata frame's bitrate does not contribute to CBR or VBR evidence.
+pub fn inspect_mp3(source: &mut (impl Read + Seek), profile: AudioProfile) -> Result<Mp3Evidence> {
+    if profile.format() != AudioFormat::Mp3 {
+        return Err(invalid("MP3 inspection requires an MP3 profile"));
+    }
     let mut source = BufReader::with_capacity(64 * 1024, source);
     let mut range = mpeg_range(&mut source)?;
     let file_length = range.end;
@@ -222,6 +232,8 @@ pub fn inspect_mp3_320(source: &mut (impl Read + Seek)) -> Result<Mp3Evidence> {
     let mut stream = None;
     let mut info: Option<InfoFrame> = None;
     let mut audio_frames = 0u64;
+    let mut first_bitrate = None;
+    let mut varying_bitrate = false;
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(
             AudioCodecParameters::new().for_codec(CODEC_ID_MP3),
@@ -275,8 +287,18 @@ pub fn inspect_mp3_320(source: &mut (impl Read + Seek)) -> Result<Mp3Evidence> {
             }
             info = Some(metadata);
         } else {
-            if header.bitrate != 320 {
-                return Err(invalid("every MP3 audio frame must use 320 kbps"));
+            if profile
+                .bitrate()
+                .is_some_and(|bitrate| header.bitrate != bitrate)
+            {
+                return Err(invalid(
+                    "MP3 audio frame bitrate differs from the selected CBR profile",
+                ));
+            }
+            if let Some(first) = first_bitrate {
+                varying_bitrate |= first != header.bitrate;
+            } else {
+                first_bitrate = Some(header.bitrate);
             }
             let packet = Packet::new(0, Timestamp::ZERO, Duration::from(SAMPLES_PER_FRAME), bytes);
             let decoded = decoder
@@ -292,6 +314,11 @@ pub fn inspect_mp3_320(source: &mut (impl Read + Seek)) -> Result<Mp3Evidence> {
     }
     if audio_frames == 0 {
         return Err(invalid("MP3 contains no audio frames"));
+    }
+    if profile == AudioProfile::Mp3Vbr && !varying_bitrate {
+        return Err(invalid(
+            "MP3 VBR requires observed audio-frame bitrate variation",
+        ));
     }
     if let Some(info) = &info
         && (info

@@ -1,17 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { SettingsVersion } from "../src/generated/SettingsVersion";
 import { Settings } from "./Catalog";
-
-const settings: SettingsVersion = {
-  version: 7,
-  settings: {
-    format: "mp3",
-    accepted_formats: ["mp3", "flac"],
-    artwork_size: "recommended",
-    template: { folder: "<Album Artist>\\<Album>", filename: "<Title>.<ext>" },
-  },
-};
+import { defaultAudioSettings as settings } from "./test-fixtures/audio";
 
 function render(props: Partial<React.ComponentProps<typeof Settings>> = {}) {
   return renderToStaticMarkup(
@@ -65,13 +55,17 @@ describe("system library settings", () => {
 
   it("shows separate accepted and preferred combinations and root configuration", () => {
     const markup = render({ policy: { read_only: false } });
-    expect(markup).toContain("Accepted audio formats and bitrate");
-    expect(markup).toContain("Preferred audio format and bitrate");
-    expect(markup.match(/type="checkbox"/g)).toHaveLength(2);
+    expect(markup).toContain("Accepted audio profiles");
+    expect(markup).toContain("Preferred audio profile");
+    expect(markup.match(/type="checkbox"/g)).toHaveLength(8);
     expect(markup.match(/type="checkbox"[^>]*checked/g)).toHaveLength(2);
     expect(markup).toContain("320 kbps CBR");
     expect(markup).toContain("Lossless (no fixed bitrate)");
-    expect(markup).toContain("Other MP3 bitrates, VBR and M4A are not supported yet.");
+    expect(markup).toContain("MP3 VBR requires actual bitrate variation.");
+    expect(markup).toContain("M4A is not supported.");
+    expect(markup).not.toContain('value="m4a"');
+    expect(markup).toMatch(/<option value="mp3_cbr320" selected/);
+    expect(markup).not.toMatch(/<option value="mp3_cbr128"/);
     expect(markup).toContain("Register library root");
     expect(markup).toContain("Server folder path");
   });
@@ -79,10 +73,13 @@ describe("system library settings", () => {
   it("requires a preferred choice within the accepted combinations", () => {
     const markup = render({
       policy: { read_only: false },
-      settings: { ...settings, settings: { ...settings.settings, accepted_formats: ["flac"] } },
+      settings: {
+        ...settings,
+        policy: { ...settings.policy, accepted: ["flac_lossless"] },
+      },
     });
-    expect(markup).toContain("Choose an accepted combination");
-    expect(markup).toContain("Select at least one accepted combination");
+    expect(markup).toContain("Choose an accepted profile");
+    expect(markup).toContain("Select at least one accepted profile");
     expect(markup).toMatch(/<button[^>]*type="submit"[^>]*disabled/);
   });
 
@@ -94,6 +91,22 @@ describe("system library settings", () => {
     expect(markup).toContain("Lossless");
     expect(markup).not.toContain("Register library root");
     expect(markup).not.toContain("<form");
+  });
+
+  it("uses the effective Rust policy rather than the legacy codec fields", () => {
+    const markup = render({
+      settings: {
+        ...settings,
+        policy: {
+          version: 1,
+          accepted: ["mp3_cbr128", "mp3_vbr", "flac_lossless"],
+          preferred: "mp3_cbr128",
+        },
+      },
+    });
+    expect(markup).toContain("128 kbps CBR");
+    expect(markup).toContain("MP3 · VBR (actual bitrate variation)");
+    expect(markup).not.toContain("320 kbps");
   });
 
   it("shows read failures instead of reporting missing setup", () => {

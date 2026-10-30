@@ -3,7 +3,7 @@ use super::filesystem::NativeRoot;
 use super::filesystem::{
     LibraryDirectory, is_unsafe_cap_link, is_unsafe_link, require_local_disk, sync_directory,
 };
-use super::media::{NormalizedAudio, normalize_audio};
+use super::media::{NormalizedAudio, normalize_audio_with_profile};
 use super::permissions::FilePermissions;
 use super::store::{NormalizationRun, NormalizationWork, Store, TransferFile};
 use crate::{Error, Result};
@@ -636,6 +636,8 @@ impl NormalizationDirectory<'_> {
                 || work.staging_name
                     != format!("track-{:04}.{}", work.track_number, work.format.extension())
                 || receipt.cover_sha256 != self.cover_sha256
+                || receipt.format != work.format
+                || receipt.audio != work.audio
                 || receipt.input_sha256 != work.input_sha256
                 || receipt.tags_sha256 != work.tags_sha256
             {
@@ -701,18 +703,20 @@ impl NormalizationDirectory<'_> {
         let mut input = ProgressIo::new(input, heartbeat);
         let evidence = if recovered {
             let mut replay = replay::ReplayOutput::new(&mut output)?;
-            normalize_audio(
+            normalize_audio_with_profile(
                 &mut input,
                 &mut ProgressIo::new(&mut replay, heartbeat),
                 work.format,
+                work.audio,
                 &work.tags,
                 cover,
             )?
         } else {
-            normalize_audio(
+            normalize_audio_with_profile(
                 &mut input,
                 &mut ProgressIo::new(&mut output, heartbeat),
                 work.format,
+                work.audio,
                 &work.tags,
                 cover,
             )?

@@ -121,6 +121,7 @@ async fn browser_caa_search_and_download_keep_exact_release_evidence_and_separat
         &mut store,
         RELEASE,
         CatalogPlanRequest {
+            audio_profile: None,
             job_id: job,
             expected_version: 1,
             settings_version: settings,

@@ -2,8 +2,13 @@ import { useEffect, useState } from "react";
 import { OutputPreview } from "../../src/OutputPreview";
 import type { OutputPreview as Preview } from "../../src/generated/OutputPreview";
 import type { Entry } from "../../src/generated/Entry";
-import type { AudioFormat } from "../../src/generated/AudioFormat";
+import type { AudioProfile } from "../../src/generated/AudioProfile";
 import type { StoredPlan } from "../../src/generated/StoredPlan";
+import {
+  AudioProfileSelect,
+  audioProfileLabel,
+  outputWithAudioPolicy,
+} from "../../app/audio-profiles";
 import { entries, request, sampleEdition, type AlbumReport, type Snapshot } from "./client";
 
 export function LocalTest() {
@@ -13,7 +18,7 @@ export function LocalTest() {
   const [artist, setArtist] = useState(sampleEdition.album_artist);
   const [album, setAlbum] = useState(sampleEdition.album);
   const [bucket, setBucket] = useState("");
-  const [format, setFormat] = useState<AudioFormat>("mp3");
+  const [profile, setProfile] = useState<AudioProfile>();
   const [folderTemplate, setFolderTemplate] = useState("<LETTER>\\<ALBUM ARTIST>\\<ALBUM>");
   const [filenameTemplate, setFilenameTemplate] = useState(
     "<Track Artist> - <Album> - <Track:00> - <Title>.<ext>",
@@ -25,7 +30,19 @@ export function LocalTest() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("Loading the isolated test database…");
 
-  const settings = { format, template: { folder: folderTemplate, filename: filenameTemplate } };
+  const settings = snapshot
+    ? outputWithAudioPolicy(
+        {
+          ...snapshot.settings.settings,
+          template: { folder: folderTemplate, filename: filenameTemplate },
+        },
+        {
+          ...snapshot.settings.policy,
+          preferred: profile ?? snapshot.settings.policy.preferred,
+        },
+        snapshot.settings.audio_profiles,
+      )
+    : null;
   const edition = { ...sampleEdition, album_artist: artist, album, bucket: bucket || null };
 
   async function refresh() {
@@ -50,7 +67,7 @@ export function LocalTest() {
   useEffect(() => {
     void act(async () => {
       const current = await refresh();
-      setFormat(current.settings.settings.format);
+      setProfile(current.settings.policy.preferred);
       setFolderTemplate(current.settings.settings.template.folder);
       setFilenameTemplate(current.settings.settings.template.filename);
       setRows(await entries(""));
@@ -206,17 +223,17 @@ export function LocalTest() {
               </label>
               <div className="pair">
                 <label>
-                  Format
-                  <select
-                    value={format}
-                    onChange={(event) => {
-                      setFormat(event.target.value === "flac" ? "flac" : "mp3");
+                  Audio profile
+                  <AudioProfileSelect
+                    value={profile}
+                    accepted={snapshot?.settings.policy.accepted ?? []}
+                    descriptors={snapshot?.settings.audio_profiles ?? []}
+                    disabled={busy}
+                    onChange={(profile) => {
+                      setProfile(profile);
                       setPreview([]);
                     }}
-                  >
-                    <option value="mp3">MP3 — 320 kbps CBR</option>
-                    <option value="flac">FLAC</option>
-                  </select>
+                  />
                 </label>
                 <label>
                   Letter bucket (optional)
@@ -306,7 +323,8 @@ export function LocalTest() {
                   job_id: snapshot.job_id,
                   expected_version: snapshot.plan_version,
                   settings_version: snapshot.settings.version,
-                  format,
+                  format: null,
+                  audio_profile: profile ?? snapshot.settings.policy.preferred,
                   edition,
                   locations: [snapshot.location.id],
                   accepts_incomplete_coverage: false,
@@ -343,7 +361,13 @@ export function LocalTest() {
             <p className="saved">
               Saved plan v{snapshot.plan.version}:{" "}
               {snapshot.plan.approved_at === null ? "Not approved" : "Approved"} · Settings v
-              {snapshot.plan.settings_version} · {snapshot.plan.plan.format.toUpperCase()}
+              {snapshot.plan.settings_version} ·{" "}
+              {snapshot.plan.plan.audio
+                ? audioProfileLabel(
+                    snapshot.plan.plan.audio.profile,
+                    snapshot.settings.audio_profiles,
+                  )
+                : snapshot.plan.plan.format}
             </p>
           )}
         </section>

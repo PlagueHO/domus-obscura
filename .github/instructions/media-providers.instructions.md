@@ -15,7 +15,7 @@ applyTo: "crates/domus/**/*.rs"
 
 ## Audio and image output
 
-- Check every MP3 audio frame for actual 320 kbps and complete decoding. Keep the optional first metadata frame separate; never substitute average or advertised bitrate.
+- Check every MP3 audio frame against the frozen audio profile and require complete decoding. Legacy MP3 plans still require exactly 320 kbps CBR. VBR requires observed audio-frame bitrate variation, not a preset or average-bitrate claim. Keep the optional first metadata frame separate; never substitute average or advertised bitrate.
 - Independently check FLAC coding boundaries, reconstructed sample ranges and frame CRCs before decoding. Require a supplied MD5 to match; keep an absent MD5 explicitly unverified.
 - Write fresh metadata only to empty private staging. Derive tags from the frozen exact release, preserve encoded audio, bind the full input hash and verify the complete written output before saving a receipt.
 - Keep JPEG container checks and warning-free native decoding together. Never accept a repaired image or remove the scan, coding, color and allocation limits.

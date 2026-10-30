@@ -54,6 +54,37 @@ fn claim(fixture: &mut Fixture) -> TestResult<JobClaim> {
 }
 
 #[test]
+fn source_profiles_frozen_review_does_not_follow_new_system_policy() -> TestResult {
+    use domus::domain::AudioFormat;
+    let mut fixture = idle()?;
+    let candidate = prepare(&mut fixture)?;
+    let plan = fixture.store.plan(fixture.job, fixture.version)?;
+    fixture.store.save_settings(
+        Some(1),
+        &OutputSettings {
+            format: AudioFormat::Flac,
+            accepted_formats: Some(vec![AudioFormat::Flac]),
+            ..OutputSettings::default()
+        },
+    )?;
+    let approved = approve(&mut fixture, &candidate)?;
+    assert_eq!(approved.plan_sha256, candidate.plan_sha256);
+    assert_eq!(approved.review_sha256, candidate.review_sha256);
+    assert_eq!(
+        approved.assessment.profile,
+        domus::domain::AudioProfile::Mp3Cbr320
+    );
+    assert_eq!(fixture.store.plan(fixture.job, fixture.version)?, plan);
+    assert!(
+        fixture
+            .store
+            .transfers(fixture.job, fixture.version, Page::new(0, 200)?)?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
 fn source_review_is_separate_exact_digest_approval_and_preserves_unknown_proofs() -> TestResult {
     let mut fixture = idle()?;
     let candidate = prepare(&mut fixture)?;
@@ -502,6 +533,7 @@ fn source_review_rejects_unapproved_plan_and_remains_readable_after_replan() -> 
     let catalog = support::catalog_snapshot(&fixture.database, &replacement)?;
     let next = fixture.store.prepare_catalog_plan(
         PlanRequest {
+            audio_profile: None,
             job_id: fixture.job,
             expected_version: fixture.version,
             settings_version: 1,
@@ -562,6 +594,7 @@ fn source_review_rejects_another_jobs_candidate_and_oversized_listing() -> TestR
     let catalog = support::catalog_snapshot(&fixture.database, &edition)?;
     let plan = fixture.store.prepare_catalog_plan(
         PlanRequest {
+            audio_profile: None,
             job_id: job,
             expected_version: 1,
             settings_version: 1,

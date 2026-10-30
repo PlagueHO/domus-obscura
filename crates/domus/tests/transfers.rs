@@ -73,6 +73,7 @@ impl Fixture {
         let catalog = support::catalog_snapshot(&database, &edition)?;
         let plan = store.prepare_catalog_plan(
             PlanRequest {
+                audio_profile: None,
                 job_id: job,
                 expected_version: 1,
                 settings_version: 1,
@@ -425,6 +426,7 @@ fn unresolved_submission_blocks_plan_revision_even_while_awaiting_input() -> Tes
         fixture
             .store
             .prepare_plan(PlanRequest {
+                audio_profile: None,
                 job_id: fixture.job,
                 expected_version: fixture.version,
                 settings_version: 1,

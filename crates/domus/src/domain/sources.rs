@@ -1,6 +1,6 @@
 //! Peer paths are protocol identifiers, never native filesystem paths.
 //! A complete listing and matching names do not prove encoding or exact edition.
-use super::{AudioFormat, EditionSelection};
+use super::{AdvertisedQuality, AudioFormat, AudioPolicy, AudioProfile, EditionSelection};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -117,6 +117,7 @@ pub struct SourceAssessment {
     pub peer: String,
     pub folder: String,
     pub format: AudioFormat,
+    pub profile: AudioProfile,
     pub tracks: Vec<SourceTrackMatch>,
     pub problems: Vec<SourceMappingProblem>,
     pub complete_mapping: bool,
@@ -125,6 +126,40 @@ pub struct SourceAssessment {
     pub edition_verified: bool,
     pub audio_verified: bool,
     pub requires_user_review: bool,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct SourceProfileAlternative {
+    pub preferred: bool,
+    pub assessment: SourceAssessment,
+}
+
+pub fn assess_alternatives(
+    edition: &EditionSelection,
+    selected: AudioProfile,
+    policy: &AudioPolicy,
+    listing: &SourceFolder,
+) -> Result<Vec<SourceProfileAlternative>> {
+    policy.validate()?;
+    policy
+        .accepted
+        .iter()
+        .filter(|profile| **profile != selected)
+        .map(|profile| {
+            Ok(SourceProfileAlternative {
+                preferred: *profile == policy.preferred,
+                assessment: assess_source_profile(edition, *profile, listing)?,
+            })
+        })
+        .collect()
+}
+
+pub fn advertised_file(profile: AudioProfile, file: &SourceFileMetadata) -> AdvertisedQuality {
+    if extension(file).as_deref() != Some(profile.format().extension()) {
+        AdvertisedQuality::Mismatch
+    } else {
+        profile.advertised(file.bitrate_kbps, file.vbr)
+    }
 }
 
 fn text(value: &str) -> String {
@@ -178,6 +213,15 @@ pub fn assess_source(
     format: AudioFormat,
     listing: &SourceFolder,
 ) -> Result<SourceAssessment> {
+    assess_source_profile(edition, AudioProfile::legacy(format), listing)
+}
+
+pub fn assess_source_profile(
+    edition: &EditionSelection,
+    profile: AudioProfile,
+    listing: &SourceFolder,
+) -> Result<SourceAssessment> {
+    let format = profile.format();
     if !super::identifiers::is_canonical_uuid(&edition.release_id)
         || edition.tracks.is_empty()
         || edition.tracks.len() > 1000
@@ -288,16 +332,10 @@ pub fn assess_source(
                 expected_bytes: file.expected_bytes,
                 rule: (*rule).into(),
             });
-            let issue = if format == AudioFormat::Mp3 {
-                if file.bitrate_kbps.is_some_and(|value| value != 320) || file.vbr == Some(true) {
-                    Some(SourceMappingIssue::AdvertisedQualityMismatch)
-                } else if file.bitrate_kbps != Some(320) || file.vbr != Some(false) {
-                    Some(SourceMappingIssue::AdvertisedQualityUnknown)
-                } else {
-                    None
-                }
-            } else {
-                None
+            let issue = match profile.advertised(file.bitrate_kbps, file.vbr) {
+                AdvertisedQuality::Mismatch => Some(SourceMappingIssue::AdvertisedQualityMismatch),
+                AdvertisedQuality::Unknown => Some(SourceMappingIssue::AdvertisedQualityUnknown),
+                AdvertisedQuality::Match => None,
             };
             if let Some(issue) = issue {
                 problems.push(SourceMappingProblem {
@@ -343,6 +381,7 @@ pub fn assess_source(
         peer: listing.peer.clone(),
         folder: listing.folder.clone(),
         format,
+        profile,
         tracks,
         problems,
         complete_mapping,

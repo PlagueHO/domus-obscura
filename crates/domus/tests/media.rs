@@ -16,6 +16,8 @@ use fixtures::{cover_source, flac, mp3};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[path = "media/journal.rs"]
 mod journal;
+#[path = "media/profiles.rs"]
+mod profiles;
 const RELEASE: &str = "20000000-0000-4000-8000-000000000001";
 const GROUP: &str = "30000000-0000-4000-8000-000000000001";
 const ARTIST: &str = "10000000-0000-4000-8000-000000000001";

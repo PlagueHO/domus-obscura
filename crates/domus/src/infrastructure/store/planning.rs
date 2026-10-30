@@ -1,6 +1,8 @@
 use super::{JobClaim, Store, validate_claim};
 use crate::domain::CatalogRelease;
-use crate::domain::{AudioFormat, EditionSelection, OutputPreview, OutputSettings};
+use crate::domain::{
+    AudioFormat, AudioProfile, AudioSelection, EditionSelection, OutputPreview, OutputSettings,
+};
 use crate::infrastructure::catalog::{CatalogQuery, CatalogResult};
 use crate::{Error, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -11,6 +13,8 @@ use std::collections::HashSet;
 pub struct SettingsVersion {
     pub version: i64,
     pub settings: OutputSettings,
+    pub policy: crate::domain::AudioPolicy,
+    pub audio_profiles: Vec<crate::domain::AudioProfileDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -30,6 +34,8 @@ pub struct PreparedPlan {
     pub edition: EditionSelection,
     pub settings: OutputSettings,
     pub format: AudioFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioSelection>,
     pub outputs: Vec<OutputPreview>,
     pub destinations: Vec<PlanDestination>,
     pub accepts_incomplete_coverage: bool,
@@ -46,19 +52,37 @@ pub struct StoredPlan {
     pub plan: PreparedPlan,
 }
 
+impl PreparedPlan {
+    pub fn audio_profile(&self) -> Result<AudioProfile> {
+        if let Some(audio) = self.audio {
+            audio.validate(self.format)?;
+            if !self.settings.policy().accepted.contains(&audio.profile) {
+                return Err(Error::Conflict(
+                    "plan audio profile is outside its frozen policy".into(),
+                ));
+            }
+            Ok(audio.profile)
+        } else {
+            Ok(AudioProfile::legacy(self.format))
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ClaimedPlan {
     pub claim: JobClaim,
     pub plan: StoredPlan,
 }
 
-#[derive(Debug, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct PlanRequest {
     pub job_id: i64,
     pub expected_version: i64,
     pub settings_version: i64,
     pub format: Option<AudioFormat>,
+    #[serde(default)]
+    pub audio_profile: Option<AudioProfile>,
     pub edition: EditionSelection,
     pub locations: Vec<i64>,
     pub accepts_incomplete_coverage: bool,
@@ -75,9 +99,13 @@ impl Store {
             )
             .optional()?;
         row.map(|(version, body)| {
+            let settings: OutputSettings = serde_json::from_str(&body)?;
+            settings.validate()?;
             Ok(SettingsVersion {
                 version,
-                settings: serde_json::from_str(&body)?,
+                policy: settings.policy(),
+                audio_profiles: AudioProfile::descriptors(),
+                settings,
             })
         })
         .transpose()
@@ -244,15 +272,24 @@ impl Store {
                 "settings changed; reload the current version".into(),
             ));
         }
-        let mut effective = settings.settings.clone();
-        if let Some(format) = request.format {
-            if !effective.accepts(format) {
-                return Err(Error::InvalidInput(
-                    "selected audio format is not accepted by the system settings".into(),
-                ));
-            }
-            effective.format = format;
+        settings.settings.validate()?;
+        let policy = settings.settings.policy();
+        let profile = request
+            .audio_profile
+            .or_else(|| request.format.map(AudioProfile::legacy))
+            .unwrap_or(policy.preferred);
+        if !policy.accepted.contains(&profile)
+            || request
+                .format
+                .is_some_and(|format| format != profile.format())
+        {
+            return Err(Error::InvalidInput(
+                "selected audio profile is not accepted or differs from the requested format"
+                    .into(),
+            ));
         }
+        let mut effective = settings.settings.clone();
+        effective.format = profile.format();
         let outputs = request.edition.preview(&effective)?;
         let destinations = locations
             .iter()
@@ -279,6 +316,7 @@ impl Store {
             edition: request.edition.clone(),
             settings: settings.settings,
             format: effective.format,
+            audio: Some(AudioSelection::new(profile)),
             outputs,
             destinations,
             accepts_incomplete_coverage: request.accepts_incomplete_coverage,
@@ -556,12 +594,15 @@ pub(super) fn read_plan(connection: &Connection, job: i64, version: i64) -> Resu
         "SELECT settings_version, approved_at, body FROM job_plans WHERE job_id = ?1 AND version = ?2",
         params![job, version], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
+    let plan: PreparedPlan = serde_json::from_str(&body)?;
+    plan.settings.validate()?;
+    plan.audio_profile()?;
     Ok(StoredPlan {
         job_id: job,
         version,
         settings_version,
         approved_at,
-        plan: serde_json::from_str(&body)?,
+        plan,
     })
 }
 

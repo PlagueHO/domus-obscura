@@ -405,12 +405,20 @@ does not satisfy this requirement. Include MP3 CBR, MP3 VBR, FLAC and M4A in the
 by the user; recommend keeping it disabled by default. VBR is an encoding mode,
 not a fixed bitrate. M4A is a container; distinguish AAC from lossless ALAC.
 
-The current System editor supports accepted MP3 320 kbps CBR and FLAC lossless,
-with a separate preferred choice. FLAC has no fixed bitrate. New settings accept
-both supported choices by default and prefer MP3 320 CBR. Old settings without
-an accepted set retain both previously supported choices. New plan preparation
-rejects formats outside the saved accepted set. Existing plans stay unchanged.
-Additional bitrate, VBR and M4A support is not implemented. Do not enable a new option
+The System editor supports MP3 CBR at 128, 160, 192, 224, 256 and 320 kbps,
+one MP3 VBR profile, and FLAC lossless. The preferred profile is a separate choice
+inside the accepted set. FLAC has no fixed bitrate. MP3 VBR requires actual
+audio-frame bitrate variation; it does not claim an encoder preset or an
+average-bitrate target. MPEG-1 Layer III remains the supported MP3 variant.
+Free-format MPEG and VBRI remain unsupported.
+
+New settings still accept only MP3 320 CBR and FLAC by default and prefer
+MP3 320 CBR. The administrator must explicitly accept additional profiles.
+Legacy settings without an accepted set retain the two legacy choices, not all
+new profiles. New plan preparation rejects profiles outside the saved accepted
+set. New plans freeze the selected profile and audio-policy version. Existing
+plans, source-review hashes and receipts retain their legacy behavior.
+AAC and ALAC in M4A remain deferred and unavailable. Do not enable a new option
 until source assessment, complete audio validation, metadata writing and output
 verification support it without transcoding.
 

@@ -1,3 +1,4 @@
+mod audio;
 mod catalog;
 pub(crate) mod identifiers;
 pub(crate) use catalog::credit_text;
@@ -12,6 +13,10 @@ pub mod sharing;
 pub mod sources;
 mod templates;
 
+pub use audio::{
+    AUDIO_POLICY_VERSION, AdvertisedQuality, AudioPolicy, AudioProfile, AudioProfileDescriptor,
+    AudioSelection,
+};
 pub use catalog::{
     CatalogArtist, CatalogCredit, CatalogMedium, CatalogPage, CatalogRelease,
     CatalogReleaseFilters, CatalogReleaseGroup, CatalogReleasePage, CatalogReleaseSummary,

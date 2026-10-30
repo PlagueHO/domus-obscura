@@ -33,6 +33,7 @@ fn source_review_cli_imports_only_local_listing_and_requires_separate_exact_appr
     )?;
     let plan = store.prepare_catalog_plan(
         PlanRequest {
+            audio_profile: None,
             job_id: job,
             expected_version: 1,
             settings_version: 1,

@@ -340,6 +340,7 @@ fn million_events_filter_by_plan_before_pagination() -> Result<(), Box<dyn std::
     let job = store.enqueue(1)?;
     let other = store.enqueue(1)?;
     let saved = store.prepare_plan(PlanRequest {
+        audio_profile: None,
         job_id: job,
         expected_version: 1,
         settings_version: 1,

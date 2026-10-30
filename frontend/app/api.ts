@@ -1,5 +1,5 @@
 export type { LocalStatus } from "../src/generated/LocalStatus";
-export type { SearchReport } from "../src/generated/SearchReport";
+export type { SourceSearchReport as SearchReport } from "../src/generated/SourceSearchReport";
 
 export class ApiError extends Error {
   constructor(

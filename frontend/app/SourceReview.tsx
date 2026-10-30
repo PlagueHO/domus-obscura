@@ -3,16 +3,21 @@ import type { SourceCandidate } from "../src/generated/SourceCandidate";
 import type { SourceFolderReport } from "../src/generated/SourceFolderReport";
 import type { ApproveSourceCandidate } from "../src/generated/ApproveSourceCandidate";
 import type { AudioFormat } from "../src/generated/AudioFormat";
+import type { AudioProfile } from "../src/generated/AudioProfile";
+import type { AudioProfileDescriptor } from "../src/generated/AudioProfileDescriptor";
 import type { SourceSearchRequest } from "../src/generated/SourceSearchRequest";
 import type { SourceFolderRequest } from "../src/generated/SourceFolderRequest";
 import { request, type SearchReport } from "./api";
 import { useCommand } from "./hooks";
 import { Alert, Badge, Button, Check, Empty } from "./components/ui";
+import { audioProfileLabel } from "./audio-profiles";
 
 export function SourceReview({
   base,
   releaseId,
   format,
+  audioProfile = null,
+  audioProfiles = [],
   candidates,
   selected,
   onSelect,
@@ -22,6 +27,8 @@ export function SourceReview({
   base: string;
   releaseId: string;
   format: AudioFormat;
+  audioProfile?: AudioProfile | null;
+  audioProfiles?: AudioProfileDescriptor[];
   candidates: SourceCandidate[];
   selected: SourceCandidate | undefined;
   onSelect: (id: number) => void;
@@ -34,7 +41,8 @@ export function SourceReview({
   const [acknowledged, setAcknowledged] = useState(false);
   const [offset, setOffset] = useState(0);
   const command = useCommand();
-  const files = report?.peers.flatMap((peer) => peer.files.map((file) => ({ peer, file }))) ?? [];
+  const groups = report?.groups ?? [];
+  const fileCount = groups.reduce((count, group) => count + group.files.length, 0);
 
   async function assess() {
     const body: SourceFolderRequest = {
@@ -42,6 +50,7 @@ export function SourceReview({
       peer,
       remote_folder: folder,
       format,
+      audio_profile: audioProfile,
     };
     const result = await request<SourceFolderReport>("/api/local/source-folder", {
       body,
@@ -83,6 +92,11 @@ export function SourceReview({
         Search and folder assessment read metadata only. They do not prove edition, encoding or
         permission. No audio is downloaded here.
       </p>
+      <p>
+        Frozen plan profile:{" "}
+        {audioProfile ? audioProfileLabel(audioProfile, audioProfiles) : format}. Other accepted
+        profiles require a new plan and separate approval.
+      </p>
       <Button
         variant="secondary"
         disabled={command.busy || !localEnabled}
@@ -105,7 +119,8 @@ export function SourceReview({
       {report && (
         <>
           <p>
-            {report.query} · {report.peers.length} peers · {files.length} public files
+            {report.query} · {report.peers.length} peers · {groups.length} matching folders ·{" "}
+            {fileCount} files
             {report.limit_reached ? " · Search limit reached" : ""}
           </p>
           {report.issues.map((issue, index) => (
@@ -113,53 +128,21 @@ export function SourceReview({
               {issue.peer}: {issue.error}
             </p>
           ))}
-          {files.length === 0 && (
-            <Empty>No public files were returned. You can enter a peer and folder below.</Empty>
+          {groups.length === 0 && (
+            <Empty>
+              No accepted-profile files were returned. You can enter a peer and folder below.
+            </Empty>
           )}
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Peer / file</th>
-                  <th>Advertised quality</th>
-                  <th>Queue</th>
-                  <th>Folder</th>
-                </tr>
-              </thead>
-              <tbody>
-                {files.slice(offset, offset + 30).map(({ peer, file }, index) => (
-                  <tr key={`${peer.peer}:${file.remote_path}:${index}`}>
-                    <td>
-                      <strong>{peer.peer}</strong>
-                      <small>{file.remote_path}</small>
-                    </td>
-                    <td>
-                      {file.extension} · {file.bitrate_kbps ?? "?"} kbps
-                      {file.vbr === true ? " · VBR" : ""}
-                      <small>{file.expected_bytes.toLocaleString()} bytes</small>
-                    </td>
-                    <td>{peer.slot_free ? "Slot available" : `${peer.queue_length} queued`}</td>
-                    <td>
-                      <Button
-                        variant="secondary"
-                        disabled={command.busy}
-                        onClick={() => {
-                          setPeer(peer.peer);
-                          const index = Math.max(
-                            file.remote_path.lastIndexOf("\\"),
-                            file.remote_path.lastIndexOf("/"),
-                          );
-                          setFolder(index >= 0 ? file.remote_path.slice(0, index) : "");
-                        }}
-                      >
-                        Use this folder
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <SourceSearchResults
+            report={report}
+            groups={sourceSearchPage(groups, offset)}
+            audioProfiles={audioProfiles}
+            busy={command.busy}
+            onFolder={(peer, folder) => {
+              setPeer(peer);
+              setFolder(folder);
+            }}
+          />
           <div className="actions">
             <Button
               variant="secondary"
@@ -170,7 +153,7 @@ export function SourceReview({
             </Button>
             <Button
               variant="secondary"
-              disabled={offset + 30 >= files.length}
+              disabled={offset + 30 >= fileCount}
               onClick={() => setOffset(offset + 30)}
             >
               Next files
@@ -263,7 +246,7 @@ export function SourceReview({
               : "Mapping needs attention"}
           </Badge>
           <p>
-            Advertised quality{" "}
+            {audioProfileLabel(selected.assessment.profile, audioProfiles)} · Advertised quality{" "}
             {selected.assessment.advertised_quality_matches
               ? "matches"
               : selected.assessment.problems.some(
@@ -273,6 +256,36 @@ export function SourceReview({
                 : "is unknown"}{" "}
             · Audio not verified by metadata review
           </p>
+          {selected.alternatives.length > 0 && (
+            <section aria-label="Other accepted profiles">
+              <h3>Other accepted profiles for review</h3>
+              <p>
+                These results use the complete folder listing. They do not change this frozen plan
+                or acknowledge a source. To use another profile, create a new plan and approve it
+                separately. No fallback or download starts automatically.
+              </p>
+              <ul>
+                {selected.alternatives.map(({ preferred, assessment }) => (
+                  <li key={assessment.profile}>
+                    {audioProfileLabel(assessment.profile, audioProfiles)}
+                    {preferred ? " · Preferred profile" : ""} ·{" "}
+                    {assessment.complete_mapping
+                      ? "Complete track mapping"
+                      : "Mapping needs attention"}{" "}
+                    · Advertised quality{" "}
+                    {assessment.advertised_quality_matches
+                      ? "matches"
+                      : assessment.problems.some(
+                            (problem) => problem.issue === "advertised_quality_mismatch",
+                          )
+                        ? "does not match"
+                        : "is unknown"}
+                    {" · Audio not verified"}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           {selected.assessment.can_approve && !selected.assessment.advertised_quality_matches && (
             <p>
               The peer did not supply all quality attributes. You can acknowledge this source.
@@ -324,5 +337,111 @@ export function SourceReview({
         </div>
       )}
     </section>
+  );
+}
+
+/** Page file metadata without losing its peer/folder grouping. */
+export function sourceSearchPage(
+  groups: SearchReport["groups"],
+  offset: number,
+): SearchReport["groups"] {
+  let start = 0;
+  return groups.flatMap((group) => {
+    const files = group.files.slice(Math.max(0, offset - start), Math.max(0, offset + 30 - start));
+    start += group.files.length;
+    return files.length > 0 ? [{ ...group, files }] : [];
+  });
+}
+
+export function SourceSearchResults({
+  report,
+  groups = report.groups,
+  audioProfiles = [],
+  busy,
+  onFolder,
+}: {
+  report: SearchReport;
+  groups?: SearchReport["groups"];
+  audioProfiles?: AudioProfileDescriptor[];
+  busy: boolean;
+  onFolder: (peer: string, folder: string) => void;
+}) {
+  return (
+    <>
+      <p className="muted">
+        Files are grouped by peer and folder under the saved audio policy. Metadata matches do not
+        prove a complete album. Assess the full folder before source review. No profile is selected
+        automatically.
+      </p>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Peer / folder</th>
+              <th>Advertised files and profiles</th>
+              <th>Queue</th>
+              <th>Folder</th>
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map((group) => {
+              const peer = report.peers.find((peer) => peer.peer === group.peer);
+              return (
+                <tr key={`${group.peer}:${group.folder}`}>
+                  <td>
+                    <strong>{group.peer}</strong>
+                    <small>{group.folder}</small>
+                  </td>
+                  <td>
+                    {group.files.map(({ file, matches }) => (
+                      <div key={file.remote_path}>
+                        <strong>{file.remote_path}</strong>
+                        <small>
+                          {file.extension} · {file.bitrate_kbps ?? "Unknown"} kbps ·{" "}
+                          {file.vbr === true
+                            ? "VBR advertised"
+                            : file.vbr === false
+                              ? "CBR advertised"
+                              : "CBR/VBR unknown"}
+                          {" · "}
+                          {file.expected_bytes.toLocaleString()} bytes
+                        </small>
+                        {matches.map((match) => (
+                          <small key={match.profile}>
+                            {audioProfileLabel(match.profile, audioProfiles)}
+                            {match.preferred ? " · Preferred profile" : ""} ·{" "}
+                            {match.quality === "match"
+                              ? "Metadata match"
+                              : match.quality === "mismatch"
+                                ? "Metadata mismatch"
+                                : "Quality unknown"}
+                          </small>
+                        ))}
+                      </div>
+                    ))}
+                  </td>
+                  <td>
+                    {peer
+                      ? peer.slot_free
+                        ? "Slot available"
+                        : `${peer.queue_length} queued`
+                      : "Queue unknown"}
+                  </td>
+                  <td>
+                    <Button
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() => onFolder(group.peer, group.folder)}
+                    >
+                      Use this folder
+                    </Button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }

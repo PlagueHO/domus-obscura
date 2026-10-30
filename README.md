@@ -33,7 +33,7 @@ approval, recovery and external-service rules.
 - Durable single-peer transfer intent, immutable selected files, bounded progress records, and a received-payload checkpoint.
 - Bounded Soulseek server login, selected-peer address lookup, direct control negotiation and durable queue/acceptance ordering.
 - An isolated, bounded PNG/JPEG cover normalizer with orientation and explicit transparency decisions.
-- Read-only per-frame 320 kbps MP3 and native FLAC validation with unchanged encoded-audio evidence.
+- Read-only per-frame MP3 CBR/VBR profile and native FLAC validation with unchanged encoded-audio evidence.
 - Fresh audio metadata and durable normalization recipes, file receipts and publication handoff guards.
 - Private staging with sealed transfer inputs, synced outputs, restart verification and claim-bound normalization.
 - Retained JPEG previews and explicit, version-bound artwork approval before normalization.
@@ -676,9 +676,13 @@ Missing tracks, extra or mixed audio, unknown files and ambiguous matches remain
 visible problems. Common image/document/playlist assets are listed but are
 not selected for download. Only the separately approved cover is used for output.
 
-MP3 attributes must explicitly advertise 320 kbps and non-VBR to confirm the
-requested advertised quality. Missing attributes stay unknown but do not block
-source acknowledgement. Known non-320 bitrates or VBR still block approval.
+MP3 CBR attributes must explicitly advertise the selected bitrate and non-VBR
+to confirm the requested advertised quality. MP3 VBR needs an explicit VBR flag;
+its advertised average bitrate is not a quality target. Missing required
+attributes stay unknown but do not block explicit source acknowledgement.
+Known profile mismatches block approval for the selected plan. Complete-folder
+reports show other accepted profiles for review, not automatic fallback.
+A different selected profile requires a new plan and approval.
 The [protocol documentation](https://nicotine-plus.org/doc/SLSKPROTOCOL.html#file-attribute-combinations)
 permits missing attributes; modern SoulseekQt MP3 results normally omit the VBR
 flag. Folder replies also carry per-file attributes, but peers can omit them.
@@ -1161,7 +1165,7 @@ Encoded input and output are each limited to 8 MiB. Source sides are limited to 
 
 ## MP3 proof boundary
 
-The isolated read-only inspector checks every MPEG audio frame. Each audio frame must be MPEG-1 Layer III at 320 kbps. Sample rate and channel count must stay constant. It checks complete frame boundaries, reserved header values and optional protected-frame CRCs. It then decodes every audio frame with [Symphonia 0.6.1](https://docs.rs/symphonia/0.6.1/symphonia/). Decode errors or incomplete decoded frames cause rejection. Advertised or average bitrate is not acceptance evidence.
+The isolated read-only inspector checks every MPEG audio frame. Each audio frame must be MPEG-1 Layer III. CBR profiles require every audio frame to use the exact selected bitrate: 128, 160, 192, 224, 256 or 320 kbps. VBR requires at least two observed audio-frame bitrates, with no encoder-preset or average-bitrate guarantee. Legal MPEG-1 frame bitrates below 128 kbps can occur in VBR; there is no VBR bitrate floor. Legacy MP3 plans still require exactly 320 kbps CBR. Sample rate and channel count must stay constant. It checks complete frame boundaries, reserved header values and optional protected-frame CRCs. It then decodes every audio frame with [Symphonia 0.6.1](https://docs.rs/symphonia/0.6.1/symphonia/). Decode errors or incomplete decoded frames cause rejection. Advertised or average bitrate is not acceptance evidence.
 
 One first-frame Xing/Info header is counted separately from audio. Its side information must be empty, and any saved frame/byte counts must match the observed MPEG range. A later Xing/Info frame is rejected. VBRI and free-format MPEG need separate validated support. Bounded ID3v2, trailing ID3v1 and APE framing can be excluded from the MPEG range. Trailer signatures inside a complete audio frame are not treated as tags. Existing tag contents are not trusted.
 
@@ -1628,13 +1632,24 @@ loopback-only.
 
 Open **System** in the main application navigation to configure accepted audio
 format/bitrate combinations, a separate preferred combination, artwork size and
-output templates. Currently supported combinations are MP3 320 kbps CBR and FLAC
-lossless (which has no fixed bitrate). Other bitrates, VBR and M4A remain unavailable
-until complete validation and metadata support exist. The preferred choice must
+output templates. Supported profiles are MP3 CBR at 128, 160, 192, 224, 256 and
+320 kbps, MP3 VBR, and FLAC lossless (which has no fixed bitrate). M4A AAC/ALAC
+remain unavailable. New settings accept only MP3 320 CBR and FLAC by default;
+additional profiles require explicit administrator selection. The preferred choice must
 be accepted. New requests start with that choice; another accepted combination
 can be selected explicitly. The backend rejects unaccepted formats for new plans.
-Legacy settings preserve both previously available formats. Existing plans and
-approvals retain their frozen policy.
+Legacy settings preserve both previously available profiles, not every new MP3
+profile. Existing plans and approvals retain their frozen policy. New plans bind
+the exact selected profile and audio-policy version. New normalization recipes
+and receipts carry that same binding. Old receipts remain unchanged.
+
+`OutputSettings.audio_policy` stores `version`, `accepted` and `preferred`.
+Version 1 profile identifiers are `mp3_cbr128`, `mp3_cbr160`, `mp3_cbr192`,
+`mp3_cbr224`, `mp3_cbr256`, `mp3_cbr320`, `mp3_vbr` and `flac_lossless`.
+The existing `format` and `accepted_formats` fields must agree with the policy's
+file formats. `audio_profile` in a plan request selects one accepted profile.
+An omitted selection uses the preferred profile. An explicit legacy `format`
+still means MP3 320 CBR or FLAC, never an arbitrary MP3 profile.
 
 The same page can register existing absolute server-side main/backup folders and
 run separate index scans. `POST /api/locations` takes `root` and `kind` (`main` or

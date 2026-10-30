@@ -1,4 +1,4 @@
-use crate::domain::{AudioFormat, CatalogRelease};
+use crate::domain::{AudioFormat, AudioProfile, CatalogRelease};
 use crate::infrastructure::catalog::{CatalogQuery, CatalogReply, CatalogResult};
 use crate::infrastructure::store::{CatalogPermit, PlanRequest, Store, StoredPlan};
 use crate::{Error, Result};
@@ -11,6 +11,8 @@ pub struct CatalogPlanRequest {
     pub expected_version: i64,
     pub settings_version: i64,
     pub format: Option<AudioFormat>,
+    #[serde(default)]
+    pub audio_profile: Option<AudioProfile>,
     pub locations: Vec<i64>,
     pub accepts_incomplete_coverage: bool,
     pub bucket: Option<String>,
@@ -23,6 +25,7 @@ impl CatalogPlanRequest {
             expected_version: self.expected_version,
             settings_version: self.settings_version,
             format: self.format,
+            audio_profile: self.audio_profile,
             edition: catalog.data.selection(self.bucket)?,
             locations: self.locations,
             accepts_incomplete_coverage: self.accepts_incomplete_coverage,

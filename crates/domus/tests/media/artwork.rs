@@ -520,6 +520,7 @@ fn artwork_approval_never_carries_over_to_a_revised_plan() -> TestResult {
     let old = fixture.store.plan(fixture.job, fixture.version)?;
     let revised = fixture.store.prepare_catalog_plan(
         PlanRequest {
+            audio_profile: None,
             job_id: fixture.job,
             expected_version: fixture.version,
             settings_version: old.settings_version,
