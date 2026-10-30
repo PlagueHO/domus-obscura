@@ -9,7 +9,17 @@ import { request, type LocalStatus } from "./api";
 import { WorkerRequests } from "./WorkerRequests";
 import { useCommand, useResource } from "./hooks";
 import { activeStates } from "./state";
-import { Alert, Badge, Button, Card, Check, Cover, Empty, Pager } from "./components/ui";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Check,
+  Cover,
+  Empty,
+  Pager,
+  ProviderWaiting,
+} from "./components/ui";
 import { Album, Artist, Settings } from "./Catalog";
 import { RequestPage } from "./Request";
 import { Library } from "./Library";
@@ -550,6 +560,7 @@ export function App() {
         </div>
       </nav>
       <main id="main" tabIndex={-1}>
+        <ProviderWaiting />
         <nav className="breadcrumbs" aria-label="Current location">
           <a href="#/">Media</a>
           <span aria-hidden="true"> · </span>

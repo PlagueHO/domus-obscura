@@ -505,12 +505,9 @@ fn tool_result(result: Result<ServiceResponse>) -> Result<Value> {
         }
         Err(Error::InvalidInput(message) | Error::Conflict(message)) => Ok(tool_failure(&message)),
         Err(Error::Busy(message) | Error::Remote(message)) => Ok(tool_failure(message)),
-        Err(Error::Catalog {
-            reason,
-            retry_after_seconds,
-        }) => Ok(tool_failure(&format!(
-            "{reason}; retry after {retry_after_seconds} seconds"
-        ))),
+        Err(error @ (Error::ProviderActive | Error::ProviderSaturated | Error::Catalog { .. })) => {
+            Ok(tool_failure(&error.to_string()))
+        }
         Err(error) => {
             eprintln!("MCP read-service failure: {error}");
             Ok(tool_failure(

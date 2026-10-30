@@ -1,9 +1,164 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, errorText, query, request } from "./api";
+import { ApiError, errorText, query, request, subscribeProvider, getProviderSnapshot } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("same-origin client", () => {
+  it.each(["active", "saturated", "paused", "backoff"])(
+    "retains typed provider state %s without retry",
+    async (state) => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValue(
+          Response.json({ error: "Waiting", provider_state: state }, { status: 503 }),
+        );
+      vi.stubGlobal("fetch", fetch);
+      await expect(request("/api/discovery/artists?query=fixture")).rejects.toMatchObject({
+        providerState: state,
+        retryAfterSeconds: null,
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("shares passive status reads and stops them when metadata settles", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: Response) => void;
+    const metadata = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    const fetch = vi.fn((path: string) =>
+      path === "/api/discovery/status"
+        ? Promise.resolve(
+            Response.json({
+              state: "backoff",
+              retry_after_seconds: 2,
+              known_retry_after_seconds: 2,
+              failures: 1,
+            }),
+          )
+        : metadata.then((response) => response.clone()),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const unsubscribe = subscribeProvider(() => {});
+    const secondSubscriber = subscribeProvider(() => {});
+    try {
+      const first = request("/api/discovery/artists?query=fixture");
+      const second = request("/api/discovery/releases?query=fixture");
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(fetch.mock.calls.filter(([path]) => path === "/api/discovery/status")).toHaveLength(2);
+      expect(fetch.mock.calls.filter(([path]) => path !== "/api/discovery/status")).toHaveLength(2);
+      expect(getProviderSnapshot().status?.known_retry_after_seconds).toBe(2);
+      finish(Response.json({ items: [] }));
+      await Promise.all([first, second]);
+      expect(getProviderSnapshot().pending).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(fetch).toHaveBeenCalledTimes(4);
+    } finally {
+      unsubscribe();
+      secondSubscriber();
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows failed status observation and does not poll after failure or retry metadata", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    const fetch = vi.fn((path: string) =>
+      path === "/api/discovery/status"
+        ? Promise.resolve(Response.json({ error: "Status unavailable" }, { status: 503 }))
+        : pending,
+    );
+    vi.stubGlobal("fetch", fetch);
+    const unsubscribe = subscribeProvider(() => {});
+    try {
+      const work = request("/api/discovery/artists?query=fixture");
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(getProviderSnapshot().error).toBeInstanceOf(ApiError);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      finish(Response.json({ items: [] }));
+      await work;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      unsubscribe();
+      vi.useRealTimers();
+    }
+  });
+
+  it("limits passive observation to 30 reads without retrying pending metadata", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    const fetch = vi.fn((path: string) =>
+      path === "/api/discovery/status"
+        ? Promise.resolve(
+            Response.json({
+              state: "active",
+              retry_after_seconds: 1,
+              known_retry_after_seconds: null,
+              failures: 0,
+            }),
+          )
+        : pending,
+    );
+    vi.stubGlobal("fetch", fetch);
+    const unsubscribe = subscribeProvider(() => {});
+    try {
+      const work = request("/api/discovery/artists?query=fixture");
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(fetch.mock.calls.filter(([path]) => path === "/api/discovery/status")).toHaveLength(
+        30,
+      );
+      expect(fetch.mock.calls.filter(([path]) => path !== "/api/discovery/status")).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
+      finish(Response.json({ items: [] }));
+      await work;
+    } finally {
+      unsubscribe();
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts an in-flight status read when the last subscriber leaves", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    let statusSignal: AbortSignal | undefined;
+    const fetch = vi.fn((path: string, options: RequestInit) => {
+      if (path !== "/api/discovery/status") return pending;
+      statusSignal = options.signal ?? undefined;
+      return new Promise<Response>((_, reject) => {
+        statusSignal?.addEventListener("abort", () =>
+          reject(new DOMException("Aborted", "AbortError")),
+        );
+      });
+    });
+    vi.stubGlobal("fetch", fetch);
+    const unsubscribe = subscribeProvider(() => {});
+    try {
+      const work = request("/api/discovery/artists?query=fixture");
+      await vi.advanceTimersByTimeAsync(1000);
+      unsubscribe();
+      expect(statusSignal?.aborted).toBe(true);
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(getProviderSnapshot().error).toBeUndefined();
+      finish(Response.json({ items: [] }));
+      await work;
+    } finally {
+      unsubscribe();
+      vi.useRealTimers();
+    }
+  });
+
   it("saves shared system settings with PUT, a frozen expected version and command guards", async () => {
     const fetch = vi.fn().mockResolvedValue(Response.json(8));
     vi.stubGlobal("fetch", fetch);

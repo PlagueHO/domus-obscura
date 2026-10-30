@@ -1,7 +1,9 @@
 use super::{CaaListing, MAX_CAA_LISTING, bad};
+use crate::infrastructure::services::ProviderWait;
 use crate::infrastructure::store::{CatalogPermit, Store};
 use crate::{Error, Result};
 use reqwest::Url;
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 
 pub(crate) const MAX_IMAGE: usize = 8 * 1024 * 1024;
@@ -251,9 +253,10 @@ impl CaaHttpClient {
     /// Every hop uses the same durable catalog gate as MusicBrainz. A redirect
     /// never grants another request under an already-used capability.
     pub async fn fetch(&self, store: &mut Store, request: CaaRequest) -> Result<CaaFetch> {
+        let mut wait = ProviderWait::new(Arc::new(AtomicBool::new(false)));
         Ok(tokio::time::timeout(
             Duration::from_secs(30),
-            self.fetch_inner(store, request, false),
+            self.fetch_inner(store, request, false, &mut wait),
         )
         .await
         .map_err(|_| bad("CAA operation exceeded 30 seconds"))??
@@ -267,13 +270,23 @@ impl CaaHttpClient {
         store: &mut Store,
         request: CaaRequest,
     ) -> Result<CaaResponse> {
+        let mut wait = ProviderWait::new(Arc::new(AtomicBool::new(false)));
+        self.fetch_cached_with_wait(store, request, &mut wait).await
+    }
+
+    pub(crate) async fn fetch_cached_with_wait(
+        &self,
+        store: &mut Store,
+        request: CaaRequest,
+        wait: &mut ProviderWait,
+    ) -> Result<CaaResponse> {
         if let Some(cached) = store.caa_cache(&request)? {
             store.touch_caa_cache(&request)?;
             return Ok(cached);
         }
         tokio::time::timeout(
             Duration::from_secs(30),
-            self.fetch_inner(store, request, true),
+            self.fetch_inner(store, request, true, wait),
         )
         .await
         .map_err(|_| bad("CAA operation exceeded 30 seconds"))?
@@ -284,9 +297,24 @@ impl CaaHttpClient {
         store: &mut Store,
         mut request: CaaRequest,
         cache: bool,
+        wait: &mut ProviderWait,
     ) -> Result<CaaResponse> {
         loop {
-            let mut permit = store.claim_catalog_request()?;
+            wait.check()?;
+            if cache && let Some(cached) = store.caa_cache(&request)? {
+                store.touch_caa_cache(&request)?;
+                return Ok(cached);
+            }
+            let mut permit = match store.claim_catalog_request() {
+                Ok(permit) => permit,
+                Err(Error::Catalog { .. }) => {
+                    wait.pause(store.catalog_status()?).await?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            wait.reserve_start();
+            permit.cancel_before_start(wait.cancelled.clone());
             let reply = self.execute(&request, &mut permit).await;
             let retry = match &reply {
                 Ok((_, retry)) => *retry,
@@ -318,18 +346,7 @@ impl CaaHttpClient {
                     });
                 }
                 Ok((Reply::Redirect(next), _)) => {
-                    let completion =
-                        store.complete_uncached_catalog_request(permit, retry, true)?;
-                    if completion.retry_after_seconds > 15 {
-                        return Err(Error::Catalog {
-                            reason: "CAA redirect requires provider backoff before a new request",
-                            retry_after_seconds: completion.retry_after_seconds,
-                        });
-                    }
-                    tokio::time::sleep(Duration::from_secs(u64::from(
-                        completion.retry_after_seconds,
-                    )))
-                    .await;
+                    store.complete_uncached_catalog_request(permit, retry, true)?;
                     request = next;
                 }
             }
@@ -356,17 +373,26 @@ impl CaaHttpClient {
             .send()
             .await
             .map_err(|_| bad("CAA HTTPS request failed"))?;
-        let retry = crate::infrastructure::catalog::response_retry_after(response.headers())
-            .map_err(|error| match error {
-                Error::Catalog {
-                    retry_after_seconds,
-                    ..
-                } => Error::Catalog {
-                    reason: "CAA Retry-After is unsupported; catalog requests are paused",
-                    retry_after_seconds,
-                },
-                other => other,
-            })?;
+        let retry = crate::infrastructure::catalog::response_retry_after(response.headers());
+        let observed = match &retry {
+            Ok(seconds) => *seconds,
+            Err(Error::Catalog {
+                retry_after_seconds,
+                ..
+            }) => *retry_after_seconds,
+            Err(_) => 0,
+        };
+        permit.record_retry_after(observed).await?;
+        let retry = retry.map_err(|error| match error {
+            Error::Catalog {
+                retry_after_seconds,
+                ..
+            } => Error::Catalog {
+                reason: "CAA Retry-After is unsupported; catalog requests are paused",
+                retry_after_seconds,
+            },
+            other => other,
+        })?;
         let failure = |reason| Error::Catalog {
             reason,
             retry_after_seconds: retry.max(5),

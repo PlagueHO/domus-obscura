@@ -437,23 +437,48 @@ Missing bitrate or CBR/VBR metadata is unknown, not a match or a mismatch.
 Keep partial searches and peer errors visible; a bounded search cannot prove
 that the preferred quality is unavailable across the network.
 
-## Planned Provider Throttling Review
+## Provider Throttling and Waiting
 
-The user requested this follow-up for the local service that contacts public
-discography databases, including MusicBrainz. Review and complete graceful
-request throttling before treating that service as complete. This is later work,
-not part of the current local download test.
+MusicBrainz and CAA use the existing shared durable catalog budget, with one
+native-locked, single-use network permit at a time. Every permitted CAA redirect
+hop uses that same budget. Each service host admits at most four running or
+waiting network operations across both providers. Cache reads have separate
+bounded admission. Valid cache hits do not need a network slot. Waiting callers
+recheck the cache before claiming a request.
 
-- Reuse the existing durable provider budget and backoff controls.
-- Check each provider's current official request limits before implementation.
-- Coordinate requests across callers. Keep pending work bounded and reuse valid
-  cached results.
-- Handle rate-limit responses and `Retry-After` without rapid retry loops.
-  Preserve longer saved backoff and unsupported retry pauses.
-- Show a clear waiting state and retry timing when known. Keep provider errors
-  visible; do not show throttling as an empty search result.
-- Add isolated tests for concurrent callers, throttling, backoff and recovery.
-  Metadata recovery must not retry acquisition or bypass approvals.
+Each metadata operation has one total admission-wait allowance of 15 seconds,
+including mandatory permit spacing and CAA hops. Network response time is
+separately bounded. A longer known delay, a manual pause or full capacity returns
+an explicit waiting condition. Failed network requests never retry automatically.
+Browser search no longer uses a fixed gap as a substitute for server scheduling.
+
+Save provider `Retry-After` evidence before reading the response body. Parsing,
+body, cache and completion failures cannot replace a longer saved interval.
+An abandoned owner retains the greater of its saved interval and the conservative
+recovery delay. A new process waits the full saved interval. Unsupported intervals
+remain paused until explicit review and acknowledgment, including after owner
+exit. Started operations drain their durable response work after browser
+disconnection; cancelled pending operations cannot start a request.
+
+The connected application shows shared provider waiting while metadata loads.
+It distinguishes active ownership with unknown completion time, timed backoff,
+manual pause and capacity limits. Status observation is bounded and passive.
+Timing is an estimate, not a promise that another request can start. Expiry never
+retries metadata, acquisition or approval. Failed metadata refreshes do not present
+retained results as current provider evidence or as successful empty results.
+
+The current [MusicBrainz policy](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)
+documents an average one-request-per-second source-IP budget and a contact-bearing
+User-Agent. The [CAA API](https://musicbrainz.org/doc/Cover_Art_Archive/API)
+currently specifies no numeric limit, but documents throttling responses. Keep
+the application's conservative shared budget for both. Coordination covers
+callers using one local database, not unrelated installations sharing an IP.
+
+Isolated fixtures cover concurrency, request spacing, cache reuse, bounded
+admission, cancellation, header persistence, process exit and restart, clock
+changes and manual pause recovery. Real process suspension, host sleep and live
+provider acceptance remain separate evidence requirements. Simulated timing
+and process-exit tests do not establish those results.
 
 ## Brand Commitments
 
@@ -613,7 +638,7 @@ jobs, approvals or recovery receipts. Backup-pending and failed work remain visi
 These controls affect the shared queue, not a per-user queue.
 
 Search now groups Artists and Albums with independent results, errors, manual
-reloads and page cursors. Initial reads run in sequence with a one-second gap.
+reloads and page cursors. Initial reads run in sequence through shared server admission.
 The server still enforces the shared provider budget and any longer backoff;
 the browser never retries automatically. Artist pages load the exact provider
 identity instead of using a generic heading or inferring a name from releases.

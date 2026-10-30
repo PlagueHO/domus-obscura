@@ -158,6 +158,8 @@ mod artwork_tests;
 mod batch_tests;
 #[path = "catalog_filters.rs"]
 mod filter_tests;
+#[path = "catalog_scheduling.rs"]
+mod scheduling_tests;
 
 #[derive(Clone, Default)]
 struct CatalogFixture {
@@ -351,6 +353,33 @@ async fn catalog_response(
                 [
                     (header::CONTENT_TYPE, "application/json"),
                     (header::RETRY_AFTER, "120"),
+                ],
+                Body::from_stream(chunks),
+            )
+                .into_response();
+        }
+        16 | 17 => {
+            let mode = fixture.mode.load(Ordering::SeqCst);
+            let chunks = futures_util::stream::unfold(0, |state| async move {
+                match state {
+                    0 => Some((Ok(Bytes::from_static(b"{")), 1)),
+                    1 => {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        Some((
+                            Err(std::io::Error::other("delayed fixture stream failure")),
+                            2,
+                        ))
+                    }
+                    _ => None,
+                }
+            });
+            return (
+                [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (
+                        header::RETRY_AFTER,
+                        if mode == 16 { "120" } else { "unsupported" },
+                    ),
                 ],
                 Body::from_stream(chunks),
             )

@@ -359,6 +359,41 @@ connection. Never use that local-only path for planned or uncertain inputs.
 `domus catalog-release <local-database> <release-id>` loads an exact MusicBrainz
 release through the normal durable provider budget and cache. It creates no
 job, plan or approval.
+MusicBrainz and CAA share one durable network permit, including each CAA redirect.
+Each configured service host admits at most four running or waiting operations
+across both adapters. Cache access is separately bounded; a valid hit needs no
+network slot. One operation can spend at most 15 seconds waiting for admission,
+including mandatory permit spacing and all CAA hops. Existing transport deadlines
+remain separate. Full capacity, longer backoff and manual pauses return an
+explicit error. Retrying admission before any network effect is not permission
+to retry a failed request.
+
+Provider headers save the longest `Retry-After` before body processing. Preserve
+that interval through timeout, cancellation, body/cache failure and owner exit.
+The permit also retains observed headers so completion cannot shorten the delay
+if the initial header write fails. The persistence error remains visible.
+Keep the native lock through completion. Do not clear an unsupported interval
+automatically. Explicit pause acknowledgment can recover an abandoned owner only
+after acquiring its native lock. Saved intervals, not wall deadlines, govern
+restart and recovery. The gate coordinates one local database; separate
+installations behind the same public IP are not coordinated.
+
+`GET /api/discovery/status` is passive. `known_retry_after_seconds` is null for
+a live owner or manual pause. The legacy `retry_after_seconds` field is only a
+recheck hint for a live owner, not its completion time. Provider errors expose
+`provider_state` for active, timed-backoff, paused and full-capacity conditions.
+The browser shares one bounded status observer while metadata is pending. It
+does not retry the metadata request when timing expires. Use the original
+metadata action for explicit retry; never substitute a worker/acquisition retry
+or approval. A disconnected browser cancels pending submission, but started
+response persistence must drain. Do not admit replacement work until its slot
+is released.
+
+The isolated browser harness has `/?provider=1` presentation fixtures for these
+states. They make no provider, acquisition or approval calls. Process-exit and
+simulated timing fixtures do not prove physical process suspension or host-sleep
+acceptance. Record unperformed physical and live-provider checks separately.
+
 `domus catalog-plan-prepare <local-database> <release-id> <request-json>` builds
 the normal provider-backed plan from the fresh cache without network access.
 Its bounded request has the same fields as CatalogPlanRequest. It cannot
