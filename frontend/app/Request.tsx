@@ -740,7 +740,7 @@ export function RequestPage({
               }}
             />
             <AlbumReplacementRestore
-              key={`${base}:${current.state}:${recoveryRevision}`}
+              key={`${base}:${current.state}:${recoveryRevision}:${historyRevision}`}
               job={current}
               version={version}
               destinations={receipts.data?.publication ?? []}
@@ -764,7 +764,9 @@ export function RequestPage({
                         : `Verified ${new Date(destination.verified_at * 1000).toLocaleString()}`}
                     </p>
                     {destination.last_error && <p className="warning">{destination.last_error}</p>}
-                    <small className="identifier">Manifest · {destination.manifest_sha256}</small>
+                    <small className="identifier">
+                      Historical publication manifest · {destination.manifest_sha256}
+                    </small>
                   </div>
                 </div>
               ))

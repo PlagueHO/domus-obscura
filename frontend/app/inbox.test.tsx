@@ -41,6 +41,24 @@ function render(value: QuestionDetails, disabled = false) {
 }
 
 describe("persistent decision inbox", () => {
+  it("links destination-bound restore questions without granting approval or continuation", () => {
+    const value = details({
+      job_state: "complete",
+      recovery: {
+        kind: "album_restore",
+        destination_id: 21,
+        location_id: 4,
+        state: "restore_prepared",
+      },
+    });
+    const markup = render(value);
+    expect(markup).toContain("Restore destination 4");
+    expect(markup).toContain("restore_prepared");
+    expect(markup).toContain("does not approve files or continue restore");
+    value.question.answer = "Review restore state";
+    expect(recoveryCommand(value)).toBeNull();
+    expect(render(value)).not.toContain("Apply saved pause answer");
+  });
   it("keeps an answer explicit and does not expose resume before it is saved", () => {
     const value = details();
     const markup = render(value);

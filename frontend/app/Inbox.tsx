@@ -114,6 +114,7 @@ export function recoveryCommand(
             plan_version: question.plan_version,
           }
         : null;
+    case "album_restore":
     case "manual":
       return null;
   }
@@ -142,7 +143,9 @@ export function QuestionActions({
     await request(`/api/questions/${question.id}/answer`, { body });
     setSubmitted(true);
     setNotice(
-      "Answer saved. Work is still paused. Reload this decision before the separate recovery action.",
+      recovery.kind === "album_restore"
+        ? "Answer saved. No files changed. Open the request to review the saved restore state."
+        : "Answer saved. Work is still paused. Reload this decision before the separate recovery action.",
     );
     onChanged();
   }
@@ -175,6 +178,13 @@ export function QuestionActions({
         <p>
           Open the request to prepare and approve the exact JPEG cover. Permission, preview
           approval, this answer and recovery are separate actions. Saved transfers stay intact.
+        </p>
+      )}
+      {recovery.kind === "album_restore" && (
+        <p>
+          Restore destination {recovery.location_id} needs review. Saved state: {recovery.state}.
+          Open the request to read a verified preview or continue the exact approved restore. Saving
+          this answer does not approve files or continue restore. The acquisition remains complete.
         </p>
       )}
       {question.answer === null ? (

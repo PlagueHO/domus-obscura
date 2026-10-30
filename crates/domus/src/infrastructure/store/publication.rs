@@ -36,6 +36,7 @@ pub struct PublicationDestinationReplacement {
     pub retained_folder: String,
     pub restore_folder: String,
     pub state: String,
+    pub restore_status: Option<super::AlbumRestoreStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -80,10 +81,13 @@ pub struct AlbumReplacementDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
 pub struct AlbumReplacementRestoreDecision {
     pub review_id: i64,
     pub expected_manifest_sha256: String,
     pub expected_album_identity: String,
+    #[serde(default)]
+    pub expected_preview_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -115,6 +119,8 @@ pub(crate) struct AlbumReplacementRestore {
     pub(crate) replacement_album_identity: String,
     pub(crate) replacement_files: Vec<ReplacementFile>,
     pub(crate) state: String,
+    pub(crate) review_id: i64,
+    pub(crate) approved_preview: Option<String>,
 }
 
 pub(crate) struct PublicationPreparation {
@@ -342,6 +348,7 @@ fn destination(connection: &Connection, id: i64) -> Result<PublicationDestinatio
                     retained_folder,
                     restore_folder,
                     state,
+                    restore_status: super::restore::status(connection, id)?,
                 })
             },
         )
@@ -941,7 +948,7 @@ impl Store {
         job: i64,
         version: i64,
         location_id: i64,
-        decision: AlbumReplacementRestoreDecision,
+        decision: Option<&AlbumReplacementRestoreDecision>,
     ) -> Result<AlbumReplacementRestore> {
         let transaction = self
             .connection
@@ -970,9 +977,11 @@ impl Store {
         let replacement = saved.replacement.as_ref().ok_or_else(conflict)?;
         if saved.verified_at.is_none()
             || saved.last_error.is_some()
-            || saved.album_identity.as_deref() != Some(decision.expected_album_identity.as_str())
-            || saved.manifest_sha256 != decision.expected_manifest_sha256
-            || replacement.review_id != decision.review_id
+            || decision.is_some_and(|decision| {
+                saved.album_identity.as_deref() != Some(decision.expected_album_identity.as_str())
+                    || saved.manifest_sha256 != decision.expected_manifest_sha256
+                    || replacement.review_id != decision.review_id
+            })
             || !matches!(
                 replacement.state.as_str(),
                 "published"
@@ -1035,7 +1044,29 @@ impl Store {
         let original_files = replacement.original_files.clone();
         let retained_folder = replacement.retained_folder.clone();
         let restore_folder = replacement.restore_folder.clone();
+        let approval: Option<(String, String, String)> = transaction
+            .query_row(
+                "SELECT preview_sha256,album_identity,current_files
+                 FROM album_restore_approvals WHERE destination_id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
         let replacement_album_identity = saved.album_identity.clone().ok_or_else(conflict)?;
+        let replacement_files = files
+            .into_iter()
+            .map(|file| ReplacementFile {
+                name: file.name,
+                bytes: file.bytes,
+                sha256: file.sha256,
+            })
+            .collect();
+        let (approved_preview, replacement_album_identity, replacement_files) = match approval {
+            Some((digest, identity, body)) => {
+                (Some(digest), identity, serde_json::from_str(&body)?)
+            }
+            None => (None, replacement_album_identity, replacement_files),
+        };
         transaction.commit()?;
         Ok(AlbumReplacementRestore {
             destination_id: id,
@@ -1047,15 +1078,10 @@ impl Store {
             retained_folder,
             restore_folder,
             replacement_album_identity,
-            replacement_files: files
-                .into_iter()
-                .map(|file| ReplacementFile {
-                    name: file.name,
-                    bytes: file.bytes,
-                    sha256: file.sha256,
-                })
-                .collect(),
+            replacement_files,
             state,
+            review_id: replacement.review_id,
+            approved_preview,
         })
     }
 
