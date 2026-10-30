@@ -2,6 +2,141 @@ use domus::domain::{LibraryPath, Page};
 use domus::infrastructure::store::{Observation, Store};
 use tempfile::tempdir;
 
+/// Generated recovery history evidence, not physical file or memory acceptance.
+#[test]
+#[ignore = "separate million-record scale check: cargo task scale"]
+fn million_recovery_records_keep_inventory_pages_bounded_and_indexed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let data = tempdir()?;
+    let database = data.path().join("recovery-scale.db");
+    let mut store = Store::open(&database)?;
+    let settings = store.save_settings(None, &domus::domain::OutputSettings::default())?;
+    let job = store.enqueue(1)?;
+    let raw = rusqlite::Connection::open(&database)?;
+    raw.execute(
+        "INSERT INTO job_plans(job_id,version,settings_version,body) VALUES (?1,1,?2,'{}')",
+        rusqlite::params![job, settings],
+    )?;
+    raw.execute(
+        "WITH RECURSIVE jobs(id) AS (
+             SELECT ?1+1 UNION ALL SELECT id+1 FROM jobs WHERE id<?1+100
+         )
+         INSERT INTO jobs(id,plan_version,state)
+         SELECT id,1,'queued' FROM jobs",
+        [job],
+    )?;
+    raw.execute(
+        "WITH RECURSIVE jobs(id) AS (
+             SELECT ?2+1 UNION ALL SELECT id+1 FROM jobs WHERE id<?2+100
+         )
+         INSERT INTO job_plans(job_id,version,settings_version,body)
+         SELECT id,1,?1,'{}' FROM jobs",
+        rusqlite::params![settings, job],
+    )?;
+    raw.execute(
+        "WITH RECURSIVE n(v) AS (SELECT 1 UNION ALL SELECT v+1 FROM n WHERE v<1000000)
+         INSERT INTO normalization_runs(id,job_id,plan_version,claim_generation,profile,
+          recipe_sha256,cover_sha256,cover_bytes,cover_width,cover_height)
+         SELECT v,?1+((v-1)%101),1,v,1,?2,?2,1,1,1 FROM n",
+        rusqlite::params![job, "a".repeat(64)],
+    )?;
+    for after in [0, 4_000_001, 7_950_001] {
+        let rows = store.recovery_inventory(Page::new(after, 50)?, Some(job))?;
+        assert_eq!(rows.len(), 50, "job page after {after}");
+        assert!(
+            rows.iter()
+                .all(|r| r.id > after && r.category == "scratch" && r.recorded_bytes.is_none())
+        );
+        assert!(rows.windows(2).all(|pair| pair[0].id < pair[1].id));
+    }
+    let sparse_job = job + 100;
+    let sparse = store.recovery_inventory(Page::new(4_000_001, 50)?, Some(sparse_job))?;
+    assert_eq!(sparse.len(), 50);
+    assert!(
+        sparse
+            .iter()
+            .all(|row| row.job_id == sparse_job && row.id > 4_000_001 && row.category == "scratch")
+    );
+    let plan = raw
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT id FROM recovery_inventory WHERE id IN (4000001,4000009)",
+        )?
+        .query_map([], |r| r.get::<_, String>(3))?
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    for index in [
+        "recovery_input_cursor",
+        "recovery_normalization_cursor",
+        "recovery_pending_cursor",
+        "recovery_retained_cursor",
+    ] {
+        assert!(plan.contains(index), "{index}: {plan}");
+    }
+    for (sql, index) in [
+        (
+            "EXPLAIN QUERY PLAN SELECT id FROM transfer_files WHERE job_id=101 AND id>=1 ORDER BY id LIMIT 51",
+            "recovery_input_job_cursor",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT id FROM normalization_runs WHERE job_id=101 AND id>=1 ORDER BY id LIMIT 51",
+            "recovery_normalization_job_cursor",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT id FROM publication_destinations
+             INDEXED BY recovery_pending_job_location_cursor
+             WHERE job_id=101 AND location_id=1 AND id>=1 AND published_at IS NULL
+             ORDER BY id LIMIT 51",
+            "recovery_pending_job_location_cursor",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT id FROM publication_destinations
+             INDEXED BY recovery_pending_job_cursor
+             WHERE job_id=101 AND id>=1 AND published_at IS NULL
+             ORDER BY id LIMIT 51",
+            "recovery_pending_job_cursor",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT id FROM publication_destinations
+             INDEXED BY recovery_pending_location_cursor
+             WHERE location_id=1 AND id>=1 AND published_at IS NULL
+             ORDER BY id LIMIT 51",
+            "recovery_pending_location_cursor",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT r.destination_id FROM publication_destinations d
+             INDEXED BY recovery_destination_job_location_cursor
+             JOIN publication_replacement_journal r ON r.destination_id=d.id
+             WHERE d.job_id=101 AND d.location_id=1 AND d.id>=1 AND r.state!='planned'
+             ORDER BY d.id LIMIT 51",
+            "recovery_destination_job_location_cursor",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT r.destination_id FROM publication_destinations d
+             INDEXED BY recovery_destination_job_cursor
+             JOIN publication_replacement_journal r ON r.destination_id=d.id
+             WHERE d.job_id=101 AND d.id>=1 AND r.state!='planned'
+             ORDER BY d.id LIMIT 51",
+            "recovery_destination_job_cursor",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT r.destination_id FROM publication_destinations d
+             INDEXED BY recovery_destination_location_cursor
+             JOIN publication_replacement_journal r ON r.destination_id=d.id
+             WHERE d.location_id=1 AND d.id>=1 AND r.state!='planned'
+             ORDER BY d.id LIMIT 51",
+            "recovery_destination_location_cursor",
+        ),
+    ] {
+        let details = raw
+            .prepare(sql)?
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        assert!(details.contains(index), "{index}: {details}");
+    }
+    Ok(())
+}
+
 /// Generated tag-index/query evidence, not physical scans or process memory.
 #[test]
 #[ignore = "separate million-record scale check: cargo task scale"]

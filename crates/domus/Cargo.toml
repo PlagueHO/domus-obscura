@@ -40,6 +40,7 @@ rustix.workspace = true
 [target.'cfg(windows)'.dependencies]
 fence-windows.workspace = true
 file-id.workspace = true
+native-file-delete = { path = "../native-file-delete" }
 windows-permissions.workspace = true
 winsafe.workspace = true
 

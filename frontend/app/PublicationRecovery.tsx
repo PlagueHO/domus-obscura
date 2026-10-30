@@ -4,6 +4,7 @@ import type { AlbumRestorePreview } from "../src/generated/AlbumRestorePreview";
 import type { JobSummary } from "../src/generated/JobSummary";
 import type { PublicationDestination } from "../src/generated/PublicationDestination";
 import type { ResumePublication } from "../src/generated/ResumePublication";
+import type { RecoveryEntry } from "../src/generated/RecoveryEntry";
 import { request, type LocalStatus } from "./api";
 import { useResource, type useCommand } from "./hooks";
 import { Alert, Button } from "./components/ui";
@@ -137,12 +138,17 @@ export function AlbumReplacementRestore({
     <section className="review-section" aria-label="Retained album restoration">
       <h2>Retained album versions</h2>
       <p>
-        Review the retained and current files before you approve each destination. Current files
-        remain recoverable after restore. Destinations complete separately, not as one atomic change
-        across drives.
+        Review the retained and current files before you approve each destination. Current files are
+        kept after restore unless explicitly deleted in Recovery. Destinations complete separately,
+        not as one atomic change across drives.
+      </p>
+      <p>
+        <a href={`#/recovery?job=${job.id}`}>Inspect retained versions and deletion status</a>.
+        Saved publication evidence does not prove that a retained version is still available.
+        Restore requires a fresh verified preview.
       </p>
       {replacements.map((destination) => (
-        <RestoreDestination
+        <RetainedRestoreAvailability
           key={`${job.id}:${version}:${destination.id}:${destination.replacement?.state}`}
           destination={destination}
           blocked={blocked}
@@ -151,6 +157,52 @@ export function AlbumReplacementRestore({
         />
       ))}
     </section>
+  );
+}
+
+function RetainedRestoreAvailability({
+  destination,
+  blocked,
+  command,
+  onChanged,
+}: {
+  destination: PublicationDestination;
+  blocked: boolean;
+  command: ReturnType<typeof useCommand>;
+  onChanged: () => void;
+}) {
+  const inventory = useResource(
+    (signal) =>
+      request<RecoveryEntry[]>(
+        `/api/recovery?after=0&limit=1&job=${destination.job_id}&category=retained&location=${destination.location_id}`,
+        { signal },
+      ),
+    `restore-inventory:${destination.job_id}:${destination.plan_version}:${destination.location_id}`,
+  );
+  const rows = inventory.loading || inventory.error ? undefined : inventory.data;
+  return (
+    <>
+      <Alert error={inventory.error} />
+      {inventory.loading && <p role="status">Checking retained version availability…</p>}
+      <RestoreDestination
+        destination={destination}
+        retainedAvailable={Boolean(
+          rows?.some(
+            (entry) =>
+              entry.job_id === destination.job_id &&
+              entry.plan_version === destination.plan_version &&
+              entry.category === "retained" &&
+              entry.location_id === destination.location_id &&
+              entry.folder === destination.replacement?.retained_folder &&
+              entry.operation_id === null &&
+              !["deleted", "deleting", "complete"].includes(entry.state),
+          ),
+        )}
+        blocked={blocked}
+        command={command}
+        onChanged={onChanged}
+      />
+    </>
   );
 }
 
@@ -175,11 +227,13 @@ export function restorePreviewMatches(
 
 function RestoreDestination({
   destination,
+  retainedAvailable,
   blocked,
   command,
   onChanged,
 }: {
   destination: PublicationDestination;
+  retainedAvailable: boolean;
   blocked: boolean;
   command: ReturnType<typeof useCommand>;
   onChanged: () => void;
@@ -197,7 +251,7 @@ function RestoreDestination({
   if (!replacement) return null;
   const preview = reviewing ? resource.data : undefined;
   const status = preview?.status ?? replacement.restore_status;
-  const disabled = blocked || command.busy || submitted;
+  const disabled = blocked || command.busy || submitted || !retainedAvailable;
   const verified =
     preview !== undefined &&
     !resource.loading &&
@@ -217,8 +271,9 @@ function RestoreDestination({
         )}
         {replacement.state === "restored" && !status?.last_error ? (
           <p role="status">
-            The reviewed original album is restored. The displaced current album remains retained.
-            The publication receipts below describe the earlier publication, not the restored files.
+            The reviewed original album was restored. Check Recovery for the displaced version and
+            any later deletion. The publication receipts below describe the earlier publication, not
+            the restored files.
           </p>
         ) : (
           <>
@@ -234,7 +289,12 @@ function RestoreDestination({
                 folders against the fixed approval. Changed files cannot be approved here.
               </p>
             )}
-            {submitted ? (
+            {!retainedAvailable ? (
+              <p className="warning">
+                Restore is unavailable: retained data may be deleted, marked for deletion or not
+                confirmed by the current recovery inventory. Open Recovery to inspect its status.
+              </p>
+            ) : submitted ? (
               <p role="status">Restore completed. Reload the request to read its saved result.</p>
             ) : (
               <>

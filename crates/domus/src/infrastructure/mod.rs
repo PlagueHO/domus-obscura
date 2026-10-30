@@ -18,6 +18,7 @@ pub mod mp3;
 mod permissions;
 pub mod production_worker;
 pub(crate) mod publication;
+pub(crate) mod recovery_files;
 pub mod server;
 pub mod services;
 pub mod shares;

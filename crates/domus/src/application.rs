@@ -16,6 +16,7 @@ pub use acquisition::{acquire_album, acquire_transfer, negotiate_transfer, recei
 mod playback;
 pub use playback::export_playback_album;
 mod publication;
+pub mod recovery;
 pub use publication::{
     preview_album_replacements, preview_album_restore, publish_new_album, restore_album_replacement,
 };

@@ -185,8 +185,7 @@ acknowledgement. It cannot grant replacement permission. The connected API
 requires a separate decision for each existing destination before acquisition.
 Commit all destination/file intents before library effects. The default action
 creates only new album folders. Never adopt an unbound existing folder,
-overwrite a partial file or recreate a missing receipted file. Preserve staging
-and all failed copies. Reclaim can verify exact synced files without another
+overwrite a partial file or recreate a missing receipted file. Preserve staging until every required destination verifies. Preserve all failed copies. Reclaim can verify exact synced files without another
 download or normalization. A verified primary with an unavailable backup
 remains `backup_pending`. Recheck successful destinations, with the primary
 last, before completion. `publication-status` and the protected publication GET
@@ -248,8 +247,8 @@ After a lost command response, read status and prepare a fresh preview before
 an explicit continuation. Repeated completed commands verify the saved result
 without another rename. Destinations complete independently; there is no
 cross-drive atomicity guarantee. These safeguards do not constitute power-loss
-acceptance. Recovery inventory, deletion, and restoring a later displaced version
-remain separate work.
+acceptance. Recovery inventory and deletion use the separate workflow below.
+Restoring a later displaced version remains separate work.
 The sharing boundary hides incomplete publication destinations. Publication
 holds the stable native exclusive visibility lock before journal intent and
 media changes. Browse responses and uploads hold the matching shared lock.
@@ -264,6 +263,50 @@ intent and filesystem effects. Keep retained and temporary paths out of scans,
 sharing and direct refresh. Do not remove recovery folders or invalidate their
 journal as part of ordinary publication.
 Do not run it against existing library roots without separate approval.
+
+### Scratch cleanup and retained-version deletion
+
+Publication admits scratch cleanup only with successful completion at every
+required destination. Save the root binding and admission with the completed job
+transaction. Never reuse the released publication `JobClaim` for cleanup. The
+cleanup journal supplies separate authority for that exact run and manifest.
+Close publication readers before cleanup, and keep the staging OS lock alive.
+
+Never clean backup-pending retry input, unsealed partial transfers, failed
+destination copies, older failed normalization attempts, approved evidence,
+playback exports, recovery folders or unrelated files. Keep `owner.lock` and
+immutable database receipts. A cleanup error does not invalidate a verified
+published album. Record it separately and require explicit retry.
+
+Recovery inventory is a bounded journal read, not a recursive disk scan.
+Recorded byte sizes are not current allocation measurements. Unknown, changed,
+missing and offline evidence must remain explicit. A known folder prefix is not
+proof of ownership. Legacy data without exact provenance cannot gain deletion
+authority through migration.
+
+Retained deletion needs a separate fresh preview and irreversible confirmation.
+Bind approval to the exact version, plan, destination, root/directory identities,
+file identities and hashes, current album and journal state. Keep original and
+restore-displaced versions distinct even if a folder name is reused. Keep
+Library browsing and MCP read-only.
+
+Acquire the publication visibility lock before deletion intent. The same lock
+excludes restore. Once deletion intent exists, reject restore preview and commands
+for that retained version. Keep historical replacement and restore receipts
+unchanged. Check every remaining item before continuation; never approve changed
+files as part of a retry.
+
+Commit each file's removal intent before unlink. An interrupted intent can
+reconcile confirmed absence, but cannot prove which process removed the bytes.
+Missing files before intent are errors. Remove only listed checked files and
+then the exact empty owned directory. Do not use recursive native-path deletion.
+Persist partial outcomes and errors. A failed final receipt is not a rollback.
+
+API recovery operations run outside async executor threads and keep their media
+permit until blocking work ends, even if the request times out. API reload and
+shutdown must not release that protection early. Linux external writers must
+cooperate with the visibility lock; do not claim protection against arbitrary
+external mutation or untested physical power loss.
 
 `domus job-control <local-database> <job-id> <plan-version> <pause|cancel>`
 records a version-bound operator request. Settle it only at a safe file/transfer

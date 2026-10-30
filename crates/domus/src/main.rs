@@ -309,6 +309,12 @@ fn run(args: &[String]) -> Result<()> {
                     "AlbumRestoreStatus.ts",
                     domus::infrastructure::store::AlbumRestoreStatus::export_to_string(&config),
                 ),
+                ("RecoveryEntry.ts",domus::infrastructure::store::RecoveryEntry::export_to_string(&config)),
+                ("RecoveryFile.ts",domus::infrastructure::store::RecoveryFile::export_to_string(&config)),
+                ("RecoveryPreview.ts",domus::infrastructure::store::RecoveryPreview::export_to_string(&config)),
+                ("RecoveryOperation.ts",domus::infrastructure::store::RecoveryOperation::export_to_string(&config)),
+                ("RecoveryDecision.ts",domus::infrastructure::store::RecoveryDecision::export_to_string(&config)),
+                ("RecoveryContinue.ts",domus::infrastructure::store::RecoveryContinue::export_to_string(&config)),
                 ("ArtworkIssue.ts", ArtworkIssue::export_to_string(&config)),
                 (
                     "JobControl.ts",

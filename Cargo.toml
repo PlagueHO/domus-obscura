@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/domus", "xtask"]
+members = ["crates/domus", "crates/native-file-delete", "xtask"]
 exclude = ["third_party/file-id-0.2.3"]
 resolver = "3"
 

@@ -21,6 +21,7 @@ mod private_roots;
 mod publication;
 mod queries;
 mod queue;
+mod recovery;
 mod restore;
 mod sessions;
 mod source_candidates;
@@ -48,6 +49,11 @@ pub use publication::{
 pub(crate) use publication::{AlbumReplacementRestore, PublicationPreparation};
 pub use queries::{JobEvent, JobSummary};
 pub use queue::QueueSelection;
+pub(crate) use recovery::{RecoveryBinding, RecoveryItem};
+pub use recovery::{
+    RecoveryContinue, RecoveryDecision, RecoveryEntry, RecoveryFile, RecoveryOperation,
+    RecoveryPreview,
+};
 pub use restore::{AlbumRestorePreview, AlbumRestoreStatus};
 pub use sessions::{CreatedSession, SessionCredential, SessionIdentity};
 pub use source_candidates::SourceCandidate;
@@ -84,6 +90,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/026_atomic_publication.sql"),
     include_str!("../../migrations/027_album_replacement.sql"),
     include_str!("../../migrations/028_album_restore.sql"),
+    include_str!("../../migrations/029_recovery_cleanup.sql"),
 ];
 
 pub struct Store {

@@ -259,7 +259,16 @@ pub fn publish_new_album(
             }
         }
     }
-    store.finish_publication(claim, run)
+    drop(source);
+    let (path, identity) = staging.cleanup_binding()?;
+    let state = store.finish_publication(claim, run, (&path, &identity))?;
+    if state == "complete" {
+        // Album completion and cleanup have separate durable results.
+        if let Err(error) = super::recovery::cleanup_scratch_locked(store, staging, run) {
+            eprintln!("album publication completed; scratch cleanup needs explicit retry: {error}");
+        }
+    }
+    Ok(state)
 }
 
 fn check(

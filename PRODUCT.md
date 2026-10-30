@@ -67,8 +67,24 @@ and destination-bound recovery questions remain visible across reloads without
 changing the completed acquisition state. An answer alone does not approve or
 move files. Destinations complete independently, without a cross-drive atomicity
 guarantee. Historical publication receipts remain distinct from restore results.
-General recovery inventory, deletion, and restoring later displaced versions
-remain separate work.
+The separate Recovery view lists journal-known retained versions, staged input,
+normalization output and unfinished destination copies. It shows recorded logical
+bytes, not a live filesystem allocation scan. A missing or offline item is not
+reported as zero storage use. Request pages link to their filtered inventory.
+
+After every required destination passes fresh verification, publication admits
+automatic cleanup of its exact receipt-bound scratch. Backup-pending and failed
+work keeps its retry input. Cleanup preserves approved evidence, durable receipts,
+recovery folders, playback exports and unrelated files. Album completion and
+cleanup completion are separate results. Interrupted cleanup needs explicit retry.
+
+Deletion requires a fresh verified preview and separate irreversible confirmation
+for one exact retained version at one destination. Approval binds the version,
+root, directory, file identities and hashes, current album evidence and saved
+state. Changed evidence blocks deletion. The journal preserves partial progress
+and permits explicit continuation only with the same approval. Deletion intent
+removes the restore option before any file is removed. Later restore-displaced
+versions can be deleted, but restoring those versions remains separate work.
 
 A safely paused, current, unanswered artwork question can use the request's
 normal exact-JPEG preparation and approval interface. Answering requires the
