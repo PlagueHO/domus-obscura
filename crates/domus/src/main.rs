@@ -109,6 +109,16 @@ fn run(args: &[String]) -> Result<()> {
             // serde_json emits integer JSON numbers, not JavaScript bigint values.
             let config = ts_rs::Config::default().with_large_int("number");
             let contracts = [
+                ("AudioProfile.ts", domus::domain::AudioProfile::export_to_string(&config)),
+                ("AudioPolicy.ts", domus::domain::AudioPolicy::export_to_string(&config)),
+                ("AudioSelection.ts", domus::domain::AudioSelection::export_to_string(&config)),
+                ("AudioProfileDescriptor.ts", domus::domain::AudioProfileDescriptor::export_to_string(&config)),
+                ("AdvertisedQuality.ts", domus::domain::AdvertisedQuality::export_to_string(&config)),
+                ("SourceProfileAlternative.ts", domus::domain::sources::SourceProfileAlternative::export_to_string(&config)),
+                ("SourceSearchReport.ts", domus::infrastructure::worker::SourceSearchReport::export_to_string(&config)),
+                ("SourceSearchGroup.ts", domus::infrastructure::worker::SourceSearchGroup::export_to_string(&config)),
+                ("SourceSearchFile.ts", domus::infrastructure::worker::SourceSearchFile::export_to_string(&config)),
+                ("SourceAdvertisedProfile.ts", domus::infrastructure::worker::SourceAdvertisedProfile::export_to_string(&config)),
                 ("LibraryRefresh.ts", domus::infrastructure::api::LibraryRefresh::export_to_string(&config)),
                 ("RefreshLibraryFolder.ts", domus::infrastructure::api::RefreshLibraryFolder::export_to_string(&config)),
                 ("LibraryTags.ts", domus::domain::library::LibraryTags::export_to_string(&config)),

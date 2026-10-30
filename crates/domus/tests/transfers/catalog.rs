@@ -7,6 +7,7 @@ fn catalog_evidence_is_required_for_new_transfers_but_not_existing_receipts() ->
     let mut fixture = Fixture::new()?;
     let job = fixture.store.enqueue(1)?;
     let plan = fixture.store.prepare_plan(PlanRequest {
+        audio_profile: None,
         job_id: job,
         expected_version: 1,
         settings_version: 1,

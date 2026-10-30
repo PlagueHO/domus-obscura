@@ -261,10 +261,7 @@ impl LocalRuntime {
         Ok(())
     }
 
-    pub async fn search(
-        &self,
-        release_id: String,
-    ) -> Result<super::soulseek::search::SearchReport> {
+    pub async fn search(&self, release_id: String) -> Result<super::worker::SourceSearchReport> {
         let permit = self.permit()?;
         let cache = self.cache.clone();
         let (config, database, services) = (

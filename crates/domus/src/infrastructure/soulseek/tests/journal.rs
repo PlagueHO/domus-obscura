@@ -93,6 +93,7 @@ impl Fixture {
         };
         let plan = store.prepare_catalog_plan(
             PlanRequest {
+                audio_profile: None,
                 job_id: job,
                 expected_version: 1,
                 settings_version: 1,

@@ -105,6 +105,7 @@ async fn shared_cache_musicbrainz_reuses_exact_release_and_freezes_plans_without
     .ok_or("exact release missing")?;
     let plan = reopened.prepare_catalog_plan(
         PlanRequest {
+            audio_profile: None,
             job_id: job,
             expected_version: 1,
             settings_version: settings,
@@ -776,6 +777,7 @@ async fn catalog_authenticated_discovery_freezes_evidence_and_preserves_backoff(
                 _ => forged.fetched_at -= 100000,
             }
             let request = domus::infrastructure::store::PlanRequest {
+                audio_profile: None,
                 job_id: job,
                 expected_version: 2,
                 settings_version: settings,

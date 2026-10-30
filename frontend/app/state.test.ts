@@ -51,11 +51,13 @@ const source: SourceCandidate = {
   created_at: 1,
   approved_at: 1,
   listing: { peer: "peer", folder: "remote", directories: 0, files: [] },
+  alternatives: [],
   assessment: {
     release_id: "release",
     peer: "peer",
     folder: "remote",
     format: "mp3",
+    profile: "mp3_cbr320",
     tracks: [],
     problems: [],
     complete_mapping: true,

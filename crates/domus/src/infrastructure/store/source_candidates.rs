@@ -1,7 +1,10 @@
 use super::{SourceFile, Store, StoredPlan, planning};
 use crate::domain::{
     Page,
-    sources::{SourceAssessment, SourceFolder, assess_source},
+    sources::{
+        SourceAssessment, SourceFolder, SourceProfileAlternative, assess_alternatives,
+        assess_source_profile,
+    },
 };
 use crate::{Error, Result};
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -19,6 +22,7 @@ pub struct SourceCandidate {
     pub review_sha256: String,
     pub listing: SourceFolder,
     pub assessment: SourceAssessment,
+    pub alternatives: Vec<SourceProfileAlternative>,
     pub created_at: i64,
     pub approved_at: Option<i64>,
 }
@@ -94,7 +98,14 @@ fn candidate(plan: &StoredPlan, saved: Saved) -> Result<SourceCandidate> {
         return Err(Error::Conflict("source review binding is damaged".into()));
     }
     let listing: SourceFolder = serde_json::from_str(&saved.listing)?;
-    let assessment = assess_source(&plan.plan.edition, plan.plan.format, &listing)?;
+    let assessment =
+        assess_source_profile(&plan.plan.edition, plan.plan.audio_profile()?, &listing)?;
+    let alternatives = assess_alternatives(
+        &plan.plan.edition,
+        plan.plan.audio_profile()?,
+        &plan.plan.settings.policy(),
+        &listing,
+    )?;
     Ok(SourceCandidate {
         id: saved.id,
         job_id: saved.job,
@@ -103,6 +114,7 @@ fn candidate(plan: &StoredPlan, saved: Saved) -> Result<SourceCandidate> {
         review_sha256: saved.review_sha256,
         listing,
         assessment,
+        alternatives,
         created_at: saved.created_at,
         approved_at: saved.approved_at,
     })
@@ -182,7 +194,7 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let plan = eligible(&transaction, job, version, true)?;
-        assess_source(&plan.plan.edition, plan.plan.format, &listing)?;
+        assess_source_profile(&plan.plan.edition, plan.plan.audio_profile()?, &listing)?;
         let plan_sha256 = fingerprint(&plan)?;
         let review_sha256 = digest(job, version, &plan_sha256, &body);
         let count: i64 = transaction.query_row(

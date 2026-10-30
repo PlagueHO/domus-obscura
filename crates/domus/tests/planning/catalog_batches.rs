@@ -6,6 +6,49 @@ use rusqlite::params;
 
 type BatchEntry = (PlanRequest, CatalogResult<CatalogRelease>);
 
+#[test]
+fn catalog_batch_profiles_are_frozen_and_rejection_is_atomic() -> TestResult {
+    use domus::domain::{AudioPolicy, AudioProfile};
+    let mut fixture = Fixture::new()?;
+    scan_location(&mut fixture.store, fixture.main)?;
+    let policy = AudioPolicy {
+        accepted: vec![AudioProfile::Mp3Cbr192, AudioProfile::Mp3Vbr],
+        preferred: AudioProfile::Mp3Cbr192,
+        ..AudioPolicy::default()
+    };
+    fixture.store.save_settings(
+        Some(1),
+        &OutputSettings {
+            format: AudioFormat::Mp3,
+            accepted_formats: Some(vec![AudioFormat::Mp3]),
+            audio_policy: Some(policy),
+            ..OutputSettings::default()
+        },
+    )?;
+    let mut first = entry(&mut fixture, 1)?;
+    first.0.settings_version = 2;
+    first.0.format = None;
+    first.0.audio_profile = Some(AudioProfile::Mp3Cbr192);
+    let mut second = entry(&mut fixture, 2)?;
+    second.0.settings_version = 2;
+    second.0.format = None;
+    second.0.audio_profile = Some(AudioProfile::Mp3Cbr128);
+    let before = counts(&fixture)?;
+    assert!(
+        fixture
+            .store
+            .prepare_catalog_plans(vec![first.clone(), second.clone()])
+            .is_err()
+    );
+    assert_eq!(counts(&fixture)?, before);
+    second.0.audio_profile = Some(AudioProfile::Mp3Vbr);
+    let plans = fixture.store.prepare_catalog_plans(vec![first, second])?;
+    assert_eq!(plans[0].plan.audio_profile()?, AudioProfile::Mp3Cbr192);
+    assert_eq!(plans[1].plan.audio_profile()?, AudioProfile::Mp3Vbr);
+    assert!(plans.iter().all(|plan| plan.approved_at.is_none()));
+    Ok(())
+}
+
 fn entry(fixture: &mut Fixture, number: u16) -> TestResult<BatchEntry> {
     let mut edition = edition();
     edition.release_id = format!("20000000-0000-4000-8000-{number:012x}");
@@ -17,6 +60,7 @@ fn entry(fixture: &mut Fixture, number: u16) -> TestResult<BatchEntry> {
     let catalog = support::catalog_snapshot(&fixture.database, &edition)?;
     Ok((
         PlanRequest {
+            audio_profile: None,
             job_id: fixture.store.enqueue(1)?,
             expected_version: 1,
             settings_version: 1,

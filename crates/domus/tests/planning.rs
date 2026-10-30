@@ -9,6 +9,8 @@ use tempfile::{TempDir, tempdir};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[path = "planning/audio_profiles.rs"]
+mod audio_profiles;
 #[path = "planning/catalog_batches.rs"]
 mod catalog_batches;
 mod support;
@@ -40,6 +42,7 @@ impl Fixture {
 
     fn request(&mut self) -> TestResult<PlanRequest> {
         Ok(PlanRequest {
+            audio_profile: None,
             job_id: self.store.enqueue(1)?,
             expected_version: 1,
             settings_version: 1,
@@ -389,6 +392,7 @@ fn approval_ownership_and_state_are_required_before_work() -> TestResult {
         .store
         .advance(&approved.claim, JobState::Queued, JobState::Searching)?;
     let revise = PlanRequest {
+        audio_profile: None,
         job_id: plan.job_id,
         expected_version: plan.version,
         settings_version: 1,
@@ -414,6 +418,7 @@ fn incomplete_coverage_requires_a_decision_bound_to_observations() -> TestResult
     let job = request.job_id;
     assert!(fixture.store.prepare_plan(request).is_err());
     request = PlanRequest {
+        audio_profile: None,
         job_id: job,
         expected_version: 1,
         settings_version: 1,
@@ -427,6 +432,7 @@ fn incomplete_coverage_requires_a_decision_bound_to_observations() -> TestResult
     scan_location(&mut fixture.store, fixture.main)?;
     assert!(fixture.store.approve_plan(job, plan.version).is_err());
     let revised = fixture.store.prepare_plan(PlanRequest {
+        audio_profile: None,
         job_id: job,
         expected_version: plan.version,
         settings_version: 1,
@@ -513,6 +519,7 @@ fn revised_plans_invalidate_approval_and_questions_without_losing_history() -> T
     let mut revised_edition = edition();
     revised_edition.album = "A Different Edition".into();
     let revised = fixture.store.prepare_plan(PlanRequest {
+        audio_profile: None,
         job_id: job,
         expected_version: initial.version,
         settings_version: 1,

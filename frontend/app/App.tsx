@@ -229,6 +229,7 @@ export function App() {
         version={routeVersion}
         status={local.error ? undefined : local.data}
         onChanged={changed}
+        audioProfiles={setup.data?.settings?.audio_profiles}
       />
     );
   } else if (route === "/queue") {

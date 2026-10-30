@@ -1395,7 +1395,7 @@ async fn local_status(
 async fn local_search(
     State(api): State<Api>,
     Json(request): Json<super::worker::SourceSearchRequest>,
-) -> ApiResult<Json<super::soulseek::search::SearchReport>> {
+) -> ApiResult<Json<super::worker::SourceSearchReport>> {
     Ok(Json(api.local()?.search(request.release_id).await?))
 }
 

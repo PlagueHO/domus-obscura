@@ -1,7 +1,109 @@
 use domus::domain::sources::*;
-use domus::domain::{AudioFormat, EditionSelection, PlannedTrack};
+use domus::domain::{
+    AdvertisedQuality, AudioFormat, AudioPolicy, AudioProfile, EditionSelection, PlannedTrack,
+};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[test]
+fn source_profiles_keep_unknown_distinct_and_never_approve_another_profile() -> TestResult {
+    let release = edition(&["One"]);
+    for profile in AudioProfile::ALL
+        .into_iter()
+        .filter(|profile| profile.format() == AudioFormat::Mp3)
+    {
+        let mut files = listing(&["One.mp3"]);
+        files.files[0].bitrate_kbps = profile.bitrate();
+        files.files[0].vbr = Some(profile == AudioProfile::Mp3Vbr);
+        assert!(assess_source_profile(&release, profile, &files)?.advertised_quality_matches);
+        files.files[0].vbr = None;
+        let unknown = assess_source_profile(&release, profile, &files)?;
+        assert!(unknown.can_approve);
+        assert!(!unknown.advertised_quality_matches);
+        assert!(
+            unknown
+                .problems
+                .iter()
+                .any(|problem| problem.issue == SourceMappingIssue::AdvertisedQualityUnknown)
+        );
+        files.files[0].vbr = Some(profile != AudioProfile::Mp3Vbr);
+        assert!(!assess_source_profile(&release, profile, &files)?.can_approve);
+    }
+    let mut files = listing(&["One.mp3"]);
+    files.files[0].bitrate_kbps = Some(192);
+    let policy = AudioPolicy {
+        accepted: vec![
+            AudioProfile::Mp3Cbr320,
+            AudioProfile::Mp3Cbr192,
+            AudioProfile::Mp3Vbr,
+        ],
+        ..AudioPolicy::default()
+    };
+    assert!(!assess_source_profile(&release, AudioProfile::Mp3Cbr320, &files)?.can_approve);
+    let alternatives = assess_alternatives(&release, AudioProfile::Mp3Cbr320, &policy, &files)?;
+    assert!(
+        alternatives
+            .iter()
+            .any(|item| item.assessment.profile == AudioProfile::Mp3Cbr192
+                && item.assessment.can_approve)
+    );
+    assert!(alternatives.iter().all(|item| !item.preferred));
+    assert_eq!(
+        AudioProfile::Mp3Vbr.advertised(Some(192), Some(true)),
+        AdvertisedQuality::Match
+    );
+    files.files[0].extension = "flac".into();
+    assert_eq!(
+        advertised_file(AudioProfile::Mp3Cbr192, &files.files[0]),
+        AdvertisedQuality::Mismatch
+    );
+    Ok(())
+}
+
+#[test]
+fn source_profiles_filter_and_group_returned_metadata_without_claiming_completeness() -> TestResult
+{
+    use domus::infrastructure::soulseek::search::{SearchPeer, SearchReport};
+    use domus::infrastructure::worker::SourceSearchReport;
+    let mut files = listing(&["One.mp3", "Two.mp3", "Other.m4a"]);
+    files.files[0].bitrate_kbps = Some(192);
+    files.files[1].vbr = None;
+    let report = SourceSearchReport::assess(
+        SearchReport {
+            query: "Artist Album".into(),
+            peers: vec![SearchPeer {
+                peer: "peer".into(),
+                slot_free: true,
+                speed: 0,
+                queue_length: 0,
+                files: files.files,
+            }],
+            issues: vec![],
+            limit_reached: true,
+            audio_downloaded: false,
+            edition_verified: false,
+        },
+        &AudioPolicy::default(),
+    )?;
+    assert_eq!(report.groups.len(), 1);
+    assert_eq!(report.groups[0].files.len(), 1);
+    assert!(
+        report.groups[0].files[0]
+            .file
+            .remote_path
+            .ends_with("Two.mp3")
+    );
+    assert!(
+        report.groups[0].files[0]
+            .matches
+            .iter()
+            .any(|item| item.preferred && item.quality == AdvertisedQuality::Unknown)
+    );
+    assert!(report.report.limit_reached);
+    assert!(!report.report.audio_downloaded);
+    assert!(!report.report.edition_verified);
+    Ok(())
+}
 
 fn edition(titles: &[&str]) -> EditionSelection {
     EditionSelection {

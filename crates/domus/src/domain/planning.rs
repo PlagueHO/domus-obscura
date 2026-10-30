@@ -1,4 +1,4 @@
-use super::{AudioFormat, OutputPreview, OutputTemplate, TrackMetadata};
+use super::{AudioFormat, AudioPolicy, AudioProfile, OutputPreview, OutputTemplate, TrackMetadata};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -31,6 +31,8 @@ pub struct OutputSettings {
     pub format: AudioFormat,
     #[serde(default)]
     pub accepted_formats: Option<Vec<AudioFormat>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_policy: Option<AudioPolicy>,
     pub template: OutputTemplate,
     #[serde(default)]
     pub artwork_size: Option<ArtworkSize>,
@@ -41,6 +43,7 @@ impl Default for OutputSettings {
         Self {
             format: AudioFormat::default(),
             accepted_formats: Some(vec![AudioFormat::Mp3, AudioFormat::Flac]),
+            audio_policy: None,
             template: OutputTemplate::default(),
             artwork_size: Some(ArtworkSize::Recommended),
         }
@@ -48,6 +51,20 @@ impl Default for OutputSettings {
 }
 
 impl OutputSettings {
+    pub fn policy(&self) -> AudioPolicy {
+        self.audio_policy.clone().unwrap_or_else(|| AudioPolicy {
+            accepted: self
+                .accepted_formats
+                .clone()
+                .unwrap_or_else(|| vec![AudioFormat::Mp3, AudioFormat::Flac])
+                .into_iter()
+                .map(AudioProfile::legacy)
+                .collect(),
+            preferred: AudioProfile::legacy(self.format),
+            ..AudioPolicy::default()
+        })
+    }
+
     pub fn accepts(&self, format: AudioFormat) -> bool {
         self.accepted_formats
             .as_ref()
@@ -55,6 +72,20 @@ impl OutputSettings {
     }
 
     pub fn validate(&self) -> Result<()> {
+        let policy = self.policy();
+        policy.validate()?;
+        if self.audio_policy.is_some()
+            && (policy.preferred.format() != self.format
+                || self.accepted_formats.as_ref().is_none_or(|formats| {
+                    let expected = policy.formats();
+                    formats.len() != expected.len()
+                        || formats.iter().any(|format| !expected.contains(format))
+                }))
+        {
+            return Err(Error::InvalidInput(
+                "legacy audio format fields must agree with the explicit audio policy".into(),
+            ));
+        }
         if let Some(formats) = &self.accepted_formats
             && (formats.is_empty()
                 || formats.len() > 2

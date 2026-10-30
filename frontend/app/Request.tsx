@@ -10,6 +10,8 @@ import type { TransferFile } from "../src/generated/TransferFile";
 import type { TransferSummary } from "../src/generated/TransferSummary";
 import type { StartLocalDownload } from "../src/generated/StartLocalDownload";
 import type { QuestionDetails } from "../src/generated/QuestionDetails";
+import type { AudioProfileDescriptor } from "../src/generated/AudioProfileDescriptor";
+import { audioProfileLabel } from "./audio-profiles";
 import { OutputPreview } from "../src/OutputPreview";
 import { request, type LocalStatus } from "./api";
 import { useCommand, useResource } from "./hooks";
@@ -64,11 +66,13 @@ export function RequestPage({
   version,
   status,
   onChanged,
+  audioProfiles = [],
 }: {
   id: number;
   version: number;
   status: LocalStatus | undefined;
   onChanged: () => void;
+  audioProfiles?: AudioProfileDescriptor[] | undefined;
 }) {
   const base = `/api/jobs/${id}/plans/${version}`;
   const [poll, setPoll] = useState(false);
@@ -330,8 +334,11 @@ export function RequestPage({
               </summary>
               <p className="identifier">MusicBrainz release · {stored.plan.edition.release_id}</p>
               <p>
-                {stored.plan.format.toUpperCase()} · Settings version {stored.settings_version} ·{" "}
-                {stored.plan.edition.tracks.length} tracks
+                {stored.plan.audio
+                  ? audioProfileLabel(stored.plan.audio.profile, audioProfiles)
+                  : stored.plan.format}{" "}
+                · Settings version {stored.settings_version} · {stored.plan.edition.tracks.length}{" "}
+                tracks
               </p>
               <dl className="properties">
                 <dt>Album artist</dt>
@@ -436,6 +443,8 @@ export function RequestPage({
                     base={base}
                     releaseId={stored.plan.edition.release_id}
                     format={stored.plan.format}
+                    audioProfile={stored.plan.audio?.profile ?? null}
+                    audioProfiles={audioProfiles}
                     candidates={sources.data ?? []}
                     selected={source}
                     onSelect={selectSource}

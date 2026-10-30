@@ -130,6 +130,7 @@ fn transfer_summary_does_not_mix_jobs() -> TestResult {
     let catalog = support::catalog_snapshot(&fixture.database, &other_edition)?;
     let plan = fixture.store.prepare_catalog_plan(
         PlanRequest {
+            audio_profile: None,
             job_id: other,
             expected_version: 1,
             settings_version: 1,

@@ -5,6 +5,8 @@ import type { StoredPlan } from "../src/generated/StoredPlan";
 import type { TransferFile } from "../src/generated/TransferFile";
 import type { TransferSummary } from "../src/generated/TransferSummary";
 import type { ArtworkCandidate } from "../src/generated/ArtworkCandidate";
+import type { AudioProfileDescriptor } from "../src/generated/AudioProfileDescriptor";
+import { audioProfiles as descriptors } from "./test-fixtures/audio";
 import { useResource } from "./hooks";
 import { RequestPage, RequestProgress } from "./Request";
 import { WorkerRequests } from "./WorkerRequests";
@@ -60,6 +62,7 @@ function renderRequest({
   receiptError,
   receiptLoading = false,
   covers = [],
+  audioProfiles,
 }: {
   job?: JobSummary;
   plan?: StoredPlan;
@@ -69,6 +72,7 @@ function renderRequest({
   receiptError?: Error;
   receiptLoading?: boolean;
   covers?: ArtworkCandidate[];
+  audioProfiles?: AudioProfileDescriptor[];
 } = {}) {
   for (const [index, data] of [
     job,
@@ -93,6 +97,7 @@ function renderRequest({
       version={2}
       status={{ enabled: true, busy: false, last_error: null }}
       onChanged={() => {}}
+      audioProfiles={audioProfiles}
     />,
   );
 }
@@ -103,6 +108,30 @@ it("links to request-scoped Recovery without inferring completion or retained av
   const markup = renderRequest();
   expect(markup).toContain('href="#/recovery?job=3"');
   expect(markup).toContain("separately from album completion");
+});
+
+it("shows the frozen exact profile in request and source summaries", () => {
+  const markup = renderRequest({
+    plan: {
+      ...savedPlan,
+      plan: { ...savedPlan.plan, audio: { policy_version: 1, profile: "mp3_cbr160" } },
+    },
+    audioProfiles: descriptors,
+  });
+  expect(markup).toContain("MP3 · 160 kbps CBR");
+  expect(markup).not.toContain("320 kbps");
+});
+
+it("shows exact profile identifiers without descriptors and does not relabel legacy plans", () => {
+  const markup = renderRequest({
+    plan: {
+      ...savedPlan,
+      plan: { ...savedPlan.plan, audio: { policy_version: 1, profile: "mp3_vbr" } },
+    },
+  });
+  expect(markup).toContain("mp3_vbr");
+  expect(markup).not.toContain("320 kbps");
+  expect(renderRequest()).not.toContain("320 kbps");
 });
 
 describe("production worker request status", () => {

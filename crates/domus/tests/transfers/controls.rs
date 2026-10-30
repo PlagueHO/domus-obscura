@@ -101,6 +101,7 @@ fn queued_unapproved_preview_can_resume_without_granting_approval() -> TestResul
     let mut f = Fixture::new()?;
     let job = f.store.enqueue(1)?;
     let plan = f.store.prepare_plan(PlanRequest {
+        audio_profile: None,
         job_id: job,
         expected_version: 1,
         settings_version: 1,
@@ -288,6 +289,7 @@ fn paused_jobs_cannot_bypass_control_with_a_new_plan() -> TestResult {
     assert!(
         f.store
             .prepare_plan(PlanRequest {
+                audio_profile: None,
                 job_id: f.job,
                 expected_version: f.version,
                 settings_version: 1,

@@ -4,6 +4,61 @@ use sha2::Digest;
 use std::io::Read;
 
 #[test]
+fn normalization_profiles_recover_exact_outputs_and_preserve_partial_outputs() -> TestResult {
+    use domus::domain::AudioProfile;
+    for profile in AudioProfile::ALL
+        .into_iter()
+        .filter(|profile| profile.format() == AudioFormat::Mp3)
+    {
+        let mut fixture = Fixture::build_with_profile(
+            profile.format(),
+            true,
+            true,
+            true,
+            None,
+            None,
+            Some(profile),
+        )?;
+        let root = fixture.staging.as_ref().ok_or("staging")?;
+        let run = fixture
+            .store
+            .begin_normalization(&fixture.claim, &fixture.cover)?;
+        let directory = root.create_normalization(&run)?;
+        let mut work =
+            fixture
+                .store
+                .normalization_work(&fixture.claim, run.id, Page::new(0, 200)?)?;
+        let item = &mut work[0];
+        let path = fixture
+            .scratch
+            .path()
+            .join(&run.staging_directory)
+            .join(&item.staging_name);
+        std::fs::write(&path, b"retained partial profile output")?;
+        assert!(
+            directory
+                .normalize(item, &mut root.open_input(item)?, &fixture.cover)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path)?, b"retained partial profile output");
+        std::fs::remove_file(&path)?;
+        let evidence = directory.normalize(item, &mut root.open_input(item)?, &fixture.cover)?;
+        let before = std::fs::read(&path)?;
+        assert_eq!(
+            directory.normalize(item, &mut root.open_input(item)?, &fixture.cover)?,
+            evidence
+        );
+        assert_eq!(std::fs::read(&path)?, before);
+        item.receipt = Some(evidence);
+        directory.verify_audio(item)?;
+        item.receipt.as_mut().ok_or("receipt")?.audio = None;
+        assert!(directory.verify_audio(item).is_err());
+        assert_eq!(std::fs::read(path)?, before);
+    }
+    Ok(())
+}
+
+#[test]
 fn staged_transfer_and_normalization_use_private_controlled_names_and_verified_disk_bytes()
 -> TestResult {
     for format in [AudioFormat::Mp3, AudioFormat::Flac] {

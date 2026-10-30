@@ -47,6 +47,7 @@ fn image_retrieval_persistence_rechecks_plan_original_profile_and_fresh_evidence
     let job = store.enqueue(1)?;
     let plan = store.prepare_catalog_plan(
         super::super::PlanRequest {
+            audio_profile: None,
             job_id: job,
             expected_version: 1,
             settings_version: settings,
@@ -164,6 +165,7 @@ fn image_retrieval_persistence_rechecks_plan_original_profile_and_fresh_evidence
     assert!(candidate.approved_at.is_none());
     assert!(store.approved_artwork(job, 2).is_err());
     store.prepare_plan(super::super::PlanRequest {
+        audio_profile: None,
         job_id: job,
         expected_version: 2,
         settings_version: settings,

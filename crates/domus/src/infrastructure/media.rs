@@ -1,6 +1,6 @@
 use super::artwork::CoverJpeg;
-use super::{flac::inspect_flac, mp3::inspect_mp3_320};
-use crate::domain::{AudioFormat, TrackTags};
+use super::{flac::inspect_flac, mp3::inspect_mp3};
+use crate::domain::{AudioFormat, AudioProfile, AudioSelection, TrackTags};
 use crate::{Error, Result};
 use id3::frame::{Content, ExtendedText, Picture, PictureType, UniqueFileIdentifier};
 use id3::{Encoding, Frame, Tag, TagLike, Version};
@@ -17,6 +17,8 @@ pub const NORMALIZATION_PROFILE: u8 = 1;
 pub struct NormalizedAudio {
     pub profile: u8,
     pub format: AudioFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioSelection>,
     pub input_bytes: u64,
     pub input_sha256: String,
     pub tags_sha256: String,
@@ -49,10 +51,10 @@ struct AudioProof {
     stream_info: Option<[u8; 34]>,
 }
 
-fn inspect(source: &mut (impl Read + Seek), format: AudioFormat) -> Result<AudioProof> {
-    match format {
+fn inspect(source: &mut (impl Read + Seek), profile: AudioProfile) -> Result<AudioProof> {
+    match profile.format() {
         AudioFormat::Mp3 => {
-            let evidence = inspect_mp3_320(source)?;
+            let evidence = inspect_mp3(source, profile)?;
             Ok(AudioProof {
                 range: evidence.mpeg_range,
                 sha256: evidence.mpeg_sha256,
@@ -265,13 +267,30 @@ pub fn normalize_audio(
     tags: &TrackTags,
     cover: &CoverJpeg,
 ) -> Result<NormalizedAudio> {
+    normalize_audio_with_profile(source, destination, format, None, tags, cover)
+}
+
+/// Preserve legacy receipt serialization when `audio` is absent. New plans
+/// supply their exact frozen selection for both input and output validation.
+pub fn normalize_audio_with_profile(
+    source: &mut (impl Read + Seek),
+    destination: &mut (impl Read + Write + Seek),
+    format: AudioFormat,
+    audio: Option<AudioSelection>,
+    tags: &TrackTags,
+    cover: &CoverJpeg,
+) -> Result<NormalizedAudio> {
+    if let Some(selection) = audio {
+        selection.validate(format)?;
+    }
+    let profile = audio.map_or_else(|| AudioProfile::legacy(format), |audio| audio.profile);
     if destination.seek(SeekFrom::End(0))? != 0 {
         return Err(Error::Conflict(
             "audio normalization requires an empty destination".into(),
         ));
     }
     let source_length = source.seek(SeekFrom::End(0))?;
-    let original = inspect(source, format)?;
+    let original = inspect(source, profile)?;
     let metadata = match original.stream_info.as_ref() {
         Some(stream_info) => flac_metadata(tags, cover, stream_info)?,
         None => id3_metadata(tags, cover)?,
@@ -320,7 +339,7 @@ pub fn normalize_audio(
             "normalized audio length differs from the written payload".into(),
         ));
     }
-    let mut verified = inspect(destination, format)?;
+    let mut verified = inspect(destination, profile)?;
     if verified.range != (metadata.len() as u64..length) {
         return Err(Error::Conflict(
             "normalized audio framing differs from the written payload".into(),
@@ -352,6 +371,7 @@ pub fn normalize_audio(
     Ok(NormalizedAudio {
         profile: NORMALIZATION_PROFILE,
         format,
+        audio,
         input_bytes: source_length,
         input_sha256: format!("{:x}", input_hash.finalize()),
         tags_sha256: format!("{:x}", Sha256::digest(serde_json::to_vec(tags)?)),

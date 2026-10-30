@@ -3,7 +3,7 @@ use domus::application::{add_location, preview_album_replacements, scan_location
 use domus::domain::{AudioFormat, JobState, OutputSettings, Page, ReplacementAction};
 use domus::infrastructure::artwork::CoverJpeg;
 use domus::infrastructure::catalog::{CatalogQuery, CatalogResult};
-use domus::infrastructure::media::{NormalizedAudio, normalize_audio};
+use domus::infrastructure::media::{NormalizedAudio, normalize_audio_with_profile};
 use domus::infrastructure::staging::StagingRoot;
 use domus::infrastructure::store::{
     AlbumReplacementDecision, JobClaim, NormalizationWork, PlanRequest, SourceFile, Store,
@@ -105,6 +105,26 @@ impl Fixture {
         backup: Option<&std::path::Path>,
         replacement_action: Option<ReplacementAction>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::build_with_profile(
+            format,
+            staged,
+            approve_cover,
+            receive,
+            backup,
+            replacement_action,
+            None,
+        )
+    }
+
+    fn build_with_profile(
+        format: AudioFormat,
+        staged: bool,
+        approve_cover: bool,
+        receive: bool,
+        backup: Option<&std::path::Path>,
+        replacement_action: Option<ReplacementAction>,
+        profile: Option<domus::domain::AudioProfile>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let state = tempdir()?;
         let library = tempdir()?;
         let scratch = tempdir()?;
@@ -118,7 +138,21 @@ impl Fixture {
             scan_location(&mut store, id)?;
             locations.push(id);
         }
-        store.save_settings(None, &OutputSettings::default())?;
+        let settings = if let Some(profile) = profile {
+            OutputSettings {
+                format,
+                accepted_formats: Some(vec![format]),
+                audio_policy: Some(domus::domain::AudioPolicy {
+                    accepted: vec![profile],
+                    preferred: profile,
+                    ..domus::domain::AudioPolicy::default()
+                }),
+                ..OutputSettings::default()
+            }
+        } else {
+            OutputSettings::default()
+        };
+        store.save_settings(None, &settings)?;
         let job = store.enqueue(1)?;
         let body = release_body(Some("2024-02"))?;
         let query = CatalogQuery::release(RELEASE)?;
@@ -139,6 +173,7 @@ impl Fixture {
         };
         let plan = store.prepare_catalog_plan(
             PlanRequest {
+                audio_profile: profile,
                 job_id: job,
                 expected_version: 1,
                 settings_version: 1,
@@ -186,10 +221,23 @@ impl Fixture {
             .ok_or("missing claim")?
             .claim;
         store.advance(&claim, JobState::Queued, JobState::Searching)?;
-        let source = match format {
-            AudioFormat::Mp3 => mp3()?,
-            AudioFormat::Flac => flac(),
-        };
+        let source =
+            if let Some(profile) = profile.filter(|profile| profile.format() == AudioFormat::Mp3) {
+                super::profiles::frames(
+                    &profile
+                        .bitrate()
+                        .map_or_else(|| vec![32, 192, 320], |bitrate| vec![bitrate; 3]),
+                    false,
+                    false,
+                    0,
+                    false,
+                )
+            } else {
+                match format {
+                    AudioFormat::Mp3 => mp3()?,
+                    AudioFormat::Flac => flac(),
+                }
+            };
         let files = (1..=3)
             .map(|track| SourceFile {
                 remote_path: format!("Peer\\Album\\track-{track}.{}", format.extension()),
@@ -252,10 +300,11 @@ impl Fixture {
         &self,
         work: &NormalizationWork,
     ) -> Result<NormalizedAudio, Box<dyn std::error::Error>> {
-        Ok(normalize_audio(
+        Ok(normalize_audio_with_profile(
             &mut Cursor::new(&self.source),
             &mut Cursor::new(Vec::new()),
             work.format,
+            work.audio,
             &work.tags,
             &self.cover,
         )?)
@@ -273,6 +322,121 @@ impl Fixture {
         }
         Ok(())
     }
+}
+
+#[test]
+fn normalization_profiles_legacy_plan_and_receipt_recover_without_new_fields() -> TestResult {
+    let mut fixture = Fixture::build(AudioFormat::Mp3, true)?;
+    let mut legacy = fixture.store.plan(fixture.job, fixture.version)?;
+    legacy.plan.audio = None;
+    let body = serde_json::to_string(&legacy.plan)?;
+    let raw = Connection::open(&fixture.database)?;
+    // Reproduce a pre-upgrade immutable record, not an application mutation.
+    raw.execute_batch("DROP TRIGGER immutable_plan_body;")?;
+    raw.execute(
+        "UPDATE job_plans SET body=?1 WHERE job_id=?2 AND version=?3",
+        params![body, fixture.job, fixture.version],
+    )?;
+    raw.execute_batch("CREATE TRIGGER immutable_plan_body BEFORE UPDATE OF job_id, version, settings_version, body ON job_plans BEGIN SELECT RAISE(ABORT, 'plan bodies are immutable'); END;")?;
+    let run = fixture
+        .store
+        .begin_normalization(&fixture.claim, &fixture.cover)?;
+    let work = fixture
+        .store
+        .normalization_work(&fixture.claim, run.id, Page::new(0, 200)?)?;
+    for item in &work {
+        assert!(item.audio.is_none());
+        let evidence = fixture.proof(item)?;
+        assert!(evidence.audio.is_none());
+        let json = serde_json::to_string(&evidence)?;
+        assert!(!json.contains("\"audio\":"));
+        assert_eq!(
+            json,
+            serde_json::to_string(&serde_json::from_str::<NormalizedAudio>(&json)?)?
+        );
+        fixture.store.record_normalized_audio(
+            &fixture.claim,
+            run.id,
+            item.track_number,
+            &evidence,
+        )?;
+    }
+    let loaded = Store::open_current_existing(&fixture.database)?;
+    assert_eq!(loaded.plan(fixture.job, fixture.version)?, legacy);
+    let retained = loaded.normalization_work(&fixture.claim, run.id, Page::new(0, 200)?)?;
+    assert!(retained.iter().all(|item| {
+        item.receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.audio.is_none())
+    }));
+    Ok(())
+}
+
+#[test]
+fn normalization_profiles_freeze_quality_reject_wrong_receipts_and_publish_every_profile()
+-> TestResult {
+    use domus::application::{normalize_album, publish_new_album};
+    use domus::domain::{AudioProfile, AudioSelection};
+    for profile in AudioProfile::ALL {
+        let mut fixture = Fixture::build_with_profile(
+            profile.format(),
+            true,
+            true,
+            true,
+            None,
+            None,
+            Some(profile),
+        )?;
+        let run = fixture
+            .store
+            .begin_normalization(&fixture.claim, &fixture.cover)?;
+        let work = fixture
+            .store
+            .normalization_work(&fixture.claim, run.id, Page::new(0, 200)?)?;
+        assert!(
+            work.iter()
+                .all(|item| item.audio == Some(AudioSelection::new(profile)))
+        );
+        let mut wrong = fixture.proof(&work[0])?;
+        wrong.audio = Some(AudioSelection::new(if profile == AudioProfile::Mp3Cbr320 {
+            AudioProfile::Mp3Cbr128
+        } else {
+            AudioProfile::Mp3Cbr320
+        }));
+        assert!(
+            fixture
+                .store
+                .record_normalized_audio(&fixture.claim, run.id, 1, &wrong)
+                .is_err()
+        );
+        fixture
+            .store
+            .save_settings(Some(1), &OutputSettings::default())?;
+        let staging = fixture.staging.as_ref().ok_or("staging")?;
+        assert_eq!(
+            normalize_album(&mut fixture.store, &fixture.claim, staging, &fixture.cover)?,
+            run.id
+        );
+        publish_new_album(&mut fixture.store, &fixture.claim, staging, run.id)?;
+        let plan = fixture.store.plan(fixture.job, fixture.version)?;
+        assert_eq!(plan.plan.audio_profile()?, profile);
+        let target = &plan.plan.destinations[0];
+        let folder = PathBuf::from(&target.root).join(&plan.plan.outputs[0].relative_folder);
+        for output in &plan.plan.outputs {
+            let bytes = std::fs::read(folder.join(&output.filename))?;
+            if profile.format() == AudioFormat::Mp3 {
+                let evidence =
+                    domus::infrastructure::mp3::inspect_mp3(&mut Cursor::new(bytes), profile)?;
+                assert_eq!(evidence.audio_frames, 3);
+            } else {
+                assert!(
+                    domus::infrastructure::flac::inspect_flac(&mut Cursor::new(bytes))?
+                        .md5_verified
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[test]

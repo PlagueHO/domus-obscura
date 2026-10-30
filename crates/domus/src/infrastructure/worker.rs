@@ -317,6 +317,8 @@ struct FolderSelection {
     peer: String,
     remote_folder: String,
     format: crate::domain::AudioFormat,
+    #[serde(default)]
+    audio_profile: Option<crate::domain::AudioProfile>,
 }
 
 impl SearchConfiguration {
@@ -351,6 +353,14 @@ impl SearchConfiguration {
         if let Some(folder) = &config.folder {
             super::soulseek::username(&folder.peer)?;
             crate::domain::sources::remote_identifier(&folder.remote_folder)?;
+            if folder
+                .audio_profile
+                .is_some_and(|profile| profile.format() != folder.format)
+            {
+                return Err(Error::InvalidInput(
+                    "folder audio profile differs from its format".into(),
+                ));
+            }
         }
         let query = CatalogQuery::release(&config.release_id)?;
         let store = Store::open_read_snapshot(&config.database)?;
@@ -540,8 +550,17 @@ impl PreparedFolder {
         let mut session = metadata_session(self.credentials, self.server)?;
         let peer = session.connect_peer(&self.selection.peer)?;
         let listing = peer.folder_contents(&self.selection.remote_folder, token)?;
+        let profile = self
+            .selection
+            .audio_profile
+            .unwrap_or_else(|| crate::domain::AudioProfile::legacy(self.selection.format));
+        if profile.format() != self.selection.format {
+            return Err(Error::InvalidInput(
+                "folder audio profile differs from its format".into(),
+            ));
+        }
         let assessment =
-            crate::domain::sources::assess_source(&self.edition, self.selection.format, &listing)?;
+            crate::domain::sources::assess_source_profile(&self.edition, profile, &listing)?;
         Ok(SourceFolderReport {
             listing,
             assessment,
@@ -556,6 +575,7 @@ pub struct PreparedSearch {
     credentials: Credentials,
     server: SocketAddrV4,
     query: String,
+    policy: crate::domain::AudioPolicy,
 }
 
 impl PreparedSearch {
@@ -573,13 +593,14 @@ impl PreparedSearch {
             credentials,
             server: config.server,
             query,
+            policy: source_policy(&config.database)?,
         })
     }
 
-    pub fn run(self) -> Result<super::soulseek::search::SearchReport> {
+    pub fn run(self) -> Result<SourceSearchReport> {
         let token = source_token()?;
         let session = metadata_session(self.credentials, self.server)?;
-        session.search(&self.query, token)
+        SourceSearchReport::assess(session.search(&self.query, token)?, &self.policy)
     }
 }
 
@@ -1087,7 +1108,7 @@ impl LocalAcquisition {
         database: &Path,
         services: ServiceConfiguration,
         release_id: String,
-    ) -> Result<super::soulseek::search::SearchReport> {
+    ) -> Result<SourceSearchReport> {
         self.search_with_cache(database, services, release_id, None)
     }
 
@@ -1097,7 +1118,7 @@ impl LocalAcquisition {
         services: ServiceConfiguration,
         release_id: String,
         cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
-    ) -> Result<super::soulseek::search::SearchReport> {
+    ) -> Result<SourceSearchReport> {
         let (config, release, credentials) =
             self.metadata(database, services, release_id, None, cache)?;
         let query = format!("{} {}", release.summary.artist, release.summary.title);
@@ -1111,6 +1132,7 @@ impl LocalAcquisition {
             credentials,
             server: config.server,
             query,
+            policy: source_policy(database)?,
         }
         .run()
     }
@@ -1139,6 +1161,7 @@ impl LocalAcquisition {
                 peer: request.peer,
                 remote_folder: request.remote_folder,
                 format: request.format,
+                audio_profile: request.audio_profile,
             }),
             cache,
         )?;
@@ -1223,6 +1246,94 @@ pub struct SourceFolderRequest {
     pub peer: String,
     pub remote_folder: String,
     pub format: crate::domain::AudioFormat,
+    #[serde(default)]
+    pub audio_profile: Option<crate::domain::AudioProfile>,
+}
+
+fn source_policy(database: &Path) -> Result<crate::domain::AudioPolicy> {
+    Ok(Store::open_read_current(database)?
+        .settings()?
+        .ok_or_else(|| Error::Conflict("save output settings before source discovery".into()))?
+        .policy)
+}
+
+#[derive(Serialize, ts_rs::TS)]
+pub struct SourceAdvertisedProfile {
+    pub profile: crate::domain::AudioProfile,
+    pub preferred: bool,
+    pub quality: crate::domain::AdvertisedQuality,
+}
+
+#[derive(Serialize, ts_rs::TS)]
+pub struct SourceSearchFile {
+    pub file: crate::domain::sources::SourceFileMetadata,
+    pub matches: Vec<SourceAdvertisedProfile>,
+}
+
+#[derive(Serialize, ts_rs::TS)]
+pub struct SourceSearchGroup {
+    pub peer: String,
+    pub folder: String,
+    pub files: Vec<SourceSearchFile>,
+}
+
+#[derive(Serialize, ts_rs::TS)]
+pub struct SourceSearchReport {
+    #[serde(flatten)]
+    pub report: super::soulseek::search::SearchReport,
+    pub groups: Vec<SourceSearchGroup>,
+}
+
+impl SourceSearchReport {
+    pub fn assess(
+        report: super::soulseek::search::SearchReport,
+        policy: &crate::domain::AudioPolicy,
+    ) -> Result<Self> {
+        use crate::domain::{AdvertisedQuality, sources::advertised_file};
+        policy.validate()?;
+        let mut groups = std::collections::BTreeMap::new();
+        for peer in &report.peers {
+            for file in &peer.files {
+                let path = crate::domain::sources::remote_identifier(&file.remote_path)?;
+                let Some((folder, _)) = path.rsplit_once('\\') else {
+                    continue;
+                };
+                let matches: Vec<_> = policy
+                    .accepted
+                    .iter()
+                    .map(|profile| SourceAdvertisedProfile {
+                        profile: *profile,
+                        preferred: *profile == policy.preferred,
+                        quality: advertised_file(*profile, file),
+                    })
+                    .collect();
+                if matches
+                    .iter()
+                    .all(|item| item.quality == AdvertisedQuality::Mismatch)
+                {
+                    continue;
+                }
+                groups
+                    .entry((peer.peer.clone(), folder.to_string()))
+                    .or_insert_with(Vec::new)
+                    .push(SourceSearchFile {
+                        file: file.clone(),
+                        matches,
+                    });
+            }
+        }
+        Ok(Self {
+            report,
+            groups: groups
+                .into_iter()
+                .map(|((peer, folder), files)| SourceSearchGroup {
+                    peer,
+                    folder,
+                    files,
+                })
+                .collect(),
+        })
+    }
 }
 
 #[derive(Deserialize, ts_rs::TS)]

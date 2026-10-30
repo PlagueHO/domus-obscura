@@ -11,7 +11,7 @@ import type { SystemSettingsPolicy } from "../src/generated/SystemSettingsPolicy
 import type { OutputSettings } from "../src/generated/OutputSettings";
 import type { Location } from "../src/generated/Location";
 import type { StoredPlan } from "../src/generated/StoredPlan";
-import type { AudioFormat } from "../src/generated/AudioFormat";
+import type { AudioProfile } from "../src/generated/AudioProfile";
 import type { RegisterLocation } from "../src/generated/RegisterLocation";
 import { query, request } from "./api";
 import { useCommand, useResource } from "./hooks";
@@ -20,15 +20,7 @@ import { AlbumCard } from "./components/Media";
 import { searchGap } from "./Search";
 import { BackendConfiguration, ConfigurationCard } from "./BackendConfiguration";
 import { LocalMatches } from "./LocalMatches";
-
-const audioChoices: { format: AudioFormat; label: string }[] = [
-  { format: "mp3", label: "MP3 · 320 kbps CBR" },
-  { format: "flac", label: "FLAC · Lossless (no fixed bitrate)" },
-];
-
-function acceptedFormats(settings: OutputSettings): AudioFormat[] {
-  return settings.accepted_formats ?? audioChoices.map((choice) => choice.format);
-}
+import { AudioProfileSelect, audioProfileLabel, outputWithAudioPolicy } from "./audio-profiles";
 
 export function ReleaseCard({ release }: { release: CatalogReleaseSummary }) {
   return <AlbumCard release={release} />;
@@ -269,23 +261,26 @@ export function Album({
     id,
   );
   const [selected, setSelected] = useState<number[]>([]);
-  const [selectedFormat, setFormat] = useState<AudioFormat>();
-  const format = selectedFormat ?? settings?.settings.format ?? "mp3";
-  const accepted = settings ? acceptedFormats(settings.settings) : [];
+  const [selectedProfile, setProfile] = useState<AudioProfile>();
+  const profile = selectedProfile ?? settings?.policy.preferred;
+  const accepted = settings?.policy.accepted ?? [];
   const [coverage, setCoverage] = useState(false);
   const [created, setCreated] = useState<CreatedJob>();
   const [editionsOpen, setEditionsOpen] = useState(false);
   const command = useCommand();
   const album = release.data?.data;
   async function prepare() {
-    if (!settings || !album) return;
+    if (!settings || !album || !profile || !accepted.includes(profile)) return;
     const job = created ?? (await request<CreatedJob>("/api/jobs", { body: {} }));
     setCreated(job);
     const body: CatalogPlanRequest = {
       job_id: job.job_id,
       expected_version: job.plan_version,
       settings_version: settings.version,
-      format,
+      format:
+        settings.audio_profiles.find((descriptor) => descriptor.profile === profile)?.format ??
+        null,
+      audio_profile: profile,
       locations: selected,
       accepts_incomplete_coverage: coverage,
       bucket: null,
@@ -404,26 +399,14 @@ export function Album({
                   <p className="warning">No library roots are configured. Run local setup first.</p>
                 )}
                 <label>
-                  Output format
-                  <select
-                    value={format}
+                  Output audio profile
+                  <AudioProfileSelect
+                    value={profile}
+                    accepted={accepted}
+                    descriptors={settings?.audio_profiles ?? []}
                     disabled={command.busy}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      if (value === "mp3" || value === "flac") setFormat(value);
-                    }}
-                  >
-                    {!accepted.includes(format) && (
-                      <option value={format}>Choose an accepted format</option>
-                    )}
-                    {audioChoices
-                      .filter((choice) => accepted.includes(choice.format))
-                      .map((choice) => (
-                        <option key={choice.format} value={choice.format}>
-                          {choice.label}
-                        </option>
-                      ))}
-                  </select>
+                    onChange={setProfile}
+                  />
                 </label>
                 <fieldset disabled={command.busy}>
                   <legend>Configured destinations</legend>
@@ -466,7 +449,8 @@ export function Album({
                   disabled={
                     command.busy ||
                     !settings ||
-                    !accepted.includes(format) ||
+                    !profile ||
+                    !accepted.includes(profile) ||
                     selected.length === 0 ||
                     !album
                   }
@@ -536,21 +520,15 @@ export function Settings({
                       JSON configuration.
                     </p>
                     <dl className="properties">
-                      <dt>Accepted audio formats and bitrate</dt>
+                      <dt>Accepted audio profiles</dt>
                       <dd>
-                        {audioChoices
-                          .filter((choice) =>
-                            acceptedFormats(settings.settings).includes(choice.format),
-                          )
-                          .map((choice) => choice.label)
+                        {settings.policy.accepted
+                          .map((profile) => audioProfileLabel(profile, settings.audio_profiles))
                           .join("; ")}
                       </dd>
-                      <dt>Preferred audio format and bitrate</dt>
+                      <dt>Preferred audio profile</dt>
                       <dd>
-                        {
-                          audioChoices.find((choice) => choice.format === settings.settings.format)
-                            ?.label
-                        }
+                        {audioProfileLabel(settings.policy.preferred, settings.audio_profiles)}
                       </dd>
                       <dt>Artwork size</dt>
                       <dd>
@@ -653,21 +631,34 @@ function SystemOutputForm({
   onDirty: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState<OutputSettings>(settings.settings);
+  const [audioPolicy, setAudioPolicy] = useState(settings.policy);
   const [submitted, setSubmitted] = useState(false);
   const command = useCommand();
   const saving = disabled || command.busy || submitted;
-  const accepted = acceptedFormats(draft);
-  const validAudio = accepted.length > 0 && accepted.includes(draft.format);
+  const accepted = audioPolicy.accepted;
+  const validAudio =
+    accepted.length > 0 &&
+    accepted.includes(audioPolicy.preferred) &&
+    accepted.every((profile) =>
+      settings.audio_profiles.some((descriptor) => descriptor.profile === profile),
+    );
   useEffect(() => {
-    onDirty(!submitted && JSON.stringify(draft) !== JSON.stringify(settings.settings));
+    onDirty(
+      !submitted &&
+        (JSON.stringify(draft) !== JSON.stringify(settings.settings) ||
+          JSON.stringify(audioPolicy) !== JSON.stringify(settings.policy)),
+    );
     return () => onDirty(false);
-  }, [draft, settings.settings, submitted, onDirty]);
+  }, [draft, audioPolicy, settings.settings, settings.policy, submitted, onDirty]);
 
   async function save() {
     if (saving || !validAudio) return;
     const version = await request<number>("/api/settings", {
       method: "PUT",
-      body: { expected_version: settings.version, settings: draft },
+      body: {
+        expected_version: settings.version,
+        settings: outputWithAudioPolicy(draft, audioPolicy, settings.audio_profiles),
+      },
     });
     setSubmitted(true);
     onSaved(version);
@@ -681,18 +672,18 @@ function SystemOutputForm({
       }}
     >
       <fieldset disabled={saving}>
-        <legend>Accepted audio formats and bitrate</legend>
-        <p>Select every combination the shared library accepts.</p>
-        {audioChoices.map((choice) => (
+        <legend>Accepted audio profiles</legend>
+        <p>Select every profile the shared library accepts.</p>
+        {settings.audio_profiles.map((choice) => (
           <Check
-            key={choice.format}
-            checked={accepted.includes(choice.format)}
+            key={choice.profile}
+            checked={accepted.includes(choice.profile)}
             onChange={(checked) =>
-              setDraft((current) => ({
+              setAudioPolicy((current) => ({
                 ...current,
-                accepted_formats: checked
-                  ? [...acceptedFormats(current), choice.format]
-                  : acceptedFormats(current).filter((format) => format !== choice.format),
+                accepted: checked
+                  ? [...current.accepted, choice.profile]
+                  : current.accepted.filter((profile) => profile !== choice.profile),
               }))
             }
           >
@@ -700,34 +691,19 @@ function SystemOutputForm({
           </Check>
         ))}
         <p className="muted">
-          Other MP3 bitrates, VBR and M4A are not supported yet. FLAC is lossless and has no fixed
-          bitrate.
+          MP3 VBR requires actual bitrate variation. It has no preset or average-bitrate target.
+          FLAC is lossless and has no fixed bitrate. M4A is not supported.
         </p>
       </fieldset>
       <label>
-        Preferred audio format and bitrate
-        <select
-          value={accepted.includes(draft.format) ? draft.format : ""}
+        Preferred audio profile
+        <AudioProfileSelect
+          value={audioPolicy.preferred}
+          accepted={accepted}
+          descriptors={settings.audio_profiles}
           disabled={saving}
-          onChange={(event) => {
-            const format = event.target.value;
-            if (format === "mp3" || format === "flac")
-              setDraft((current) => ({ ...current, format }));
-          }}
-        >
-          {!accepted.includes(draft.format) && (
-            <option value="" disabled>
-              Choose an accepted combination
-            </option>
-          )}
-          {audioChoices
-            .filter((choice) => accepted.includes(choice.format))
-            .map((choice) => (
-              <option key={choice.format} value={choice.format}>
-                {choice.label}
-              </option>
-            ))}
-        </select>
+          onChange={(preferred) => setAudioPolicy((current) => ({ ...current, preferred }))}
+        />
         <small>
           New album requests start with this choice. Other accepted choices remain available. No
           download or fallback starts automatically.
@@ -735,8 +711,7 @@ function SystemOutputForm({
       </label>
       {!validAudio && (
         <p role="alert">
-          Select at least one accepted combination, then select a preferred combination from that
-          selection.
+          Select at least one accepted profile, then select a preferred profile from that selection.
         </p>
       )}
       <label>

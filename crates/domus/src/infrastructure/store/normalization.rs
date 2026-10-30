@@ -1,5 +1,5 @@
 use super::{JobClaim, Store, artwork, check_job_owner, planning, record_job_event, transfers};
-use crate::domain::{AudioFormat, JobState, Page, TrackTags};
+use crate::domain::{AudioFormat, AudioSelection, JobState, Page, TrackTags};
 use crate::infrastructure::artwork::CoverJpeg;
 use crate::infrastructure::media::{NORMALIZATION_PROFILE, NormalizedAudio};
 use crate::{Error, Result};
@@ -36,6 +36,7 @@ pub struct NormalizationWork {
     pub tags_sha256: String,
     pub staging_name: String,
     pub format: AudioFormat,
+    pub audio: Option<AudioSelection>,
     pub tags: TrackTags,
     pub receipt: Option<NormalizedAudio>,
 }
@@ -133,12 +134,15 @@ fn canonical_hash(value: &str) -> bool {
 
 fn validate_receipt(
     evidence: &NormalizedAudio,
-    format: AudioFormat,
+    plan: &planning::PreparedPlan,
     input: &str,
     run: &NormalizationRun,
 ) -> Result<()> {
+    plan.audio_profile()?;
+    let format = plan.format;
     if evidence.profile != run.profile
         || evidence.format != format
+        || evidence.audio != plan.audio
         || evidence.input_sha256 != input
         || evidence.cover_sha256 != run.cover_sha256
         || ![
@@ -258,6 +262,11 @@ impl Store {
         recipe.update(b"domus-audio-normalization\0");
         recipe.update([NORMALIZATION_PROFILE]);
         recipe.update(plan.plan.format.extension().as_bytes());
+        if let Some(audio) = plan.plan.audio {
+            audio.validate(plan.plan.format)?;
+            recipe.update(b"\0audio-policy\0");
+            recipe.update(serde_json::to_vec(&audio)?);
+        }
         recipe.update(cover_hash.as_bytes());
         let mut tag_hashes = Vec::with_capacity(tags.len());
         for (tags, input) in tags.iter().zip(&inputs) {
@@ -327,6 +336,7 @@ impl Store {
     ) -> Result<NormalizationGuard> {
         owned_run(&self.connection, claim, run)?;
         let plan = planning::acquisition_plan(&self.connection, claim.job, claim.plan_version)?;
+        plan.plan.audio_profile()?;
         Ok(NormalizationGuard {
             run,
             destinations: plan.plan.destinations,
@@ -410,6 +420,8 @@ impl Store {
         page: Page,
     ) -> Result<Vec<NormalizationWork>> {
         let plan = planning::acquisition_plan(&self.connection, claim.job, claim.plan_version)?;
+        plan.plan.audio_profile()?;
+        let attempt = read_run(&self.connection, run)?;
         let tags = plan
             .plan
             .catalog
@@ -447,6 +459,12 @@ impl Store {
                     if digest(&serde_json::to_vec(&tags)?) != tags_hash {
                         return Err(conflict());
                     }
+                    let receipt: Option<NormalizedAudio> = receipt
+                        .map(|body| serde_json::from_str(&body))
+                        .transpose()?;
+                    if let Some(evidence) = &receipt {
+                        validate_receipt(evidence, &plan.plan, &input_hash, &attempt)?;
+                    }
                     Ok(NormalizationWork {
                         run_id: run,
                         track_number: number,
@@ -456,10 +474,9 @@ impl Store {
                         tags_sha256: tags_hash,
                         staging_name,
                         format: plan.plan.format,
+                        audio: plan.plan.audio,
                         tags,
-                        receipt: receipt
-                            .map(|body| serde_json::from_str(&body))
-                            .transpose()?,
+                        receipt,
                     })
                 },
             )
@@ -489,7 +506,7 @@ impl Store {
             ));
         }
         let plan = planning::read_plan(&transaction, claim.job, claim.plan_version)?;
-        validate_receipt(evidence, plan.plan.format, &input, &attempt)?;
+        validate_receipt(evidence, &plan.plan, &input, &attempt)?;
         let body = serde_json::to_string(evidence)?;
         if body.len() > 16384 {
             return Err(Error::InvalidInput(

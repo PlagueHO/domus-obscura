@@ -380,6 +380,11 @@ identifiers out of native filesystem APIs. Reject wrong tokens/folders, escapes,
 duplicate paths, partial compressed data and excess counts instead of truncating.
 Keep exact name/number matching, advertised quality and actual audio/edition
 verification separate. A complete name mapping still requires user review.
+Use `audio_profile` with the matching `format` to assess a supported profile.
+Without that field, MP3 still means 320 CBR. New plans freeze an audio-policy
+version and exact profile; source review and normalization must use that binding.
+Other accepted profile matches need a new plan and approval, never automatic
+fallback. Missing advertised bitrate or VBR flags remain unknown.
 Never turn this report into a source approval, job claim, download or retry.
 
 `domus source-candidate-prepare` imports only a bounded local listing object,
