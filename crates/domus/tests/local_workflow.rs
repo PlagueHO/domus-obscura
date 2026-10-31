@@ -116,6 +116,14 @@ fn interrupted_scan_resumes_its_directory_frontier() -> Result<(), Box<dyn std::
     store.complete_directory(&first, &LibraryPath::parse("")?)?;
     assert!(store.begin_scan(location).is_err());
     rusqlite::Connection::open(&database)?.execute("UPDATE scans SET lease_until = 0", [])?;
+    assert!(matches!(
+        store.record_batch(&first, &[]),
+        Err(domus::Error::Conflict(_))
+    ));
+    assert!(matches!(
+        store.finish_scan(&first),
+        Err(domus::Error::Conflict(_))
+    ));
     let resumed = store.begin_scan(location)?;
     assert_eq!(first.id, resumed.id);
     assert!(store.record_batch(&first, &[]).is_err());

@@ -152,6 +152,11 @@ the existing worker/search/folder entry points in that deployment. Hold all
 native ownership through thread/session draining. Never unlink the stable lock
 files or run the same account in another deployment.
 
+Release process locks explicitly when their ownership guards end. Closing a
+handle alone can leave a Linux lock held by a duplicate descriptor from a
+concurrent process spawn. Keep independent readers protected until their own
+guards end. See [Linux flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html).
+
 Keep returned JobClaim and ScanClaim authority separate from request ownership.
 Renew request leases while operations run. Stop new effects at safe boundaries,
 not by aborting a blocking thread. Preserve active receive/copy receipts and an
