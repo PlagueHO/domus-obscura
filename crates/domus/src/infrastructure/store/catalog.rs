@@ -942,24 +942,52 @@ mod tests {
     fn catalog_backoff_ignores_past_and_future_wall_deadlines() -> TestResult {
         let directory = tempfile::tempdir()?;
         let mut store = Store::open(&directory.path().join("state.db"))?;
+        let clock = super::super::catalog_clock::TestClock::new();
         let grant = store.claim_catalog_request()?;
         store.complete_catalog_request(grant, 120, None)?;
+        for (elapsed, expected) in [(0, 120), (500, 120), (2000, 118), (119_000, 1)] {
+            clock.advance_to(std::time::Duration::from_millis(elapsed));
+            for next in [1i64, i64::MAX - 1] {
+                store
+                    .connection
+                    .execute("UPDATE catalog_gate SET next_request_ms=?1", [next])?;
+                let status = store.catalog_status()?;
+                assert!(
+                    matches!(status.state, CatalogProviderState::Backoff),
+                    "{status:?}"
+                );
+                assert_eq!(status.known_retry_after_seconds, Some(expected));
+                match store.claim_catalog_request() {
+                    Err(Error::Catalog {
+                        retry_after_seconds,
+                        ..
+                    }) => {
+                        assert_eq!(
+                            retry_after_seconds, expected,
+                            "elapsed={elapsed}, next={next}"
+                        );
+                    }
+                    Err(error) => panic!(
+                        "expected cooldown rejection at elapsed={elapsed}, next={next}: {error}"
+                    ),
+                    Ok(_) => panic!("unexpected permit at elapsed={elapsed}, next={next}"),
+                }
+            }
+        }
+        clock.advance_to(std::time::Duration::from_secs(120));
         for next in [1i64, i64::MAX - 1] {
             store
                 .connection
                 .execute("UPDATE catalog_gate SET next_request_ms=?1", [next])?;
-            assert!(matches!(
-                store.catalog_status()?.state,
-                CatalogProviderState::Backoff
-            ));
-            assert!(matches!(
-                store.claim_catalog_request(),
-                Err(Error::Catalog {
-                    retry_after_seconds: 119..=120,
-                    ..
-                })
-            ));
+            let status = store.catalog_status()?;
+            assert!(
+                matches!(status.state, CatalogProviderState::Available),
+                "{status:?}"
+            );
+            assert_eq!(status.known_retry_after_seconds, Some(0));
         }
+        let permit = store.claim_catalog_request()?;
+        store.complete_catalog_request(permit, 0, None)?;
         Ok(())
     }
 }
