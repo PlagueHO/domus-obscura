@@ -17,6 +17,7 @@ import { query, request } from "./api";
 import { useCommand, useMetadataResource } from "./hooks";
 import { Alert, Badge, Button, Check, Cover, Empty, Pager } from "./components/ui";
 import { AlbumCard } from "./components/Media";
+import { ArtistPhoto } from "./ArtistPhoto";
 import { BackendConfiguration, ConfigurationCard } from "./BackendConfiguration";
 import { LocalMatches } from "./LocalMatches";
 import { AudioProfileSelect, audioProfileLabel, outputWithAudioPolicy } from "./audio-profiles";
@@ -41,7 +42,7 @@ export function Artist({ id, locations = [] }: { id: string; locations?: Locatio
   return (
     <>
       <header className="hero artist-hero album-hero">
-        <Cover title={identity?.name ?? id} />
+        <ArtistPhoto key={id} id={id} title={identity?.name ?? id} />
         <div>
           <h1>{identity?.name ?? "Artist"}</h1>
           <p>
@@ -61,6 +62,12 @@ export function Artist({ id, locations = [] }: { id: string; locations?: Locatio
               rel="noreferrer"
             >
               MusicBrainz
+            </a>
+            <a
+              className="button button-secondary"
+              href={`#/settings?section=music_providers&artist=${encodeURIComponent(id)}`}
+            >
+              Manage artist photo
             </a>
           </div>
         </div>

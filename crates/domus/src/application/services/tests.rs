@@ -87,6 +87,7 @@ fn configuration() -> ServiceConfiguration {
         metadata: vec!["first".into()],
         artwork: Vec::new(),
         acquisition: Vec::new(),
+        artist_images: Vec::new(),
     }
 }
 

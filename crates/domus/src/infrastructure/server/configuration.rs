@@ -1191,6 +1191,12 @@ impl ConfigurationService {
                 "Select only installed providers, without duplicates, for each service.",
             )
         })?;
+        if !configuration.services.artist_images.is_empty() && configuration.cache.is_none() {
+            return Err(issue(
+                "services.artist_images",
+                "Artist photos require the shared file cache.",
+            ));
+        }
         if configuration
             .production_worker
             .as_ref()

@@ -10,6 +10,7 @@ import { useCommand, useResource } from "./hooks";
 import { Alert, Button } from "./components/ui";
 import { Icon } from "./components/Media";
 import { BackendConfigurationForm } from "./BackendConfigurationForm";
+import { ArtistPhotoBindings } from "./ArtistPhotoBindings";
 import {
   acceptConfigurationSave,
   beginConfigurationEdit,
@@ -95,7 +96,13 @@ export function BackendConfiguration({
     (signal) => request<BackendConfigurationState>("/api/system/configuration", { signal }),
     "backend-configuration",
   );
-  const [section, setSection] = useState<Section>("general");
+  const [section, setSection] = useState<Section>(() => {
+    const requested =
+      typeof location === "undefined"
+        ? null
+        : new URLSearchParams(location.hash.split("?")[1]).get("section");
+    return configurationSections.find(({ id }) => id === requested)?.id ?? "general";
+  });
   const [draft, setEditor] = useState<ConfigurationEditor>();
   const [confirmed, setConfirmed] = useState<BackendConfigurationState>();
   const [notice, setNotice] = useState("");
@@ -413,6 +420,12 @@ export function BackendConfiguration({
                   }
                 />
               )}
+              {state && backendSection && backendSection === "music_providers" && (
+                <ArtistPhotoBindings
+                  readOnly={readOnly || !fresh || reloading || uncertain}
+                  enabled={state.active.services.artist_images.includes("wikimedia-commons")}
+                />
+              )}
               {state && backendSection && (
                 <details className="configuration-details">
                   <summary>Advanced</summary>
@@ -555,6 +568,7 @@ function SectionSummary({
                   ["Metadata providers", value.services.metadata.join(", ") || "Disabled"],
                   ["Artwork providers", value.services.artwork.join(", ") || "Disabled"],
                   ["Acquisition providers", value.services.acquisition.join(", ") || "Disabled"],
+                  ["Artist photo source", value.services.artist_images.join(", ") || "Disabled"],
                 ]
               : section === "music_sharing"
                 ? [

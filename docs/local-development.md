@@ -8,6 +8,31 @@ The separate [production worker](../README.md#separate-production-worker) uses
 `production_worker`, not this guide's optional `local_acquisition` runtime.
 Do not enable both. Production source discovery is not part of that worker.
 
+## Artist-photo checks
+
+The separate generated browser harness has an artist-photo view at
+`http://127.0.0.1:4173/?artist-photos=1` when it runs on its default port.
+It uses a generated illustration and sample rights records. It makes no provider,
+photo API or library requests. It covers loaded, small, missing, disabled,
+loading and failed presentation states.
+
+The real developer HTTPS application can use Commons only after an operator
+selects it with an existing shared file cache and explicitly reloads or restarts.
+Changing saved JSON alone does not activate it. Do not run live photo checks
+without separate approval for provider access.
+
+Open System > Media > Music > Providers to manage photo links. Enter the exact
+MusicBrainz artist UUID and Commons `File:` title. Check the photo, review the
+loaded preview and complete credit, then confirm permitted use and save.
+The artist page has a link that fills in its exact identity. Binding saves are
+separate from backend JSON saves. They do not change library files or cover
+approvals. Failed checks and stale saves retain the browser draft.
+
+Unsupported retry delays remain paused. Review the failure before using
+**Resume manually paused requests**. This command cannot clear ordinary timed
+backoff or interrupt a live request. A changed file or rights record needs a new
+check and save, not a cache reset.
+
 ## Build and create a fresh Windows setup
 
 Use the pinned tools. Run these commands from the repository in PowerShell 7:

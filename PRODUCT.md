@@ -642,7 +642,25 @@ reloads and page cursors. Initial reads run in sequence through shared server ad
 The server still enforces the shared provider budget and any longer backoff;
 the browser never retries automatically. Artist pages load the exact provider
 identity instead of using a generic heading or inferring a name from releases.
-No artist-image provider is installed, so missing artist art stays explicit.
+Wikimedia Commons is the installed optional artist-photo provider. It is disabled
+by default and requires the shared file cache. The administrator links an exact
+MusicBrainz artist ID to one Commons `File:` title. There is no name search or
+automatic identity match. Local library artists without that provider identity
+keep their existing placeholders.
+
+Source selection uses the saved/active backend configuration flow. Photo links
+are separate versioned SQLite records. An explicit check shows the exact photo,
+credit and rights. Saving requires the exact preview confirmation and a
+permitted-use acknowledgment. Links survive cache eviction. Changed source
+content or rights require another check and save.
+
+Photos use the shared strict JPEG/PNG normalizer with 200, 400 or 800 pixel
+bounds. The default is 400. They keep their aspect ratio without cropping,
+padding, stretching or enlargement. Artist pages and search cards show a
+same-origin JPEG with creator, credit, source, license and change notices.
+Supported rights are CC0 1.0, CC BY 3.0/4.0 and CC BY-SA 3.0/4.0 with canonical
+license URLs and complete credit. Other rights, including personality and
+privacy rights, can still apply. Artist photos never approve album covers.
 
 Album pages now offer an exact-edition dropdown backed by release-group browsing.
 Each result must belong to the requested group. Pagination uses actual provider

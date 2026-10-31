@@ -92,6 +92,8 @@ export function LocalTest() {
         <a href="/?library=1#/library?view=artists">Open generated Library browsing</a>
         <p>
           <a href="/?provider=1">Open generated provider waiting states</a>
+          {" · "}
+          <a href="/?artist-photos=1">Open generated artist photo states</a>
         </p>
         <p className="boundary">
           Sample data only. No sign-in, CAA, MusicBrainz or Soulseek requests. Your music library is

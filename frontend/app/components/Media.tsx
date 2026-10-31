@@ -7,6 +7,7 @@ import { request } from "../api";
 import { useCommand } from "../hooks";
 import { visibleJobs } from "../state";
 import { Alert, Button, Cover, Empty } from "./ui";
+import { ArtistPhoto } from "../ArtistPhoto";
 
 export type IconName =
   | "home"
@@ -114,16 +115,16 @@ export function FocusHeader({ onSearch }: { onSearch: () => void }) {
 
 export function ArtistCard({ artist }: { artist: CatalogArtist }) {
   return (
-    <a className="media-card artist-card" href={`#/artist/${encodeURIComponent(artist.id)}`}>
-      <Cover title={artist.name} />
-      <span className="card-text">
+    <article className="media-card artist-card">
+      <ArtistPhoto key={artist.id} id={artist.id} title={artist.name} />
+      <a className="card-text" href={`#/artist/${encodeURIComponent(artist.id)}`}>
         <strong>{artist.name}</strong>
         <span>
           {[artist.country, artist.kind, artist.disambiguation].filter(Boolean).join(" · ") ||
             "Artist"}
         </span>
-      </span>
-    </a>
+      </a>
+    </article>
   );
 }
 

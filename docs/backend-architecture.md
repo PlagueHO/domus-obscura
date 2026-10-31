@@ -211,7 +211,7 @@ The shared cache contract and file adapter are implemented in
 to catalog/CAA operations and plan-bound image preparation. Configured responses do
 not use the legacy SQLite cache or fall back to it. Local source metadata reads
 receive this same host-selected port. Provider-specific freshness, provenance checks and request budgets remain
-unchanged. Album covers, future artist images and provider responses can use the
+unchanged. Album covers, artist images and provider responses use the
 same port. Eviction cannot reach approved evidence or recovery records; they
 remain in their existing durable stores.
 
@@ -386,10 +386,40 @@ Acquisition and Sharing saves preserve sibling drafts and saved fields.
 Inspection and validation stay passive. Explicit native binding and worker
 restart remain separate operator actions.
 
+## Artist-photo boundary
+
+`ArtistImageProvider` supplies provider-native file identity, fresh rights and
+original bytes. `ImageService::retrieve_artist` keeps that contract separate
+from release artwork and sends bytes through the existing `ImageProcessor`.
+Native variants retain their content, profile, size and background binding.
+Artist variants also use the selected provider scope.
+
+The Commons adapter accepts one exact File title. It uses fixed HTTPS API and
+upload authorities without redirects, automatic retries or arbitrary URL input.
+It checks file identity, revision, MIME type, dimensions, byte count and SHA-1.
+Local SHA-256 binds content and confirmation. SHA-1 is only upstream file
+integrity evidence. Credit HTML becomes bounded plain text with retained HTTPS
+link destinations; unsupported markup fails instead of losing required credit.
+
+Migration 030 stores versioned artist-to-file links and the separate Commons
+request gate. Removal keeps a version tombstone. Slow reads recheck the link.
+Save rechecks the exact preview and expected version before its transaction.
+Network, decoding and file-cache I/O stay outside transactions and off executor
+threads. One native request lock spans submission, backoff and cache persistence.
+Cancellation prevents a pending submission; submitted work retains its completion
+and backoff. An unsupported delay needs a guarded manual resume.
+
+The shared file cache is required, with separate provider-scoped metadata,
+original and JPEG entries. Metadata and rights are checked before each served
+variant. Eviction removes no links, plans, cover approvals or receipts. Browser
+photo reads return explicit disabled, unbound, missing or ready states; provider,
+rights, changed-source and cache failures remain errors. No new MCP tool or
+listener is installed.
+
 ## Known gaps for design review
 
-- Artist-photo discovery has no installed provider. CAA supplies release artwork,
-  not artist photos. The image normalizer itself is reusable.
+- Artist-photo discovery remains manual. Commons file links do not establish an
+  automatic MusicBrainz identity match. CAA remains release-artwork only.
 - System settings now separate accepted combinations from one preferred choice.
   New plans enforce that accepted set. Current processing supports MP3 320 CBR
   and FLAC; other bitrates, VBR and M4A acceptance are not implemented.

@@ -299,7 +299,7 @@ export function App() {
         }
       />
     );
-  } else if (route === "/settings") {
+  } else if (route === "/settings" || route.startsWith("/settings?")) {
     page = (
       <Settings
         settings={setup.data?.settings}
@@ -509,7 +509,7 @@ export function App() {
       <nav className="sidebar" aria-label="Music navigation">
         <a
           href="#/"
-          className={`side-link ${route !== "/settings" && section !== "recovery" ? "selected" : ""}`}
+          className={`side-link ${!route.startsWith("/settings") && section !== "recovery" ? "selected" : ""}`}
           aria-label="Media"
           title="Media"
         >
@@ -536,11 +536,11 @@ export function App() {
             <Icon name="inbox" />
           </a>
           <a
-            className={`side-link ${route === "/settings" ? "selected" : ""}`}
+            className={`side-link ${route.startsWith("/settings") ? "selected" : ""}`}
             href="#/settings"
             aria-label="System settings"
             title="System settings"
-            aria-current={route === "/settings" ? "page" : undefined}
+            aria-current={route.startsWith("/settings") ? "page" : undefined}
           >
             <Icon name="settings" />
           </a>

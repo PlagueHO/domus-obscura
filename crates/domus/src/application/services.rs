@@ -8,10 +8,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 pub mod acquisition;
+pub mod artist_images;
 pub mod cache;
 pub mod images;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct EntityRef {
     pub provider: String,
@@ -47,6 +48,7 @@ pub struct ServiceConfiguration {
     pub metadata: Vec<String>,
     pub artwork: Vec<String>,
     pub acquisition: Vec<String>,
+    pub artist_images: Vec<String>,
 }
 
 impl Default for ServiceConfiguration {
@@ -56,6 +58,7 @@ impl Default for ServiceConfiguration {
             metadata: vec!["musicbrainz".into()],
             artwork: vec!["cover-art-archive".into()],
             acquisition: vec!["soulseek".into()],
+            artist_images: Vec::new(),
         }
     }
 }
@@ -67,6 +70,7 @@ impl ServiceConfiguration {
             &self.metadata,
             &self.artwork,
             &self.acquisition,
+            &self.artist_images,
         ] {
             if providers.len() > 8 {
                 return Err(Error::InvalidInput(
@@ -81,6 +85,11 @@ impl ServiceConfiguration {
                 }
             }
         }
+        if self.artist_images.len() > 1 {
+            return Err(Error::InvalidInput(
+                "select at most one artist-image source".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -93,6 +102,7 @@ impl ServiceConfiguration {
             (&self.metadata, "musicbrainz"),
             (&self.artwork, "cover-art-archive"),
             (&self.acquisition, "soulseek"),
+            (&self.artist_images, "wikimedia-commons"),
         ] {
             if providers.iter().any(|provider| provider != installed) {
                 return Err(Error::InvalidInput(
@@ -110,6 +120,7 @@ impl ServiceConfiguration {
             Capability::Metadata => &self.metadata,
             Capability::Artwork => &self.artwork,
             Capability::Acquisition => &self.acquisition,
+            Capability::ArtistImages => &self.artist_images,
         };
         if !configured.iter().any(|value| value == provider) {
             return Err(Error::Conflict(
@@ -126,6 +137,7 @@ pub enum Capability {
     Metadata,
     Artwork,
     Acquisition,
+    ArtistImages,
 }
 
 /// Provider-native pagination stays inside each provider result. No merged

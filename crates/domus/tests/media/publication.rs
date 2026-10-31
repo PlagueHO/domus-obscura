@@ -437,7 +437,9 @@ fn replacement_restore_is_state_bound_and_recovers_after_displacing_the_current_
     )?;
     std::fs::rename(&current, &temporary)?;
     raw.execute_batch(
-        "DROP VIEW recovery_inventory;
+        "DROP TABLE artist_photo_bindings;
+         DROP TABLE commons_gate;
+         DROP VIEW recovery_inventory;
          DROP INDEX recovery_input_cursor;
          DROP INDEX recovery_normalization_cursor;
          DROP INDEX recovery_pending_cursor;
@@ -2142,7 +2144,7 @@ fn schema_fifteen_upgrade_preserves_completed_normalization_and_approval() -> Te
     fixture.store = Store::open(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        29
+        30
     );
     assert_eq!(
         raw.query_row(

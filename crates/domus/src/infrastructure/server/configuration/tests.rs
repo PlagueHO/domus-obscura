@@ -1,6 +1,7 @@
 use super::*;
 use serde_json::{Value, json};
 
+mod artist_images;
 mod sharing;
 mod worker;
 

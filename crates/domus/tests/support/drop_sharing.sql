@@ -1,4 +1,6 @@
 -- Remove newer layers before rebuilding a legacy upgrade fixture.
+DROP TABLE artist_photo_bindings;
+DROP TABLE commons_gate;
 DROP VIEW recovery_inventory;
 DROP INDEX recovery_input_cursor;
 DROP INDEX recovery_normalization_cursor;

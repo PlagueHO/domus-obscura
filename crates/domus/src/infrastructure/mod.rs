@@ -4,6 +4,7 @@ pub mod browser;
 pub mod caa;
 pub mod cache;
 pub mod catalog;
+pub mod commons;
 pub mod entra;
 pub mod filesystem;
 pub mod flac;

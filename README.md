@@ -1006,8 +1006,35 @@ and original digest against fresh retained CAA cache evidence. It stores the
 returned JPEG without another resize or encoding. The exact JPEG still needs
 separate user approval. Local uploads and cache-only preparation use the same
 normalizer. The read-only MCP `artwork_fetch` contract is unchanged: it retains
-an original and returns a digest/count, not a JPEG or approval. No artist-photo
-provider is installed.
+an original and returns a digest/count, not a JPEG or approval.
+
+The same `ImageService` also supports artist photos through the replaceable
+`ArtistImageProvider` port. Wikimedia Commons is the only installed source.
+`services.artist_images` defaults to `[]`; select `["wikimedia-commons"]` only
+with a configured shared file cache. Save and explicitly reload the backend
+configuration to activate the source.
+
+In System > Media > Music > Providers, enter an exact MusicBrainz artist UUID and
+one Commons `File:` title. **Check photo** retrieves the exact source and preview.
+Review its credit and rights, wait for the preview to load, then confirm and
+save. This operation saves a versioned link in SQLite, not image bytes or
+album-cover approval. Binding commands require configuration-write permission,
+the exact browser Origin and `x-domus-csrf`.
+
+Artist views use same-origin JPEGs with visible credit details. Sizes are 200,
+400 (default) and 800 pixel bounds, without cropping or enlargement. Only JPEG
+and PNG originals within the existing strict limits are accepted. Supported
+licenses are CC0 1.0, CC BY 3.0/4.0 and CC BY-SA 3.0/4.0. Missing or unsupported
+rights fail explicitly. A changed file revision, content or credit invalidates
+the saved confirmation. Commons does not guarantee all applicable rights.
+
+Metadata is fresh for at most 24 hours, missing-file results for one hour and
+originals for seven days. Shorter HTTP policy applies. A cached JPEG never
+replaces a current rights check. Shared-cache failures do not use SQLite as a
+fallback. Commons has its own durable request lane, at least one second between
+starts, and persistent backoff. Unsupported retry delays need the explicit
+**Resume manually paused requests** action. It cannot clear a live request or
+an ordinary timed delay.
 
 Use `service-call` with this request after separate approval of live provider
 access. Replace the release and image IDs with a selected exact release and an

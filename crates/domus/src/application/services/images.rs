@@ -29,6 +29,15 @@ pub trait ImageProcessor: Send + Sync {
         original: Vec<u8>,
         options: ImageOptions,
     ) -> BoxFuture<'_, Result<ProcessedImage>>;
+
+    fn process_scoped(
+        &self,
+        original: Vec<u8>,
+        options: ImageOptions,
+        _provider: String,
+    ) -> BoxFuture<'_, Result<ProcessedImage>> {
+        self.process(original, options)
+    }
 }
 
 /// Original identity and processing choices travel with the JPEG. Persistence
@@ -44,11 +53,92 @@ pub struct RetrievedImage {
 pub struct ImageService {
     artwork: Arc<ArtworkService>,
     processor: Arc<dyn ImageProcessor>,
+    artists: Option<super::artist_images::ArtistImageProviders>,
 }
 
 impl ImageService {
     pub fn new(artwork: Arc<ArtworkService>, processor: Arc<dyn ImageProcessor>) -> Self {
-        Self { artwork, processor }
+        Self {
+            artwork,
+            processor,
+            artists: None,
+        }
+    }
+
+    pub fn with_artists(mut self, artists: super::artist_images::ArtistImageProviders) -> Self {
+        self.artists = Some(artists);
+        self
+    }
+
+    pub async fn retrieve_artist(
+        &self,
+        request: super::artist_images::CheckArtistPhoto,
+        options: ImageOptions,
+    ) -> Result<Option<(super::artist_images::ArtistPhoto, ProcessedImage)>> {
+        use super::artist_images::*;
+        validate_artist(&request.artist)?;
+        super::EntityRef {
+            provider: request.provider.clone(),
+            id: request.file.clone(),
+        }
+        .validate()?;
+        if options.size.is_none() {
+            return Err(Error::InvalidInput(
+                "artist photos require a supported target size".into(),
+            ));
+        }
+        let provider = self
+            .artists
+            .as_ref()
+            .ok_or(Error::Conflict("artist photos are disabled".into()))?
+            .provider(&request.provider)?;
+        let Some(evidence) = provider.inspect(request.file.clone()).await? else {
+            return Ok(None);
+        };
+        evidence.source.validate()?;
+        if !provider.matches_file(&request.file, &evidence.source) {
+            return Err(Error::Remote(
+                "artist image provider returned a different file",
+            ));
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Error::Internal("artist image clock is invalid"))?
+            .as_secs();
+        if evidence.fetched_at > now || evidence.expires_at <= now {
+            return Err(Error::Conflict("artist photo metadata is stale".into()));
+        }
+        let original = provider.original(evidence.source.clone()).await?;
+        if original.len() != evidence.source.bytes as usize {
+            return Err(Error::Remote("artist photo size differs from its source"));
+        }
+        let original_sha256 = format!("{:x}", Sha256::digest(&original));
+        let image = self
+            .processor
+            .process_scoped(original, options, request.provider.clone())
+            .await?;
+        Self::check_image(&image, options)?;
+        if image.width.max(image.height) > evidence.source.width.max(evidence.source.height)
+            || image.width.min(image.height) > evidence.source.width.min(evidence.source.height)
+        {
+            return Err(Error::Remote(
+                "artist photo dimensions differ from its source",
+            ));
+        }
+        let photo = ArtistPhoto {
+            artist: request.artist,
+            provider: request.provider,
+            source_sha256: evidence.source.fingerprint()?,
+            source: evidence.source,
+            original_sha256,
+            jpeg_sha256: format!("{:x}", Sha256::digest(&image.jpeg)),
+            width: image.width,
+            height: image.height,
+            fetched_at: evidence.fetched_at,
+            expires_at: evidence.expires_at,
+        };
+        photo.validate()?;
+        Ok(Some((photo, image)))
     }
 
     /// Local original bytes have no provider provenance or approval authority.
