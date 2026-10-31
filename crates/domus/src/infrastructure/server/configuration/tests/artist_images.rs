@@ -18,8 +18,8 @@ fn artist_images_configuration_defaults_disabled_and_requires_selected_shared_ca
         )?;
         assert!(!fixture.source.validate_sections(command)?.errors.is_empty());
     }
-    let root = fixture.directory.path().join("cache");
-    std::fs::create_dir(&root)?;
+    let cache_directory = crate::infrastructure::permissions::private_test_directory()?;
+    let root = cache_directory.path().to_path_buf();
     let database = fixture.directory.path().join("state.db");
     let mut store = Store::open_current_existing(&database)?;
     drop(crate::infrastructure::cache::FileCache::open(
