@@ -44,6 +44,18 @@ impl crate::application::services::images::ImageProcessor for NativeImageProcess
         '_,
         Result<crate::application::services::images::ProcessedImage>,
     > {
+        self.process_scoped(original, options, "domus-image".into())
+    }
+
+    fn process_scoped(
+        &self,
+        original: Vec<u8>,
+        options: crate::application::services::images::ImageOptions,
+        provider: String,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<crate::application::services::images::ProcessedImage>,
+    > {
         Box::pin(async move {
             let permit = self
                 .slots
@@ -58,12 +70,13 @@ impl crate::application::services::images::ImageProcessor for NativeImageProcess
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_err(|_| Error::Internal("image cache clock is invalid"))?
                         .as_secs();
-                    normalize_cover_cached(
+                    normalize_cover_cached_scoped(
                         cache.as_ref(),
                         &original,
                         options.background,
                         options.size,
                         now,
+                        &provider,
                     )?
                 } else {
                     normalize_cover_for_size(&original, options.background, options.size)?
@@ -156,13 +169,24 @@ pub(crate) fn normalize_cover_cached(
     size: Option<crate::domain::ArtworkSize>,
     now: u64,
 ) -> Result<CoverJpeg> {
+    normalize_cover_cached_scoped(cache, input, background, size, now, "domus-image")
+}
+
+fn normalize_cover_cached_scoped(
+    cache: &dyn crate::application::services::cache::Cache,
+    input: &[u8],
+    background: Option<[u8; 3]>,
+    size: Option<crate::domain::ArtworkSize>,
+    now: u64,
+    provider: &str,
+) -> Result<CoverJpeg> {
     use crate::application::services::cache::{CacheKey, CacheLookup};
     if input.is_empty() || input.len() > MAX_COMPRESSED_BYTES {
         return Err(invalid("cover must be nonempty and no larger than 8 MiB"));
     }
     let target = size.map_or(OUTPUT_SIDE, crate::domain::ArtworkSize::target_side);
     let key = CacheKey::new(
-        "domus-image",
+        provider,
         "jpeg-variants-v1",
         &format!(
             "{:x}:{target}:{COVER_PROFILE}:{}",

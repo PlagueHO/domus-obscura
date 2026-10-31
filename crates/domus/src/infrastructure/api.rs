@@ -29,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 const SESSION_COOKIE: &str = "__Host-domus-session";
+pub mod artist_images;
 mod library;
 mod recovery;
 use library::*;
@@ -440,6 +441,7 @@ impl Api {
             )
             .route("/api/system/settings-policy", get(settings_policy))
             .route("/api/system/configuration", get(backend_configuration))
+            .merge(artist_images::routes())
             .route(
                 "/api/system/configuration/validate",
                 post(validate_backend_configuration).layer(DefaultBodyLimit::max(16384)),

@@ -621,7 +621,27 @@ impl ServiceHost {
         client: MusicBrainzClient,
     ) -> Result<Self> {
         configuration.validate_builtins()?;
+        if !configuration.artist_images.is_empty() && store.cache().is_none() {
+            return Err(Error::InvalidInput(
+                "artist photos require the shared file cache".into(),
+            ));
+        }
         let processor = Arc::new(super::artwork::NativeImageProcessor::new(store.cache()));
+        let mut artist_providers: Vec<
+            Arc<dyn crate::application::services::artist_images::ArtistImageProvider>,
+        > = Vec::new();
+        if !configuration.artist_images.is_empty() {
+            artist_providers.push(Arc::new(super::commons::CommonsClient::new(
+                store.database_path().to_owned(),
+                store
+                    .cache()
+                    .ok_or(Error::Internal("artist photo cache disappeared"))?,
+            )?));
+        }
+        let artists = crate::application::services::artist_images::ArtistImageProviders::new(
+            configuration.clone(),
+            artist_providers,
+        )?;
         let mut artwork =
             CaaArtworkService::new(store.database_path(), super::caa::CaaHttpClient::new()?);
         let slots = Arc::new(Semaphore::new(4));
@@ -639,7 +659,8 @@ impl ServiceHost {
         ));
         let artwork = Arc::new(ArtworkService::new(configuration.clone(), vec![artwork])?);
         let images =
-            crate::application::services::images::ImageService::new(artwork.clone(), processor);
+            crate::application::services::images::ImageService::new(artwork.clone(), processor)
+                .with_artists(artists);
         Ok(Self {
             catalog: CatalogService::new(configuration.clone(), vec![musicbrainz.clone()])?,
             artwork,

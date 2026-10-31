@@ -247,6 +247,25 @@ export function BackendConfigurationForm({
             {label}
           </Check>
         ))}
+        <label>
+          Artist photo source
+          <select
+            value={draft.services.artist_images[0] ?? ""}
+            onChange={(event) =>
+              update("services", {
+                ...draft.services,
+                artist_images: event.target.value ? [event.target.value] : [],
+              })
+            }
+          >
+            <option value="">Disabled</option>
+            <option value="wikimedia-commons">Wikimedia Commons</option>
+          </select>
+          <small>
+            Requires the shared file cache. Save, then reload the API to activate. Artist photos do
+            not approve album covers.
+          </small>
+        </label>
       </fieldset>
       <fieldset disabled={disabled || !visible("storage")} hidden={!visible("storage")}>
         <legend>Storage/cache</legend>

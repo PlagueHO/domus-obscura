@@ -6,6 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub(crate) mod artist_images;
 mod artwork;
 mod artwork_questions;
 mod caa;
@@ -91,6 +92,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/027_album_replacement.sql"),
     include_str!("../../migrations/028_album_restore.sql"),
     include_str!("../../migrations/029_recovery_cleanup.sql"),
+    include_str!("../../migrations/030_artist_images.sql"),
 ];
 
 pub struct Store {

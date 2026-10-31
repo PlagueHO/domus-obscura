@@ -110,6 +110,16 @@ fn run(args: &[String]) -> Result<()> {
             let config = ts_rs::Config::default().with_large_int("number");
             let contracts = [
                 ("AudioProfile.ts", domus::domain::AudioProfile::export_to_string(&config)),
+                ("EntityRef.ts", domus::application::services::EntityRef::export_to_string(&config)),
+                ("ImageRights.ts", domus::application::services::artist_images::ImageRights::export_to_string(&config)),
+                ("ArtistImageSource.ts", domus::application::services::artist_images::ArtistImageSource::export_to_string(&config)),
+                ("ArtistPhoto.ts", domus::application::services::artist_images::ArtistPhoto::export_to_string(&config)),
+                ("ArtistPhotoBinding.ts", domus::application::services::artist_images::ArtistPhotoBinding::export_to_string(&config)),
+                ("CheckArtistPhoto.ts", domus::application::services::artist_images::CheckArtistPhoto::export_to_string(&config)),
+                ("SaveArtistPhoto.ts", domus::application::services::artist_images::SaveArtistPhoto::export_to_string(&config)),
+                ("RemoveArtistPhoto.ts", domus::infrastructure::api::artist_images::RemoveArtistPhoto::export_to_string(&config)),
+                ("ArtistPhotoCheck.ts", domus::infrastructure::api::artist_images::ArtistPhotoCheck::export_to_string(&config)),
+                ("ArtistPhotoState.ts", domus::infrastructure::api::artist_images::ArtistPhotoState::export_to_string(&config)),
                 ("AudioPolicy.ts", domus::domain::AudioPolicy::export_to_string(&config)),
                 ("AudioSelection.ts", domus::domain::AudioSelection::export_to_string(&config)),
                 ("AudioProfileDescriptor.ts", domus::domain::AudioProfileDescriptor::export_to_string(&config)),

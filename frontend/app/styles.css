@@ -58,6 +58,70 @@
   border-radius: 8px;
 }
 
+.artist-photo {
+  margin: 0;
+  min-width: 0;
+}
+.artist-photo-media {
+  display: grid;
+  place-items: center;
+  background: var(--surface);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.artist-photo-media img,
+.artist-photo-preview {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  margin-inline: auto;
+}
+.artist-photo-credit {
+  margin-top: 10px;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+.artist-photo-credit p {
+  margin: 6px 0;
+}
+.artist-photo-credit summary {
+  cursor: pointer;
+  min-height: 44px;
+  align-content: center;
+}
+.artist-photo-bindings {
+  margin-top: 28px;
+}
+.artist-photo-bindings fieldset {
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 18px;
+}
+.artist-photo-bindings label {
+  display: grid;
+  gap: 6px;
+}
+.artist-photo-binding {
+  border-bottom: 1px solid var(--line);
+  padding-block: 16px;
+  overflow-wrap: anywhere;
+}
+.artist-photo-check {
+  max-width: 65ch;
+}
+
+.artist-hero > div:first-child {
+  width: min(100%, 260px);
+  flex-shrink: 0;
+}
+.artist-card > div:first-child {
+  flex: 0 0 100px;
+  min-width: 0;
+}
+
 * {
   box-sizing: border-box;
 }

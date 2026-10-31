@@ -4,6 +4,35 @@ This guide preserves the detailed operational rules from the original root
 AGENTS.md. Read the relevant command and service boundaries before changing them.
 The root AGENTS.md provides the short command and repository guide.
 
+## Artist photos
+
+Commons is the only installed artist-photo source. Keep its selection separate
+from CAA release artwork. An old configuration defaults to disabled.
+Require the selected shared file cache before source activation. Passive
+configuration reads and validation must not contact a provider or bind a root.
+
+Keep exact MusicBrainz artist UUIDs separate from Commons File titles and native
+paths. Never search by name or infer matching identities. Binding commands are
+configuration-write operations with browser Origin/CSRF guards. Recheck exact
+source, JPEG confirmation and expected binding version after slow work.
+Keep removal tombstones so stale saves cannot recreate a removed link.
+
+Require current supported rights before serving even a cached JPEG. Retain
+creator, credit, canonical license/source links and supplied notices as plain
+text. Keep CC BY-SA outputs under the source license. Do not treat Commons
+metadata as a complete personality/privacy/trademark permission grant.
+Do not connect artist links to album-cover approval or media mutations.
+
+Commons owns a separate cross-process request lane and durable delay.
+Do not shorten timed backoff or clear an unsupported delay automatically.
+`POST /api/system/artist-photos/resume` is the explicit guarded recovery command
+for an unsupported delay only. It takes the native lock and rejects live work.
+Never replace its lock file. Cancellation stops pending submissions, not
+completion records for an already submitted request.
+
+Use generated fixtures and local TLS servers for regression coverage.
+Live provider downloads and external configuration still need separate approval.
+
 ## Backend configuration writers
 
 `ConfigurationService` is the sole access boundary for HTTPS backend JSON.

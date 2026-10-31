@@ -40,6 +40,8 @@ mod private;
 mod caa_tests;
 #[path = "https/catalog.rs"]
 mod catalog_tests;
+#[path = "https/commons.rs"]
+mod commons_tests;
 #[path = "https/controls.rs"]
 mod control_tests;
 #[path = "https/development.rs"]
