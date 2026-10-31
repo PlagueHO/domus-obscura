@@ -9,6 +9,15 @@ pub(crate) struct ProcessLock {
     _file: std::fs::File,
 }
 
+impl Drop for ProcessLock {
+    fn drop(&mut self) {
+        // A concurrent fork can retain the open file description after close.
+        if let Err(error) = self._file.unlock() {
+            eprintln!("failed to release process lock: {error}");
+        }
+    }
+}
+
 impl ProcessLock {
     pub(crate) fn acquire(database: &Path, purpose: &str) -> Result<Self> {
         Self::acquire_mode(database, purpose, false)
@@ -156,4 +165,58 @@ pub(crate) fn protect_files(store: &super::store::Store, files: &[&Path]) -> Res
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::permissions::private_test_directory;
+
+    #[test]
+    fn process_lock_releases_exclusive_ownership_with_a_retained_duplicate()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = private_test_directory()?;
+        let database = directory.path().join("state.db");
+        let owner = ProcessLock::acquire(&database, "test")?;
+        let inherited = owner._file.try_clone()?;
+        assert!(matches!(
+            ProcessLock::acquire(&database, "test"),
+            Err(Error::Busy(_))
+        ));
+        assert!(matches!(
+            ProcessLock::acquire_shared(&database, "test"),
+            Err(Error::Busy(_))
+        ));
+        drop(owner);
+        let next = ProcessLock::acquire(&database, "test")?;
+        drop(next);
+        let reader = ProcessLock::acquire_shared(&database, "test")?;
+        drop(reader);
+        drop(inherited);
+        Ok(())
+    }
+
+    #[test]
+    fn process_lock_releases_only_the_dropped_reader_with_a_retained_duplicate()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = private_test_directory()?;
+        let database = directory.path().join("state.db");
+        let first = ProcessLock::acquire_shared(&database, "test")?;
+        let inherited = first._file.try_clone()?;
+        let second = ProcessLock::acquire_shared(&database, "test")?;
+        drop(first);
+        assert!(matches!(
+            ProcessLock::acquire(&database, "test"),
+            Err(Error::Busy(_))
+        ));
+        drop(second);
+        let writer = ProcessLock::acquire(&database, "test")?;
+        assert!(matches!(
+            ProcessLock::acquire_shared(&database, "test"),
+            Err(Error::Busy(_))
+        ));
+        drop(writer);
+        drop(inherited);
+        Ok(())
+    }
 }

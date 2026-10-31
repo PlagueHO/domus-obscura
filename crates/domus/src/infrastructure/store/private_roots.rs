@@ -27,6 +27,19 @@ impl Store {
         self.reserve_private_root(root, native, "cache")
     }
 
+    pub(crate) fn check_private_root_location(
+        &self,
+        root: &Path,
+        native: &NativeRoot,
+    ) -> Result<()> {
+        if self.path.starts_with(root) {
+            return Err(Error::InvalidInput(
+                "private roots must not contain the application database".into(),
+            ));
+        }
+        self.check_state_overlap(native)
+    }
+
     fn reserve_private_root(
         &mut self,
         root: &Path,
@@ -36,12 +49,7 @@ impl Store {
         let root_text = root
             .to_str()
             .ok_or_else(|| Error::InvalidInput("private root must be valid Unicode".into()))?;
-        if self.path.starts_with(root) {
-            return Err(Error::InvalidInput(
-                "private roots must not contain the application database".into(),
-            ));
-        }
-        self.check_state_overlap(native)?;
+        self.check_private_root_location(root, native)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

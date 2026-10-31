@@ -971,9 +971,40 @@ cache. Legacy SQLite cache rows are neither read as fallback nor copied or
 deleted. Frozen artwork evidence and approved JPEG bytes stay in SQLite and
 survive complete cache eviction. Exact-release plan preparation and configured
 local source reads use this same port. Use the same
-cache setting in each host that must share these responses. Database-only CLI
-catalog/artwork/source commands still use legacy storage; use the configured
-HTTPS host for workflows that use file-cached evidence.
+cache setting in each host that must share these responses. Existing database-only
+CLI catalog/artwork commands and source configuration files still use legacy
+storage. The retained commands also support explicit host selection:
+
+```text
+domus catalog-release --host <absolute-host-file> <release-id>
+domus catalog-plan-prepare --host <absolute-host-file> <release-id> <absolute-request-json>
+domus artwork-caa-prepare --host <absolute-host-file> <job-id> <plan-version> <image-id> <background-json> --permitted-caa-cover
+domus source-search --host <absolute-host-file> <absolute-source-configuration-file>
+domus source-folder --host <absolute-host-file> <absolute-source-configuration-file>
+```
+
+Use the read-service host format with `database`, `services` and optional `cache`
+fields, not the complete HTTPS configuration. The cache root must already be
+bound by explicit host startup. These CLI forms never create a database, upgrade
+its schema, create a cache root, bind a root or repair an owner marker. An omitted
+host `cache` setting selects SQLite. An explicit file-cache setting never copies
+or falls back to SQLite entries, even if those entries are valid.
+
+The host selects catalog and artwork providers. Source operations retain their
+existing configuration file, credentials, server and acknowledgement. Both
+files must identify the same native database, and both service selections must
+permit Soulseek. A mismatch fails before credentials or network access.
+Keep both configurations, requests and credentials outside media and cache roots.
+
+`catalog-release` can fetch a missing or expired entry through the existing
+provider budget. Catalog plan preparation, CAA preparation and source metadata
+loading require fresh cached evidence and never fetch it. Corruption and storage
+failures remain errors; they do not trigger a provider request or clear cooldown.
+Source search and folder commands contact Soulseek only after local preparation,
+and still require separate live-account approval.
+Retained plan/source approvals, JPEG previews, artwork evidence and receipts
+remain independent of cache eviction. Host selection does not approve or change
+an existing plan or start acquisition.
 
 File-cache storage cannot commit atomically with SQLite. MusicBrainz and CAA provider-budget
 completion commits first, then the validated response is stored outside the

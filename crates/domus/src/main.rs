@@ -18,6 +18,8 @@ const USAGE: &str = "Usage:
   domus publication-status <local-database> <job-id> <plan-version>
   domus source-search <absolute-configuration-file>
   domus source-folder <absolute-configuration-file>
+  domus source-search --host <absolute-host-configuration-file> <absolute-configuration-file>
+  domus source-folder --host <absolute-host-configuration-file> <absolute-configuration-file>
   domus source-candidate-prepare <local-database> <job-id> <plan-version> <absolute-listing-json>
   domus source-candidate <local-database> <candidate-id>
   domus source-candidate-approve <local-database> <candidate-id> <plan-version> <review-sha256> --reviewed-exact-edition-and-permitted-download
@@ -25,6 +27,8 @@ const USAGE: &str = "Usage:
   domus mcp-stdio <absolute-host-configuration-file>
   domus catalog-release <local-database> <release-id>
   domus catalog-plan-prepare <local-database> <release-id> <request-json>
+  domus catalog-release --host <absolute-host-configuration-file> <release-id>
+  domus catalog-plan-prepare --host <absolute-host-configuration-file> <release-id> <absolute-request-json>
   domus settings <local-database>
   domus settings-default
   domus staging-init <local-database> <absolute-root>
@@ -40,6 +44,7 @@ const USAGE: &str = "Usage:
   domus artwork-local-prepare <local-database> <job-id> <plan-version> <absolute-image-file> <background-json> --permitted-local-cover
   domus artwork-preview <local-database> <job-id> <plan-version> <candidate-id>
   domus artwork-caa-prepare <local-database> <job-id> <plan-version> <image-id> <background-json> --permitted-caa-cover
+  domus artwork-caa-prepare --host <absolute-host-configuration-file> <job-id> <plan-version> <image-id> <background-json> --permitted-caa-cover
   domus artwork-evidence <local-database> <job-id> <plan-version> <candidate-id>
   domus artwork-check <local-database> <job-id> <plan-version>
   domus artwork-question <local-database> <question-id>
@@ -61,6 +66,7 @@ It requires separate Soulseek credentials and explicit plaintext-login acknowled
 source-search uses the same login acknowledgement for metadata-only outgoing peer search.
 source-folder reads one selected peer folder and assesses names; it never approves or downloads.
 catalog-release loads the exact MusicBrainz release through the durable provider budget.
+--host selects existing configured state and an already-bound cache without migration or fallback.
 service-call runs catalog discovery, metadata, artwork listing or image caching through configured services.
 It cannot approve plans, download audio or publish media.
 publish-new-once explicitly copies verified staging into new primary/backup album folders.
@@ -587,6 +593,20 @@ fn run(args: &[String]) -> Result<()> {
                 )?
             );
         }
+        [command, flag, host, configuration] if command == "source-search" && flag == "--host" => {
+            let search = domus::infrastructure::worker::PreparedSearch::load_with_host(
+                Path::new(configuration),
+                Path::new(host),
+            )?;
+            println!("{}", serde_json::to_string(&search.run()?)?);
+        }
+        [command, flag, host, configuration] if command == "source-folder" && flag == "--host" => {
+            let folder = domus::infrastructure::worker::PreparedFolder::load_with_host(
+                Path::new(configuration),
+                Path::new(host),
+            )?;
+            println!("{}", serde_json::to_string(&folder.run()?)?);
+        }
         [command, configuration] if command == "source-search" => {
             let search =
                 domus::infrastructure::worker::PreparedSearch::load(Path::new(configuration))?;
@@ -596,6 +616,20 @@ fn run(args: &[String]) -> Result<()> {
             let folder =
                 domus::infrastructure::worker::PreparedFolder::load(Path::new(configuration))?;
             println!("{}", serde_json::to_string(&folder.run()?)?);
+        }
+        [command, flag, configuration, release]
+            if command == "catalog-release" && flag == "--host" =>
+        {
+            use domus::infrastructure::catalog::CatalogQuery;
+            use domus::infrastructure::services::{ServiceHost, load_cli_store};
+            let query = CatalogQuery::release(release)?;
+            let (store, services) = load_cli_store(Path::new(configuration), &[])?;
+            let host = ServiceHost::new(store, services)?;
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(host.musicbrainz.query(query, CatalogQuery::parse_release))?;
+            println!("{}", serde_json::to_string(&result)?);
         }
         [command, database, release] if command == "catalog-release" => {
             use domus::infrastructure::catalog::CatalogQuery;
@@ -657,6 +691,34 @@ fn run(args: &[String]) -> Result<()> {
                     true
                 )?)?
             );
+        }
+        [
+            command,
+            flag,
+            configuration,
+            job,
+            version,
+            image,
+            background,
+            acknowledgement,
+        ] if command == "artwork-caa-prepare"
+            && flag == "--host"
+            && acknowledgement == "--permitted-caa-cover" =>
+        {
+            let background: Option<[u8; 3]> = serde_json::from_str(background).map_err(|_| {
+                Error::InvalidInput("background must be null or an RGB byte array".into())
+            })?;
+            let job = number(job)?;
+            let version = number(version)?;
+            let (mut store, services) =
+                domus::infrastructure::services::load_cli_store(Path::new(configuration), &[])?;
+            services.require(
+                domus::application::services::Capability::Artwork,
+                "cover-art-archive",
+            )?;
+            let candidate =
+                store.prepare_cached_caa_artwork_or_ask(job, version, image, background, true)?;
+            println!("{}", serde_json::to_string(&candidate)?);
         }
         [
             command,
@@ -822,6 +884,16 @@ fn run(args: &[String]) -> Result<()> {
             let request: PlanRequest = json_file(file, 2 * 1024 * 1024)?;
             let mut store = Store::open_existing(Path::new(database))?;
             println!("{}", serde_json::to_string(&store.prepare_plan(request)?)?);
+        }
+        [command, flag, configuration, release, file]
+            if command == "catalog-plan-prepare" && flag == "--host" =>
+        {
+            let plan = domus::infrastructure::services::prepare_cli_catalog_plan(
+                Path::new(configuration),
+                release,
+                Path::new(file),
+            )?;
+            println!("{}", serde_json::to_string(&plan)?);
         }
         [command, database, release, file] if command == "catalog-plan-prepare" => {
             use domus::application::catalog::{CatalogPlanRequest, prepare_cached_catalog_plan};

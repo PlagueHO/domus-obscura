@@ -21,6 +21,38 @@ struct BudgetClock {
     entries: HashMap<PathBuf, Entry>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_NOW: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Thread-local test time leaves parallel tests and production clocks unchanged.
+#[cfg(test)]
+pub(super) struct TestClock {
+    previous: Option<Instant>,
+    start: Instant,
+}
+
+#[cfg(test)]
+impl TestClock {
+    pub(super) fn new() -> Self {
+        let start = Instant::now();
+        let previous = TEST_NOW.with(|now| now.replace(Some(start)));
+        Self { previous, start }
+    }
+
+    pub(super) fn advance_to(&self, elapsed: Duration) {
+        TEST_NOW.with(|now| now.set(Some(self.start + elapsed)));
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestClock {
+    fn drop(&mut self) {
+        TEST_NOW.with(|now| now.set(self.previous));
+    }
+}
+
 impl BudgetClock {
     fn remaining(&mut self, path: &Path, epoch: Epoch, now: Instant) -> Result<u32> {
         if epoch.delay == 0 {
@@ -70,13 +102,53 @@ pub(super) fn remaining(path: &Path, generation: i64, pending: bool, delay: u32)
                 pending,
                 delay,
             },
-            Instant::now(),
+            {
+                #[cfg(test)]
+                {
+                    TEST_NOW.with(|now| now.get()).unwrap_or_else(Instant::now)
+                }
+                #[cfg(not(test))]
+                {
+                    Instant::now()
+                }
+            },
         )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_test_clock_restores_time_after_unwind_and_isolates_threads() {
+        assert_eq!(TEST_NOW.with(|now| now.get()), None);
+        {
+            let clock = TestClock::new();
+            clock.advance_to(Duration::from_secs(2));
+            let frozen = TEST_NOW.with(|now| now.get());
+            let thread = std::thread::spawn(|| {
+                assert_eq!(TEST_NOW.with(|now| now.get()), None);
+                let clock = TestClock::new();
+                clock.advance_to(Duration::from_secs(120));
+                assert_eq!(
+                    TEST_NOW.with(|now| now.get()),
+                    Some(clock.start + Duration::from_secs(120))
+                );
+            });
+            if let Err(panic) = thread.join() {
+                std::panic::resume_unwind(panic);
+            }
+            assert_eq!(TEST_NOW.with(|now| now.get()), frozen);
+            let unwind = std::panic::catch_unwind(|| {
+                let nested = TestClock::new();
+                nested.advance_to(Duration::from_secs(10));
+                panic!("exercise test clock restoration");
+            });
+            assert!(unwind.is_err());
+            assert_eq!(TEST_NOW.with(|now| now.get()), frozen);
+        }
+        assert_eq!(TEST_NOW.with(|now| now.get()), None);
+    }
 
     #[test]
     fn catalog_clock_restarts_conservatively_rounds_up_and_separates_epochs() -> Result<()> {

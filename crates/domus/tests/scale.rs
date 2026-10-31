@@ -1,5 +1,5 @@
 use domus::domain::{LibraryPath, Page};
-use domus::infrastructure::store::{Observation, Store};
+use domus::infrastructure::store::Store;
 use tempfile::tempdir;
 
 /// Generated recovery history evidence, not physical file or memory acceptance.
@@ -405,29 +405,34 @@ fn million_events_filter_by_plan_before_pagination() -> Result<(), Box<dyn std::
 fn million_records_remain_paginated() -> Result<(), Box<dyn std::error::Error>> {
     let data = tempdir()?;
     let media = tempdir()?;
-    let mut store = Store::open(&data.path().join("scale.db"))?;
+    let database = data.path().join("scale.db");
+    let mut store = Store::open(&database)?;
     let root = std::fs::canonicalize(media.path())?;
     let location = store.add_location(root.to_str().ok_or("non-Unicode root")?, "main")?;
     let claim = store.begin_scan(location)?;
     let root = LibraryPath::parse("")?;
-    for start in (0..1_000_000).step_by(128) {
-        let paths = (start..(start + 128).min(1_000_000))
-            .map(|index| LibraryPath::parse(&format!("track-{index:07}.mp3")))
-            .collect::<domus::Result<Vec<_>>>()?;
-        let batch = paths
-            .iter()
-            .map(|path| Observation {
-                path,
-                kind: "file",
-                size: Some(1024),
-                modified_at: Some(1),
-            })
-            .collect::<Vec<_>>();
-        store.record_batch(&claim, &batch)?;
-    }
-
     store.complete_directory(&claim, &root)?;
     assert!(store.finish_scan(&claim)?);
+    // Generated query evidence needs no live scan lease during fixture loading.
+    let mut raw = rusqlite::Connection::open(&database)?;
+    let transaction = raw.transaction()?;
+    assert_eq!(
+        transaction.execute(
+            "WITH RECURSIVE n(v) AS (SELECT 0 UNION ALL SELECT v+1 FROM n WHERE v<999999)
+             INSERT INTO entries(location_id,relative_path,parent_path,kind,size,modified_at,scan_id)
+             SELECT ?1,printf('track-%07d.mp3',v),'','file',1024,1,?2 FROM n",
+            rusqlite::params![location, claim.id],
+        )?,
+        1_000_000
+    );
+    assert_eq!(
+        transaction.execute(
+            "UPDATE scans SET observed_count=1000000 WHERE id=?1 AND status='complete'",
+            [claim.id],
+        )?,
+        1
+    );
+    transaction.commit()?;
     let mut cursor = 0;
     let mut count = 0;
     loop {

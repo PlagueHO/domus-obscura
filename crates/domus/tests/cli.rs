@@ -3,6 +3,8 @@ use std::process::Command;
 mod private;
 use private::tempdir;
 
+#[path = "cli/cache.rs"]
+mod cache_tests;
 #[path = "cli/sources.rs"]
 mod source_tests;
 mod support;
