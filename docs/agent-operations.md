@@ -428,6 +428,32 @@ the normal provider-backed plan from the fresh cache without network access.
 Its bounded request has the same fields as CatalogPlanRequest. It cannot
 override provider track text, approve the result or start acquisition.
 
+The retained catalog and CAA preparation commands also accept
+`--host <absolute-host-configuration-file>` in place of `<local-database>`.
+`source-search` and `source-folder` accept the same option before their existing
+source configuration path. Use the read-service host format (`database`,
+`services`, optional `cache`), not HTTPS startup configuration.
+
+Configured CLI access requires a current-schema database and, when selected,
+an already-bound shared cache. It never initializes a root, changes a binding,
+repairs an owner marker or removes pending cache files during loading. Keep
+explicit host startup separate. Do not use an initializing cache open for reads.
+Protect all host, request, source and credential files from media/cache overlap.
+
+Both source configuration files must identify the same native database and
+permit Soulseek. Reject disagreement before credentials or network access.
+Keep source metadata loading read-only. File-cache reads must use a connection
+without a long-lived SQL snapshot; no file-cache I/O belongs in a SQL transaction.
+
+Omitting host `cache` selects legacy SQLite storage. Selecting a file cache never
+copies, migrates or falls back to SQLite entries. Only `catalog-release` can fetch
+on a cache miss, through `ServiceHost` and the existing provider budget.
+Plan preparation, CAA preparation and source metadata loading remain cache-only.
+Treat corrupt entries and storage failures as explicit errors, not misses.
+Preserve cooldown and unsupported retry pauses. Existing command forms retain
+their behavior. Host selection cannot change approved jobs or replace immutable
+plan, JPEG, source-review or receipt evidence.
+
 `domus source-search <absolute-configuration-file>` performs one bounded
 metadata-only Soulseek search for a fresh cached exact release. Require separate
 live-account approval and plaintext-login acknowledgement. It opens outgoing

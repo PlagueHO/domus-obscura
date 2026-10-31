@@ -115,6 +115,27 @@ impl CacheConfiguration {
         )?;
         Ok(Arc::new(FileCache::open(store, &self.root, self.limits)?))
     }
+
+    pub(crate) fn open_bound(
+        &self,
+        store: &mut Store,
+        protected: &[&Path],
+    ) -> Result<Arc<dyn Cache>> {
+        self.inspect(
+            store,
+            &protected
+                .iter()
+                .map(|path| path.to_path_buf())
+                .collect::<Vec<_>>(),
+            false,
+        )?;
+        Ok(Arc::new(FileCache::open_mode(
+            store,
+            &self.root,
+            self.limits,
+            true,
+        )?))
+    }
 }
 
 impl CacheLimits {
@@ -271,6 +292,15 @@ impl FileCache {
     /// Existing roots must match both the native database binding and owner marker.
     /// No marker, copied marker or directory contents can replace a lost binding.
     pub fn open(store: &mut Store, root: &Path, limits: CacheLimits) -> Result<Self> {
+        Self::open_mode(store, root, limits, false)
+    }
+
+    fn open_mode(
+        store: &mut Store,
+        root: &Path,
+        limits: CacheLimits,
+        bound_only: bool,
+    ) -> Result<Self> {
         let limits = limits.validate()?;
         require_local_disk(root)?;
         let (root, opened) = LibraryDirectory::canonical(root)?;
@@ -279,17 +309,24 @@ impl FileCache {
         let directory = opened.into_directory();
         let permissions = FilePermissions::current()?;
         permissions.check(&directory.try_clone()?.into_std_file(), true)?;
+        if bound_only {
+            store.check_private_root_location(&root, &native)?;
+        }
         let marker_exists = match directory.symlink_metadata("owner.lock") {
             Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(error.into()),
         };
-        if !marker_exists && directory.entries()?.next().transpose()?.is_some() {
+        if !bound_only && !marker_exists && directory.entries()?.next().transpose()?.is_some() {
             return Err(Error::Conflict(
                 "an unowned cache root must be empty".into(),
             ));
         }
-        let fresh = store.reserve_cache_root(&root, &native)?;
+        let fresh = if bound_only {
+            false
+        } else {
+            store.reserve_cache_root(&root, &native)?
+        };
         store.check_native_root(
             root.to_str()
                 .ok_or_else(|| Error::InvalidInput("cache root must be Unicode".into()))?,
@@ -336,7 +373,9 @@ impl FileCache {
             limits,
             _marker: owner,
         };
-        inner.remove_pending()?;
+        if !bound_only {
+            inner.remove_pending()?;
+        }
         inner._marker.unlock()?;
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),

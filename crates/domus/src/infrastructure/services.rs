@@ -712,6 +712,79 @@ pub fn load_host(configuration: &std::path::Path) -> Result<ServiceHost> {
     open_host(read_host(configuration)?, &[configuration])
 }
 
+/// Open selected CLI state without migration or cache-root initialization.
+/// Extra request files receive the same media/cache overlap checks as the host.
+pub fn load_cli_store(
+    configuration: &std::path::Path,
+    protected: &[&std::path::Path],
+) -> Result<(Store, ServiceConfiguration)> {
+    open_cli_store(read_host(configuration)?, configuration, protected, false)
+}
+
+/// Prepare a version-bound plan from the selected cache, without provider I/O.
+pub fn prepare_cli_catalog_plan(
+    configuration: &std::path::Path,
+    release: &str,
+    request_file: &std::path::Path,
+) -> Result<super::store::StoredPlan> {
+    let request =
+        serde_json::from_slice(&super::local_file::read_local(request_file, 16384, false)?)
+            .map_err(|_| Error::InvalidInput("invalid catalog plan request".into()))?;
+    let (mut store, services) = load_cli_store(configuration, &[request_file])?;
+    services.require(Capability::Metadata, "musicbrainz")?;
+    crate::application::catalog::prepare_cached_catalog_plan(&mut store, release, request)
+}
+
+pub(crate) fn load_cli_source_store(
+    configuration: &std::path::Path,
+    database: &std::path::Path,
+    protected: &[&std::path::Path],
+) -> Result<Store> {
+    let host = read_host(configuration)?;
+    host.services.require(Capability::Acquisition, "soulseek")?;
+    let identity = |path: &std::path::Path| -> Result<String> {
+        let parent = super::filesystem::LibraryDirectory::open(
+            path.parent()
+                .ok_or_else(|| Error::InvalidInput("database parent is missing".into()))?,
+        )?;
+        let file = parent.open_file(
+            path.file_name()
+                .ok_or_else(|| Error::InvalidInput("database name is missing".into()))?,
+        )?;
+        super::filesystem::native_file_identity(&file)
+    };
+    if !database.is_absolute() || identity(database)? != identity(&host.database)? {
+        return Err(Error::Conflict(
+            "source and host configurations must identify the same database".into(),
+        ));
+    }
+    Ok(open_cli_store(host, configuration, protected, true)?.0)
+}
+
+fn open_cli_store(
+    host: HostConfiguration,
+    configuration: &std::path::Path,
+    protected: &[&std::path::Path],
+    read_only: bool,
+) -> Result<(Store, ServiceConfiguration)> {
+    let mut files = vec![configuration];
+    files.extend_from_slice(protected);
+    let mut store = Store::open_read_current(&host.database)?;
+    super::local_file::protect_files(&store, &files)?;
+    let cache = host
+        .cache
+        .map(|cache| cache.open_bound(&mut store, &files))
+        .transpose()?;
+    if !read_only {
+        drop(store);
+        store = Store::open_current_existing(&host.database)?;
+    }
+    if let Some(cache) = cache {
+        store = store.with_cache(cache);
+    }
+    Ok((store, host.services))
+}
+
 pub fn load_call(
     configuration: &std::path::Path,
     request_file: &std::path::Path,

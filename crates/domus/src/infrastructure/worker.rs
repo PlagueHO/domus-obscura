@@ -326,9 +326,34 @@ impl SearchConfiguration {
         path: &Path,
         folder_query: bool,
     ) -> Result<(Self, crate::domain::CatalogRelease, Credentials)> {
-        let config: Self = serde_json::from_slice(&read_local(path, 16384, false)?)
+        Self::read_selected(path, folder_query, None)
+    }
+
+    fn read_selected(
+        path: &Path,
+        folder_query: bool,
+        host: Option<&Path>,
+    ) -> Result<(Self, crate::domain::CatalogRelease, Credentials)> {
+        let mut config: Self = serde_json::from_slice(&read_local(path, 16384, false)?)
             .map_err(|_| Error::InvalidInput("invalid source-read configuration".into()))?;
-        Self::validate(config, &[path], folder_query, None)
+        config.services.validate_builtins()?;
+        config
+            .services
+            .require(Capability::Acquisition, "soulseek")?;
+        let selected = host
+            .map(|host| {
+                super::services::load_cli_source_store(
+                    host,
+                    &config.database,
+                    &[path, &config.credentials_file],
+                )
+            })
+            .transpose()?;
+        let cache = selected.as_ref().and_then(Store::cache);
+        if let Some(store) = &selected {
+            config.database = store.database_path().to_owned();
+        }
+        Self::validate(config, &[path], folder_query, cache)
     }
 
     fn validate(
@@ -531,6 +556,21 @@ pub struct SourceFolderReport {
 impl PreparedFolder {
     pub fn load(path: &Path) -> Result<Self> {
         let (config, release, credentials) = SearchConfiguration::read(path, true)?;
+        Self::prepare(config, release, credentials)
+    }
+
+    /// Select only an already-bound host cache; loading never contacts a peer.
+    pub fn load_with_host(path: &Path, host: &Path) -> Result<Self> {
+        let (config, release, credentials) =
+            SearchConfiguration::read_selected(path, true, Some(host))?;
+        Self::prepare(config, release, credentials)
+    }
+
+    fn prepare(
+        config: SearchConfiguration,
+        release: crate::domain::CatalogRelease,
+        credentials: Credentials,
+    ) -> Result<Self> {
         let account = account_lock(&config.database, &credentials)?;
         let edition = release.selection(None)?;
         let selection = config.folder.ok_or_else(|| {
@@ -581,6 +621,21 @@ pub struct PreparedSearch {
 impl PreparedSearch {
     pub fn load(path: &Path) -> Result<Self> {
         let (config, release, credentials) = SearchConfiguration::read(path, false)?;
+        Self::prepare(config, release, credentials)
+    }
+
+    /// Select only an already-bound host cache; loading never contacts a peer.
+    pub fn load_with_host(path: &Path, host: &Path) -> Result<Self> {
+        let (config, release, credentials) =
+            SearchConfiguration::read_selected(path, false, Some(host))?;
+        Self::prepare(config, release, credentials)
+    }
+
+    fn prepare(
+        config: SearchConfiguration,
+        release: crate::domain::CatalogRelease,
+        credentials: Credentials,
+    ) -> Result<Self> {
         let account = account_lock(&config.database, &credentials)?;
         let query = format!("{} {}", release.summary.artist, release.summary.title);
         if query.len() > 256 || query.chars().any(char::is_control) {
