@@ -35,7 +35,7 @@ Live provider downloads and external configuration still need separate approval.
 
 ## Backend configuration writers
 
-`ConfigurationService` is the sole access boundary for HTTPS backend JSON.
+`ConfigurationService` is the sole access boundary for backend JSON.
 Keep startup, inspection, validation, and save callers on its typed operations.
 Never add direct file reads, parsing, secret merging, or writes in API handlers.
 Keep runtime activation separate. Do not use `PreparedServer::load` to validate a
@@ -134,6 +134,43 @@ Do not extract embedded covers or infer artwork approval from a preview.
 
 ## Commands
 
+`domus serve` without a configuration argument initializes only private local
+application state and starts explicit `single_user` anonymous HTTP on loopback.
+It serves the real packaged browser, not the separate sample harness. Azure,
+DNS, TLS and Entra are optional. Default provider services are disabled.
+Keep Host, Origin, CSRF, peer and connection limits active without HSTS or OAuth
+cookies. An explicit configuration argument never falls back after failure.
+Existing secure configurations retain their mode and validation requirements.
+
+`certificate-status` is a passive local command. It never starts a listener,
+creates state or contacts ACME or Azure DNS. The authenticated
+`GET /api/system/certificates/status` route also stays passive. Its redacted
+result is bound to the exact active configuration revision and confirmed live
+generation. Reject a journal/live mismatch instead of reporting an unconfirmed
+activation. Report runtime recovery even when a failed journal save could not
+record it or renewal could not restart after a rejected reload.
+Anonymous and manual modes do not read inactive managed references.
+
+`certificate-bootstrap` is explicit issuance or continuation under the native
+certificate lifecycle lock. Stop the API first. Save private account keys,
+DNS intents and exact CSRs before effects. Reconcile uncertain submissions;
+never create replacement work automatically. A timed Azure token failure is
+before DNS submission; a lost PUT response is not a timed retry permission.
+Clear an intent only with explicit adapter evidence that no DNS mutation
+occurred. A transport failure cannot supply that evidence.
+Keep selected ARI times and refresh hints durable. Wait with a monotonic clock.
+An unchanged advice window must not randomize the selection again. Update
+journal scheduling, not immutable generation files.
+Keep native ownership through completion persistence and drain.
+
+Use `certificate-recover` only after inspection. Keep exact private evidence
+before state changes. A lost account response permits existing-only lookup.
+A lost order URL requires independently verified order evidence. A matching
+TXT value alone never grants cleanup ownership. Credential rotation must not
+redirect pending cleanup to another tenant, identity or DNS resource.
+Do not delete incomplete pending files, immutable generations or lock files.
+See the [certificate operator guide](../README.md#optional-azure-dns-certificates).
+
 `domus worker <absolute-configuration-file>` is the separate foreground production
 worker. Its explicit `production_worker` section is distinct from development-only
 `local_acquisition`; never relax production Entra or loopback API guards to start
@@ -178,6 +215,9 @@ the long-lived scheduler and its bounded operation lanes use dedicated threads.
 Use the pinned tools from rust-toolchain.toml, .node-version, and package.json.
 
 On Windows, use the launcher. It finds a complete installed MSVC environment. It accepts the installed stable Rust alias only when its exact version matches the pin.
+
+The launcher runs frontend scripts directly in `frontend`. This avoids workspace
+task-state paths that exceed Windows path limits in long worktree paths.
 
 ```powershell
 .\dev.ps1 bootstrap

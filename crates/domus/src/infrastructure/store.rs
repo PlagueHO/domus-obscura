@@ -93,6 +93,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/028_album_restore.sql"),
     include_str!("../../migrations/029_recovery_cleanup.sql"),
     include_str!("../../migrations/030_artist_images.sql"),
+    include_str!("../../migrations/031_certificate_roots.sql"),
 ];
 
 pub struct Store {

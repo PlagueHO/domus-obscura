@@ -5,6 +5,7 @@ import {
   BackendConfiguration,
   confirmConfigurationReload,
   sharingWorkerEvidence,
+  ManagedCertificateStatus,
 } from "./BackendConfiguration";
 import { ApiError } from "./api";
 import { useResource } from "./hooks";
@@ -18,6 +19,7 @@ import {
   sectionUpdate,
   discardConfigurationSection,
   newSharingDraft,
+  newManagedTlsDraft,
   sectionHasErrors,
 } from "./backend-configuration-state";
 
@@ -25,6 +27,74 @@ vi.mock("./hooks", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./hooks")>()),
   useResource: vi.fn(),
 }));
+
+describe("Managed TLS controls", () => {
+  it("keeps inactive manual references and owns all managed fields in the TLS section", () => {
+    const editor = beginConfigurationEdit(state);
+    const managed = newManagedTlsDraft();
+    const updated = changeConfigurationDraft(editor, {
+      ...editor.draft,
+      tls_mode: "azure_dns",
+      managed_tls: managed,
+      private_key_file: { action: "replace", value: "retained-private-reference" },
+    });
+    expect(dirtySections(updated)).toEqual(["tls"]);
+    expect(sectionUpdate(updated.draft, "tls")).toMatchObject({
+      tls_mode: "azure_dns",
+      managed_tls: managed,
+      private_key_file: { action: "replace", value: "retained-private-reference" },
+    });
+    const markup = renderToStaticMarkup(
+      <BackendConfigurationForm
+        editor={updated}
+        saved={state.saved}
+        section="tls"
+        disabled={false}
+        busy={false}
+        onChange={() => {}}
+        onValidate={() => {}}
+        onSave={() => {}}
+        onDiscard={() => {}}
+      />,
+    );
+    expect(markup).toContain("Azure DNS client-secret file");
+    expect(markup).toContain('name="managed_tls.zone"');
+    expect(markup).not.toContain('name="certificate_file"');
+    expect(markup).not.toContain("retained-private-reference");
+    expect(updated.draft.private_key_file).toEqual({
+      action: "replace",
+      value: "retained-private-reference",
+    });
+    expect(dirtySections(discardConfigurationSection(updated, "tls"))).toEqual([]);
+  });
+
+  it("hides retained certificate dates after a failed refresh or a changed configuration key", () => {
+    const certificate = {
+      phase: "ready",
+      active_generation: 1,
+      expires_at: 2000000000,
+      renew_at: 1900000000,
+      next_attempt: null,
+      attempts: 0,
+      last_success: 1800000000,
+      recovery_required: false,
+      cleanup_pending: false,
+    };
+    for (const resource of [
+      { data: { configuration_revision: "other", certificate }, loading: false, error: undefined },
+      {
+        data: { configuration_revision: "current", certificate },
+        loading: false,
+        error: new Error("Refresh failed"),
+      },
+    ]) {
+      vi.mocked(useResource).mockReturnValue({ ...resource, refresh: vi.fn() });
+      const markup = renderToStaticMarkup(<ManagedCertificateStatus revision="current" />);
+      expect(markup).toContain("Certificate status is unknown");
+      expect(markup).not.toContain("Certificate expiry");
+    }
+  });
+});
 
 const configuration: BackendConfigurationState["active"] = {
   production_worker: null,
@@ -47,6 +117,8 @@ const configuration: BackendConfigurationState["active"] = {
   client_secret_file_configured: false,
   certificate_file: "generated-certificate",
   private_key_file_configured: true,
+  tls_mode: "manual",
+  managed_tls: null,
   browser_assets: "generated-browser",
   local_acquisition: {
     staging_root: "generated-staging",
@@ -208,13 +280,13 @@ describe("backend configuration inspection", () => {
         />,
       );
       for (const label of [
-        "Environment",
+        "Access mode",
         "Local database",
         "Listen address",
         "Browser origin",
         "Browser assets",
         "Providers",
-        "Artist photos",
+        "Artist photo source",
         "Cache root",
         "Maximum cache entries",
         "Entra identity",
@@ -233,6 +305,43 @@ describe("backend configuration inspection", () => {
       expect(markup).toContain("Saving does not activate settings");
       expect(markup).not.toContain('name="system_settings_read_only"');
       expect(markup).not.toContain('type="password"');
+    });
+
+    it("shows single-user setup without certificate or sign-in inputs", () => {
+      const local = {
+        ...configuration,
+        environment: "single_user",
+        origin: "http://127.0.0.1:8080",
+        listen: "127.0.0.1:8080",
+        certificate_file: null,
+        private_key_file_configured: false,
+        local_acquisition: null,
+      };
+      const editor = beginConfigurationEdit({ ...state, active: local, saved: local });
+      const markup = renderToStaticMarkup(
+        <BackendConfigurationForm
+          editor={editor}
+          disabled={false}
+          busy={false}
+          onChange={vi.fn()}
+          onValidate={vi.fn()}
+          onSave={vi.fn()}
+          onDiscard={vi.fn()}
+        />,
+      );
+      expect(markup).toContain('value="single_user" selected=""');
+      expect(markup).toContain("no Azure, DNS, TLS, or sign-in");
+      expect(markup).not.toContain('name="certificate_file"');
+      expect(markup).not.toContain('name="private_key_file.action"');
+      expect(markup).not.toContain('name="client_secret_file.action"');
+      expect(editor.draft.certificate_file).toBeNull();
+      expect(sectionUpdate(editor.draft, "tls")).toEqual({
+        section: "tls",
+        certificate_file: null,
+        private_key_file: { action: "keep" },
+        tls_mode: "manual",
+        managed_tls: null,
+      });
     });
   });
 

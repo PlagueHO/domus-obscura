@@ -26,6 +26,25 @@ pub fn initialize_crypto() -> Result<()> {
 /// The supplied chain anchors this local check; HTTPS clients independently
 /// decide whether the certificate is trusted by their configured trust store.
 pub fn configuration(host: &str, certificate: &[u8], private_key: &[u8]) -> Result<RustlsConfig> {
+    checked_configuration(host, certificate, private_key, false)
+}
+
+/// Managed production candidates use independent public trust anchors, not a
+/// root supplied by the ACME response. Failed candidates never replace TLS.
+pub fn managed_configuration(
+    host: &str,
+    certificate: &[u8],
+    private_key: &[u8],
+) -> Result<RustlsConfig> {
+    checked_configuration(host, certificate, private_key, true)
+}
+
+fn checked_configuration(
+    host: &str,
+    certificate: &[u8],
+    private_key: &[u8],
+    public_trust: bool,
+) -> Result<RustlsConfig> {
     if certificate.len() > 262144 || private_key.len() > 16384 {
         return Err(Error::InvalidInput(
             "TLS material exceeds its size limit".into(),
@@ -44,12 +63,16 @@ pub fn configuration(host: &str, certificate: &[u8], private_key: &[u8]) -> Resu
         .ok_or_else(|| Error::InvalidInput("TLS private key is missing".into()))?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut anchors = RootCertStore::empty();
-    let anchor = certificates
-        .last()
-        .ok_or_else(|| Error::InvalidInput("TLS chain is empty".into()))?;
-    anchors
-        .add(anchor.clone())
-        .map_err(|_| Error::InvalidInput("TLS chain anchor is invalid".into()))?;
+    if public_trust {
+        anchors.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    } else {
+        let anchor = certificates
+            .last()
+            .ok_or_else(|| Error::InvalidInput("TLS chain is empty".into()))?;
+        anchors
+            .add(anchor.clone())
+            .map_err(|_| Error::InvalidInput("TLS chain anchor is invalid".into()))?;
+    }
     let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
         Arc::new(anchors),
         provider.clone(),
@@ -81,6 +104,45 @@ pub fn configuration(host: &str, certificate: &[u8], private_key: &[u8]) -> Resu
     Ok(RustlsConfig::from_config(Arc::new(server)))
 }
 
+/// Read exact leaf validity after bounded PEM parsing. This does not by itself
+/// prove trust; callers must also validate the pair through a TLS verifier.
+pub fn certificate_validity(host: &str, certificate: &[u8]) -> Result<(u64, u64)> {
+    if certificate.len() > 262144 {
+        return Err(Error::InvalidInput(
+            "TLS certificate exceeds its size limit".into(),
+        ));
+    }
+    let leaf = rustls_pemfile::certs(&mut &certificate[..])
+        .next()
+        .ok_or_else(|| Error::InvalidInput("TLS leaf certificate is missing".into()))?
+        .map_err(|_| Error::InvalidInput("TLS leaf PEM is invalid".into()))?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(&leaf)
+        .map_err(|_| Error::InvalidInput("TLS leaf certificate is invalid".into()))?;
+    let names = parsed
+        .subject_alternative_name()
+        .map_err(|_| Error::InvalidInput("TLS subject alternative names are invalid".into()))?
+        .ok_or_else(|| Error::InvalidInput("TLS subject alternative name is missing".into()))?;
+    if names.value.general_names.len() != 1
+        || !matches!(&names.value.general_names[0],
+            x509_parser::extensions::GeneralName::DNSName(name) if *name == host
+        )
+    {
+        return Err(Error::InvalidInput(
+            "managed TLS must cover only the exact configured hostname".into(),
+        ));
+    }
+    let start = u64::try_from(parsed.validity().not_before.timestamp())
+        .map_err(|_| Error::InvalidInput("TLS validity start is unsupported".into()))?;
+    let end = u64::try_from(parsed.validity().not_after.timestamp())
+        .map_err(|_| Error::InvalidInput("TLS validity end is unsupported".into()))?;
+    if start >= end {
+        return Err(Error::InvalidInput(
+            "TLS validity interval is invalid".into(),
+        ));
+    }
+    Ok((start, end))
+}
+
 /// Failed candidates leave the shared active configuration unchanged.
 pub fn reload(
     active: &RustlsConfig,
@@ -91,4 +153,26 @@ pub fn reload(
     let checked = configuration(host, certificate, private_key)?;
     active.reload_from_config(checked.get_inner());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certificates_managed_trust_is_independent_from_the_supplied_anchor()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let generated = rcgen::generate_simple_self_signed(vec!["api.home.example".into()])?;
+        let certificate = generated.cert.pem();
+        let key = generated.signing_key.serialize_pem();
+        assert!(configuration("api.home.example", certificate.as_bytes(), key.as_bytes()).is_ok());
+        assert!(
+            managed_configuration("api.home.example", certificate.as_bytes(), key.as_bytes())
+                .is_err()
+        );
+        assert!(certificate_validity("other.home.example", certificate.as_bytes()).is_err());
+        let (start, end) = certificate_validity("api.home.example", certificate.as_bytes())?;
+        assert!(start < end);
+        Ok(())
+    }
 }

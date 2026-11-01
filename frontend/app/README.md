@@ -8,12 +8,15 @@ pnpm --dir frontend build:app
 ```
 
 The separate build writes `frontend/dist-app/index.html` and bundled files in
-`frontend/dist-app/assets`. The guarded HTTPS API serves these files. Do not open
+`frontend/dist-app/assets`. The guarded application API serves these files. Do not open
 the HTML as a local file. Do not use the sample-data server for this app.
 
-The browser reads the identity from `/api/session`. Production uses
+The browser reads the identity from `/api/session`. `domus serve` without a
+configuration starts single-user anonymous HTTP at `http://127.0.0.1:8080`.
+This mode needs no certificate or sign-in configuration. Production uses
 `/auth/login`. Development requires explicit host configuration and a valid
-development TLS certificate. Missing credentials do not select anonymous mode.
+development TLS certificate. Failed secure configuration never selects
+anonymous HTTP.
 
 The host must register library roots, bind private staging, save output settings
 and explicitly enable local acquisition. Provider credentials stay on the host.

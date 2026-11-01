@@ -8,6 +8,38 @@ fn conflict() -> Error {
     Error::Conflict("native root identity changed or needs explicit binding".into())
 }
 
+fn inspect_roots(
+    connection: &Connection,
+    mut inspect: impl FnMut(&str, &str, &NativeRoot) -> Result<()>,
+) -> Result<()> {
+    let mut statement =
+        connection.prepare("SELECT root, kind, identity, body FROM filesystem_roots")?;
+    for (count, row) in statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .enumerate()
+    {
+        if count >= 4096 {
+            return Err(Error::InvalidInput(
+                "native root inventory exceeds 4096 roots".into(),
+            ));
+        }
+        let (path, kind, identity, body) = row?;
+        let other: NativeRoot = serde_json::from_str(&body)?;
+        if identity != other.identity || other.ancestors.last() != Some(&other.identity) {
+            return Err(conflict());
+        }
+        inspect(&path, &kind, &other)?;
+    }
+    Ok(())
+}
+
 pub(super) fn require_bound_roots(connection: &Connection) -> Result<()> {
     let missing: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM
@@ -41,22 +73,14 @@ pub(super) fn register(
         }
         return Ok(());
     }
-    let mut statement = connection.prepare("SELECT identity, body FROM filesystem_roots")?;
-    for row in statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })? {
-        let (identity, body) = row?;
-        let other: NativeRoot = serde_json::from_str(&body)?;
-        if identity != other.identity || other.ancestors.last() != Some(&other.identity) {
-            return Err(conflict());
-        }
-        if native.overlaps(&other) {
+    inspect_roots(connection, |_, _, other| {
+        if native.overlaps(other) {
             return Err(Error::InvalidInput(
                 "media and private roots overlap through native filesystem identity".into(),
             ));
         }
-    }
-    drop(statement);
+        Ok(())
+    })?;
     let body = serde_json::to_string(native)?;
     if body.len() > 1024 * 1024 {
         return Err(Error::InvalidInput("root ancestry exceeds 1 MiB".into()));
@@ -69,6 +93,43 @@ pub(super) fn register(
 }
 
 impl Store {
+    /// Passive separation uses saved ancestry, so an offline library is not
+    /// opened or treated as absent. Only the final certificate directory may
+    /// be missing; its existing parent remains the no-follow identity anchor.
+    pub(crate) fn inspect_certificate_root(&self, path: &Path) -> Result<()> {
+        require_bound_roots(&self.connection)?;
+        let candidate = super::super::certificates::StateDirectory::inspect(path)?;
+        inspect_roots(&self.connection, |root, kind, native| {
+            if kind == "certificate"
+                && candidate.exists
+                && candidate.path == Path::new(root)
+                && candidate.native == *native
+            {
+                return Ok(());
+            }
+            if candidate.overlaps(Path::new(root), native) {
+                return Err(Error::InvalidInput(
+                    "certificate state overlaps a registered root".into(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    /// Explicit bootstrap records only native root identity, never certificate
+    /// or account secrets. Future root registrations reuse the same exclusion.
+    pub(crate) fn bind_certificate_root(&self, path: &Path, native: &NativeRoot) -> Result<()> {
+        require_bound_roots(&self.connection)?;
+        self.check_state_overlap(native)?;
+        let root = path
+            .to_str()
+            .ok_or_else(|| Error::InvalidInput("certificate root must be Unicode".into()))?;
+        let transaction = self.connection.unchecked_transaction()?;
+        register(&transaction, root, "certificate", native)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn check_native_root(
         &self,
         root: &str,

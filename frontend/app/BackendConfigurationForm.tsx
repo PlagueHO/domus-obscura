@@ -6,7 +6,8 @@ import type { BackendConfigurationState } from "../src/generated/BackendConfigur
 import type { BackendSharingDraft } from "../src/generated/BackendSharingDraft";
 import type { ShareLimits } from "../src/generated/ShareLimits";
 import type { ConfigurationEditor } from "./backend-configuration-state";
-import { newSharingDraft } from "./backend-configuration-state";
+import { newSharingDraft, newManagedTlsDraft } from "./backend-configuration-state";
+import type { BackendManagedTlsDraft } from "../src/generated/BackendManagedTlsDraft";
 import { SharingFolders } from "./SharingFolders";
 import { Button, Check } from "./components/ui";
 
@@ -50,6 +51,9 @@ export function BackendConfigurationForm({
     client_id: saved?.client_id_configured,
     client_secret_file: saved?.client_secret_file_configured,
     private_key_file: saved?.private_key_file_configured,
+    "managed_tls.tenant_id": saved?.managed_tls?.tenant_id_configured ?? false,
+    "managed_tls.client_id": saved?.managed_tls?.client_id_configured ?? false,
+    "managed_tls.client_secret_file": saved?.managed_tls?.client_secret_file_configured ?? false,
     "local_acquisition.credentials_file": saved?.local_acquisition?.credentials_file_configured,
     "production_worker.acquisition.credentials_file":
       saved?.production_worker?.acquisition?.credentials_file_configured,
@@ -62,6 +66,11 @@ export function BackendConfigurationForm({
     value: BackendConfigurationDraft[K],
   ) => onChange({ ...draft, [field]: value });
   const sharing = draft.production_worker?.sharing;
+  const managed = draft.managed_tls ?? newManagedTlsDraft();
+  const updateManaged = <K extends keyof BackendManagedTlsDraft>(
+    field: K,
+    value: BackendManagedTlsDraft[K],
+  ) => update("managed_tls", { ...managed, [field]: value });
   const updateSharing = (value: BackendSharingDraft | null) =>
     update(
       "production_worker",
@@ -189,14 +198,15 @@ export function BackendConfigurationForm({
         <legend>General</legend>
         {field(
           "environment",
-          "Environment",
-          "Production requires Entra. Development permits only direct loopback HTTPS.",
+          "Access mode",
+          "Single user needs no Azure, DNS, TLS, or sign-in. All modes use direct loopback access.",
           <select
             value={draft.environment}
             onChange={(event) => update("environment", event.target.value)}
           >
             <option value="production">Production</option>
             <option value="development">Development</option>
+            <option value="single_user">Single user · anonymous HTTP</option>
           </select>,
         )}
         {text(
@@ -211,7 +221,7 @@ export function BackendConfigurationForm({
           "Browser origin",
           draft.origin,
           (value) => update("origin", value),
-          "HTTPS origin with the listener port. No path, query, or credentials.",
+          "HTTP for single user; HTTPS for production or development. Use the listener port and no path, query, or credentials.",
         )}
         {text(
           "browser_assets",
@@ -333,41 +343,160 @@ export function BackendConfigurationForm({
       <fieldset disabled={disabled || !visible("identity")} hidden={!visible("identity")}>
         <legend>Entra identity</legend>
         <p>
-          Production authorizes one tenant/object pair. Changing environment can require explicit
-          removal or replacement of these fields.
+          {draft.environment === "single_user"
+            ? "Authentication disabled. Entra is not required. Saved Entra references remain inactive."
+            : "Production authorizes one tenant/object pair. Development requires explicit removal of Entra references."}
         </p>
-        {hidden("tenant_id", "Entra tenant", draft.tenant_id, (value) =>
-          update("tenant_id", value),
+        {draft.environment !== "single_user" && (
+          <>
+            {hidden("tenant_id", "Entra tenant", draft.tenant_id, (value) =>
+              update("tenant_id", value),
+            )}
+            {hidden("object_id", "Authorized Entra object", draft.object_id, (value) =>
+              update("object_id", value),
+            )}
+            {hidden("client_id", "Entra client", draft.client_id, (value) =>
+              update("client_id", value),
+            )}
+            {hidden("client_secret_file", "Entra secret file", draft.client_secret_file, (value) =>
+              update("client_secret_file", value),
+            )}
+            <small>
+              File references only. This form does not accept passwords, tokens, or private-key
+              contents.
+            </small>
+          </>
         )}
-        {hidden("object_id", "Authorized Entra object", draft.object_id, (value) =>
-          update("object_id", value),
-        )}
-        {hidden("client_id", "Entra client", draft.client_id, (value) =>
-          update("client_id", value),
-        )}
-        {hidden("client_secret_file", "Entra secret file", draft.client_secret_file, (value) =>
-          update("client_secret_file", value),
-        )}
-        <small>
-          File references only. This form does not accept passwords, tokens, or private-key
-          contents.
-        </small>
       </fieldset>
       <fieldset disabled={disabled || !visible("tls")} hidden={!visible("tls")}>
         <legend>TLS</legend>
-        {text(
-          "certificate_file",
-          "TLS certificate file",
-          draft.certificate_file,
-          (value) => update("certificate_file", value),
-          "Absolute path to an existing PEM certificate. Validation checks the key pair, chain, hostname, and validity.",
-        )}
-        {hidden(
-          "private_key_file",
-          "TLS private-key file",
-          draft.private_key_file,
-          (value) => update("private_key_file", value),
-          false,
+        {draft.environment === "single_user" ? (
+          <p>
+            TLS is not enabled. Single-user HTTP works only on loopback. No certificate or Azure
+            setup is required.
+          </p>
+        ) : (
+          <>
+            {field(
+              "tls_mode",
+              "Certificate source",
+              "Manual certificates and Azure DNS are separate modes. Inactive settings stay saved.",
+              <select
+                name="tls_mode"
+                value={draft.tls_mode}
+                onChange={(event) => {
+                  const tls_mode = event.target.value === "azure_dns" ? "azure_dns" : "manual";
+                  onChange({
+                    ...draft,
+                    tls_mode,
+                    managed_tls: tls_mode === "azure_dns" ? managed : draft.managed_tls,
+                  });
+                }}
+              >
+                <option value="manual">Manual certificate files</option>
+                <option value="azure_dns">Let's Encrypt with Azure DNS</option>
+              </select>,
+            )}
+            {draft.tls_mode === "manual" ? (
+              <>
+                {text(
+                  "certificate_file",
+                  "TLS certificate file",
+                  draft.certificate_file ?? "",
+                  (value) => update("certificate_file", value || null),
+                  "Absolute path to an existing PEM certificate. Validation checks the key pair, chain, hostname, and validity.",
+                )}
+                {hidden(
+                  "private_key_file",
+                  "TLS private-key file",
+                  draft.private_key_file,
+                  (value) => update("private_key_file", value),
+                  false,
+                )}
+              </>
+            ) : (
+              <>
+                {field(
+                  "managed_tls.environment",
+                  "Let's Encrypt environment",
+                  "Staging tests issuance. A staging certificate cannot activate the production listener.",
+                  <select
+                    name="managed_tls.environment"
+                    value={managed.environment}
+                    onChange={(event) =>
+                      updateManaged(
+                        "environment",
+                        event.target.value === "production" ? "production" : "staging",
+                      )
+                    }
+                  >
+                    <option value="staging">Staging</option>
+                    <option value="production">Production</option>
+                  </select>,
+                )}
+                {text(
+                  "managed_tls.state_directory",
+                  "Private certificate state directory",
+                  managed.state_directory,
+                  (value) => updateManaged("state_directory", value),
+                  "Absolute path outside Git, media, staging and cache. The private parent must exist. Bootstrap creates the final directory.",
+                )}
+                {hidden(
+                  "managed_tls.tenant_id",
+                  "Azure DNS tenant ID",
+                  managed.tenant_id,
+                  (value) => updateManaged("tenant_id", value),
+                  false,
+                )}
+                {hidden(
+                  "managed_tls.client_id",
+                  "Azure DNS client ID",
+                  managed.client_id,
+                  (value) => updateManaged("client_id", value),
+                  false,
+                )}
+                {hidden(
+                  "managed_tls.client_secret_file",
+                  "Azure DNS client-secret file",
+                  managed.client_secret_file,
+                  (value) => updateManaged("client_secret_file", value),
+                  false,
+                )}
+                {text(
+                  "managed_tls.subscription_id",
+                  "Azure subscription ID",
+                  managed.subscription_id,
+                  (value) => updateManaged("subscription_id", value),
+                  "Use the subscription of the existing Azure DNS zone.",
+                )}
+                {text(
+                  "managed_tls.resource_group",
+                  "DNS resource group",
+                  managed.resource_group,
+                  (value) => updateManaged("resource_group", value),
+                  "Use the existing resource group.",
+                )}
+                {text(
+                  "managed_tls.zone",
+                  "Azure DNS zone",
+                  managed.zone,
+                  (value) => updateManaged("zone", value),
+                  "Canonical lowercase zone name. The certificate hostname comes from the API origin.",
+                )}
+                <Check
+                  checked={managed.terms_of_service_agreed}
+                  onChange={(accepted) => updateManaged("terms_of_service_agreed", accepted)}
+                >
+                  I accept the Let's Encrypt terms for account creation.
+                </Check>
+                <small>
+                  Saving and validation do not issue a certificate. Run the local certificate
+                  bootstrap command before managed HTTPS startup. Recovery is a separate local
+                  operation.
+                </small>
+              </>
+            )}
+          </>
         )}
       </fieldset>
       <fieldset

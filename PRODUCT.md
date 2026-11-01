@@ -27,7 +27,19 @@ Domus Obscura makes complete-album acquisition clear, safe, and recoverable. The
 
 Run the API and worker as separate Rust processes on the same Windows or Linux host. Keep shared SQLite state on local disk. Use manual installation and supervised services. Node.js is a build tool, not a production runtime.
 
-Use Entra ID for one tenant/user pair in production. Explicit local development uses the fixed `_anonymous` identity without authentication and permits a valid developer certificate. Keep this mode limited to direct loopback HTTPS access. Missing production credentials must fail, not enable anonymous access. Serve the app through direct HTTPS. Use MusicBrainz and Cover Art Archive for release metadata and artwork. Use Soulseek for permitted complete-album transfers and explicitly configured read-only sharing.
+With no host configuration, start the real application in `single_user` mode
+over direct loopback HTTP. Use the fixed `_anonymous` identity. Azure, DNS, TLS
+and Entra are not setup requirements. Keep provider and worker services disabled
+until an operator configures them.
+
+Secure mode is optional. Use Entra ID for one tenant/user pair in production.
+Explicit local development uses `_anonymous` with a valid developer certificate
+over direct loopback HTTPS. Missing or invalid secure configuration must fail;
+never switch to anonymous HTTP after an authentication or TLS failure.
+Multiple-user Entra authorization remains separate work.
+Use MusicBrainz and Cover Art Archive for release metadata and artwork. Use
+Soulseek for permitted complete-album transfers and explicitly configured
+read-only sharing.
 
 ## Capabilities and Constraints
 

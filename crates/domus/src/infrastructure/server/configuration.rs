@@ -1,9 +1,10 @@
 //! The sole access boundary for backend JSON. Validation never activates settings.
 use super::load_tls;
 use crate::application::services::ServiceConfiguration;
+use crate::domain::certificates::{AcmeEnvironment, TlsMode};
+use crate::infrastructure::certificates::ManagedTlsConfiguration;
 use crate::infrastructure::filesystem::{
-    LibraryDirectory, NativeRoot, is_unsafe_link, native_file_identity, require_local_disk,
-    sync_directory,
+    LibraryDirectory, NativeRoot, is_unsafe_link, native_file_identity, sync_directory,
 };
 use crate::infrastructure::permissions::FilePermissions;
 use crate::infrastructure::store::Store;
@@ -26,6 +27,7 @@ pub(super) enum Environment {
     #[default]
     Production,
     Development,
+    SingleUser,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -45,8 +47,12 @@ pub(crate) struct Configuration {
     pub(super) object_id: Option<String>,
     pub(super) client_id: Option<String>,
     pub(super) client_secret_file: Option<PathBuf>,
-    pub(super) certificate_file: PathBuf,
-    pub(super) private_key_file: PathBuf,
+    pub(super) certificate_file: Option<PathBuf>,
+    pub(super) private_key_file: Option<PathBuf>,
+    #[serde(default)]
+    pub(super) tls_mode: TlsMode,
+    #[serde(default)]
+    pub(super) managed_tls: Option<ManagedTlsConfiguration>,
     pub(super) browser_assets: Option<PathBuf>,
     pub(super) local_acquisition: Option<crate::infrastructure::worker::LocalAcquisition>,
     pub(crate) production_worker:
@@ -140,11 +146,46 @@ pub struct BackendConfiguration {
     pub object_id_configured: bool,
     pub client_id_configured: bool,
     pub client_secret_file_configured: bool,
-    pub certificate_file: String,
+    pub certificate_file: Option<String>,
     pub private_key_file_configured: bool,
+    pub tls_mode: TlsMode,
+    pub managed_tls: Option<BackendManagedTls>,
     pub browser_assets: Option<String>,
     pub local_acquisition: Option<BackendLocalAcquisition>,
     pub production_worker: Option<BackendWorker>,
+}
+
+#[derive(Clone, Serialize, ts_rs::TS)]
+pub struct BackendManagedTls {
+    pub environment: AcmeEnvironment,
+    pub state_directory: String,
+    pub tenant_id_configured: bool,
+    pub client_id_configured: bool,
+    pub client_secret_file_configured: bool,
+    pub subscription_id: String,
+    pub resource_group: String,
+    pub zone: String,
+    pub terms_of_service_agreed: bool,
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct BackendManagedTlsDraft {
+    pub environment: AcmeEnvironment,
+    pub state_directory: String,
+    pub tenant_id: ConfigurationReplacement,
+    pub client_id: ConfigurationReplacement,
+    pub client_secret_file: ConfigurationReplacement,
+    pub subscription_id: String,
+    pub resource_group: String,
+    pub zone: String,
+    pub terms_of_service_agreed: bool,
+}
+
+#[derive(Clone, Serialize, ts_rs::TS)]
+pub struct BackendCertificateStatus {
+    pub configuration_revision: String,
+    pub certificate: Option<crate::infrastructure::certificates::state::CertificateStatus>,
 }
 
 #[derive(Clone, Serialize, ts_rs::TS)]
@@ -189,8 +230,11 @@ pub enum ConfigurationSectionUpdate {
         client_secret_file: ConfigurationReplacement,
     },
     Tls {
-        certificate_file: String,
+        certificate_file: Option<String>,
         private_key_file: ConfigurationReplacement,
+        #[serde(default)]
+        tls_mode: TlsMode,
+        managed_tls: Option<BackendManagedTlsDraft>,
     },
     Storage {
         database: String,
@@ -287,8 +331,11 @@ pub struct BackendConfigurationDraft {
     pub object_id: ConfigurationReplacement,
     pub client_id: ConfigurationReplacement,
     pub client_secret_file: ConfigurationReplacement,
-    pub certificate_file: String,
+    pub certificate_file: Option<String>,
     pub private_key_file: ConfigurationReplacement,
+    #[serde(default)]
+    pub tls_mode: TlsMode,
+    pub managed_tls: Option<BackendManagedTlsDraft>,
     pub browser_assets: Option<String>,
     pub local_acquisition: Option<BackendLocalAcquisitionDraft>,
     pub production_worker: Option<BackendWorkerDraft>,
@@ -325,6 +372,9 @@ pub(crate) struct ConfigurationService {
     validated_revision: Mutex<Option<String>>,
     writer: Arc<Mutex<Option<File>>>,
     reload: Arc<Mutex<ReloadControl>>,
+    certificate_selection:
+        Arc<Mutex<Option<crate::infrastructure::certificates::state::CertificateSelection>>>,
+    certificate_recovery: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     failure: Mutex<Option<SaveFailure>>,
 }
@@ -340,6 +390,56 @@ enum SaveFailure {
 }
 
 impl ConfigurationService {
+    pub(crate) fn certificate_selection(
+        &self,
+    ) -> Arc<Mutex<Option<crate::infrastructure::certificates::state::CertificateSelection>>> {
+        self.certificate_selection.clone()
+    }
+
+    pub(crate) fn certificate_recovery(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.certificate_recovery.clone()
+    }
+
+    pub(crate) fn certificate_status(&self) -> Result<BackendCertificateStatus> {
+        let mut certificate = if self.active.tls_mode == TlsMode::AzureDns
+            && !matches!(self.active.environment, Environment::SingleUser)
+        {
+            let managed =
+                self.active.managed_tls.as_ref().ok_or_else(|| {
+                    Error::InvalidInput("managed TLS settings are missing".into())
+                })?;
+            let origin = reqwest::Url::parse(&self.active.origin)
+                .map_err(|_| Error::InvalidInput("service origin is invalid".into()))?;
+            let hostname = origin
+                .host_str()
+                .ok_or(Error::Internal("service hostname is missing"))?;
+            let selected = self
+                .certificate_selection
+                .lock()
+                .map_err(|_| Error::Internal("live certificate selection lock failed"))?
+                .clone();
+            Some(
+                crate::infrastructure::certificates::state::StateStore::status_bound(
+                    &managed.state_directory,
+                    &managed.binding(hostname)?,
+                    managed.environment,
+                    selected.as_ref(),
+                )?,
+            )
+        } else {
+            None
+        };
+        if let Some(status) = certificate.as_mut() {
+            status.recovery_required |= self
+                .certificate_recovery
+                .load(std::sync::atomic::Ordering::Acquire);
+        }
+        Ok(BackendCertificateStatus {
+            configuration_revision: self.active_revision.clone(),
+            certificate,
+        })
+    }
+
     pub(crate) fn active_revision(&self) -> &str {
         &self.active_revision
     }
@@ -425,6 +525,8 @@ impl ConfigurationService {
             validated_revision: Mutex::new(None),
             writer: Arc::new(Mutex::new(None)),
             reload: Arc::new(Mutex::new(ReloadControl::default())),
+            certificate_selection: Arc::new(Mutex::new(None)),
+            certificate_recovery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             failure: Mutex::new(None),
         })
@@ -861,9 +963,13 @@ impl ConfigurationService {
                         ConfigurationSectionUpdate::Tls {
                             certificate_file,
                             private_key_file,
+                            tls_mode,
+                            managed_tls,
                         } => {
                             draft.certificate_file = certificate_file;
                             draft.private_key_file = private_key_file;
+                            draft.tls_mode = tls_mode;
+                            draft.managed_tls = managed_tls;
                             ConfigurationSection::Tls
                         }
                         ConfigurationSectionUpdate::Storage { database, cache } => {
@@ -939,7 +1045,13 @@ impl ConfigurationService {
         saved.environment = match draft.environment.as_str() {
             "production" => Environment::Production,
             "development" => Environment::Development,
-            _ => return Err(issue("environment", "Select production or development.")),
+            "single_user" => Environment::SingleUser,
+            _ => {
+                return Err(issue(
+                    "environment",
+                    "Select production, development, or single user.",
+                ));
+            }
         };
         saved.services = draft.services;
         saved.database = draft.database.into();
@@ -958,13 +1070,49 @@ impl ConfigurationService {
                 .map(|v| v.to_string_lossy().into_owned()),
         )
         .map(PathBuf::from);
-        saved.certificate_file = draft.certificate_file.into();
+        saved.certificate_file = draft
+            .certificate_file
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from);
         saved.private_key_file = replacement(
             draft.private_key_file,
-            Some(saved.private_key_file.to_string_lossy().into_owned()),
+            saved
+                .private_key_file
+                .map(|v| v.to_string_lossy().into_owned()),
         )
-        .map(PathBuf::from)
-        .ok_or_else(|| issue("private_key_file", "A TLS private-key file is required."))?;
+        .map(PathBuf::from);
+        saved.tls_mode = draft.tls_mode;
+        if let Some(managed) = draft.managed_tls {
+            let previous = saved.managed_tls.take();
+            let previous_dns = previous.as_ref().map(|value| &value.dns);
+            saved.managed_tls = Some(ManagedTlsConfiguration {
+                environment: managed.environment,
+                state_directory: managed.state_directory.into(),
+                terms_of_service_agreed: managed.terms_of_service_agreed,
+                dns: crate::infrastructure::certificates::azure::AzureDnsConfiguration {
+                    tenant_id: replacement(
+                        managed.tenant_id,
+                        previous_dns.map(|dns| dns.tenant_id.clone()),
+                    )
+                    .unwrap_or_default(),
+                    client_id: replacement(
+                        managed.client_id,
+                        previous_dns.map(|dns| dns.client_id.clone()),
+                    )
+                    .unwrap_or_default(),
+                    client_secret_file: replacement(
+                        managed.client_secret_file,
+                        previous_dns
+                            .map(|dns| dns.client_secret_file.to_string_lossy().into_owned()),
+                    )
+                    .map(PathBuf::from)
+                    .unwrap_or_default(),
+                    subscription_id: managed.subscription_id,
+                    resource_group: managed.resource_group,
+                    zone: managed.zone,
+                },
+            });
+        }
         saved.browser_assets = draft
             .browser_assets
             .filter(|v| !v.trim().is_empty())
@@ -1097,6 +1245,18 @@ impl ConfigurationService {
             client_secret_file: ConfigurationReplacement::Keep,
             certificate_file: value.certificate_file,
             private_key_file: ConfigurationReplacement::Keep,
+            tls_mode: value.tls_mode,
+            managed_tls: value.managed_tls.map(|managed| BackendManagedTlsDraft {
+                environment: managed.environment,
+                state_directory: managed.state_directory,
+                tenant_id: ConfigurationReplacement::Keep,
+                client_id: ConfigurationReplacement::Keep,
+                client_secret_file: ConfigurationReplacement::Keep,
+                subscription_id: managed.subscription_id,
+                resource_group: managed.resource_group,
+                zone: managed.zone,
+                terms_of_service_agreed: managed.terms_of_service_agreed,
+            }),
             browser_assets: value.browser_assets,
             local_acquisition: value
                 .local_acquisition
@@ -1148,7 +1308,12 @@ impl ConfigurationService {
             ),
             (
                 ConfigurationSection::Tls,
-                &["certificate_file", "private_key_file"][..],
+                &[
+                    "certificate_file",
+                    "private_key_file",
+                    "tls_mode",
+                    "managed_tls",
+                ][..],
             ),
             (ConfigurationSection::Storage, &["database", "cache"][..]),
             (ConfigurationSection::MusicProviders, &["services"][..]),
@@ -1266,6 +1431,14 @@ impl ConfigurationService {
                     ));
                 }
             }
+            Environment::SingleUser => {
+                if configuration.local_acquisition.is_some() {
+                    return Err(issue(
+                        "local_acquisition",
+                        "The development harness is not single-user application setup.",
+                    ));
+                }
+            }
         }
         if !configuration.listen.ip().is_loopback() || configuration.listen.port() == 0 {
             return Err(issue(
@@ -1275,7 +1448,8 @@ impl ConfigurationService {
         }
         let origin = reqwest::Url::parse(&configuration.origin)
             .map_err(|_| issue("origin", "Service origin is invalid."))?;
-        if origin.scheme() != "https"
+        let plain_http = matches!(configuration.environment, Environment::SingleUser);
+        if origin.scheme() != if plain_http { "http" } else { "https" }
             || origin.host_str().is_none()
             || !origin.username().is_empty()
             || origin.password().is_some()
@@ -1286,11 +1460,13 @@ impl ConfigurationService {
         {
             return Err(issue(
                 "origin",
-                "Service origin must be HTTPS with the listener port and no path, credentials or query.",
+                "Use the mode's HTTP or HTTPS scheme with the listener port and no path, credentials or query.",
             ));
         }
-        if matches!(configuration.environment, Environment::Development)
-            && !super::Api::development_origin(&origin)
+        if matches!(
+            configuration.environment,
+            Environment::Development | Environment::SingleUser
+        ) && !super::Api::development_origin(&origin)
         {
             return Err(issue(
                 "origin",
@@ -1304,70 +1480,102 @@ impl ConfigurationService {
             .trim_end_matches(']')
             .to_owned();
         configuration.origin = origin.origin().ascii_serialization();
-        for (field, file) in [
-            ("database", &configuration.database),
-            ("certificate_file", &configuration.certificate_file),
-            ("private_key_file", &configuration.private_key_file),
-        ]
-        .into_iter()
-        .chain(
+        if !plain_http
+            && configuration.tls_mode == TlsMode::Manual
+            && (configuration.certificate_file.is_none()
+                || configuration.private_key_file.is_none())
+        {
+            return Err(issue(
+                "private_key_file",
+                "HTTPS requires a certificate and private-key file.",
+            ));
+        }
+        if !plain_http && configuration.tls_mode == TlsMode::AzureDns {
             configuration
-                .client_secret_file
-                .iter()
-                .map(|path| ("client_secret_file", path)),
-        )
-        .chain(
-            configuration
-                .browser_assets
-                .iter()
-                .map(|path| ("browser_assets", path)),
-        )
-        .chain(
-            configuration
-                .cache
-                .iter()
-                .map(|cache| ("cache.root", &cache.root)),
-        )
-        .chain(configuration.local_acquisition.iter().flat_map(|local| {
-            [
-                ("local_acquisition.staging_root", &local.staging_root),
-                (
-                    "local_acquisition.credentials_file",
-                    &local.credentials_file,
-                ),
-            ]
-        }))
-        .chain(
-            configuration
-                .production_worker
-                .iter()
-                .filter_map(|worker| worker.acquisition.as_ref())
-                .flat_map(|local| {
-                    [
-                        (
-                            "production_worker.acquisition.staging_root",
-                            &local.staging_root,
-                        ),
-                        (
-                            "production_worker.acquisition.credentials_file",
-                            &local.credentials_file,
-                        ),
-                    ]
-                }),
-        )
-        .chain(
-            configuration
-                .production_worker
-                .iter()
-                .filter_map(|worker| worker.sharing.as_ref())
-                .filter_map(|sharing| sharing.account.as_ref())
-                .map(|account| {
-                    (
-                        "production_worker.sharing.account.credentials_file",
-                        &account.credentials_file,
+                .managed_tls
+                .as_ref()
+                .ok_or_else(|| {
+                    issue(
+                        "managed_tls",
+                        "Azure DNS mode requires its managed TLS settings.",
                     )
-                }),
-        ) {
+                })?
+                .validate(&hostname)
+                .map_err(|error| issue("managed_tls", &error.to_string()))?;
+        }
+        for (field, file) in [("database", &configuration.database)]
+            .into_iter()
+            .chain(
+                configuration
+                    .certificate_file
+                    .iter()
+                    .map(|path| ("certificate_file", path)),
+            )
+            .chain(
+                configuration
+                    .private_key_file
+                    .iter()
+                    .map(|path| ("private_key_file", path)),
+            )
+            .chain(
+                configuration
+                    .client_secret_file
+                    .iter()
+                    .map(|path| ("client_secret_file", path)),
+            )
+            .chain(
+                configuration
+                    .browser_assets
+                    .iter()
+                    .map(|path| ("browser_assets", path)),
+            )
+            .chain(
+                configuration
+                    .cache
+                    .iter()
+                    .map(|cache| ("cache.root", &cache.root)),
+            )
+            .chain(configuration.local_acquisition.iter().flat_map(|local| {
+                [
+                    ("local_acquisition.staging_root", &local.staging_root),
+                    (
+                        "local_acquisition.credentials_file",
+                        &local.credentials_file,
+                    ),
+                ]
+            }))
+            .chain(
+                configuration
+                    .production_worker
+                    .iter()
+                    .filter_map(|worker| worker.acquisition.as_ref())
+                    .flat_map(|local| {
+                        [
+                            (
+                                "production_worker.acquisition.staging_root",
+                                &local.staging_root,
+                            ),
+                            (
+                                "production_worker.acquisition.credentials_file",
+                                &local.credentials_file,
+                            ),
+                        ]
+                    }),
+            )
+            .chain(
+                configuration
+                    .production_worker
+                    .iter()
+                    .filter_map(|worker| worker.sharing.as_ref())
+                    .filter_map(|sharing| sharing.account.as_ref())
+                    .map(|account| {
+                        (
+                            "production_worker.sharing.account.credentials_file",
+                            &account.credentials_file,
+                        )
+                    }),
+            )
+        {
             valid_reference(file).map_err(|_| {
                 issue(
                     field,
@@ -1384,18 +1592,31 @@ impl ConfigurationService {
     fn check_references(
         configuration: &Configuration,
     ) -> std::result::Result<(), BackendConfigurationIssue> {
-        for (field, path, sensitive) in [
-            ("database", &configuration.database, false),
-            ("certificate_file", &configuration.certificate_file, false),
-            ("private_key_file", &configuration.private_key_file, true),
-        ]
-        .into_iter()
-        .chain(
-            configuration
-                .client_secret_file
-                .iter()
-                .map(|path| ("client_secret_file", path, true)),
-        ) {
+        let secure = !matches!(configuration.environment, Environment::SingleUser);
+        for (field, path, sensitive) in [("database", &configuration.database, false)]
+            .into_iter()
+            .chain(
+                configuration
+                    .certificate_file
+                    .iter()
+                    .filter(|_| secure && configuration.tls_mode == TlsMode::Manual)
+                    .map(|path| ("certificate_file", path, false)),
+            )
+            .chain(
+                configuration
+                    .private_key_file
+                    .iter()
+                    .filter(|_| secure && configuration.tls_mode == TlsMode::Manual)
+                    .map(|path| ("private_key_file", path, true)),
+            )
+            .chain(
+                configuration
+                    .client_secret_file
+                    .iter()
+                    .filter(|_| secure)
+                    .map(|path| ("client_secret_file", path, true)),
+            )
+        {
             let check = || -> Result<()> {
                 valid_reference(path)?;
                 let parent = LibraryDirectory::open(
@@ -1414,12 +1635,24 @@ impl ConfigurationService {
     }
 
     pub(super) fn protected(&self, configuration: &Configuration) -> Vec<PathBuf> {
-        let mut paths = vec![
-            self.path.clone(),
-            configuration.certificate_file.clone(),
-            configuration.private_key_file.clone(),
-        ];
-        paths.extend(configuration.client_secret_file.iter().cloned());
+        let mut paths = vec![self.path.clone()];
+        if !matches!(configuration.environment, Environment::SingleUser) {
+            match configuration.tls_mode {
+                TlsMode::Manual => {
+                    paths.extend(configuration.certificate_file.iter().cloned());
+                    paths.extend(configuration.private_key_file.iter().cloned());
+                }
+                TlsMode::AzureDns => {
+                    paths.extend(
+                        configuration
+                            .managed_tls
+                            .iter()
+                            .map(|managed| managed.dns.client_secret_file.clone()),
+                    );
+                }
+            }
+            paths.extend(configuration.client_secret_file.iter().cloned());
+        }
         paths.extend(configuration.browser_assets.iter().cloned());
         paths.extend(
             configuration
@@ -1457,28 +1690,197 @@ impl ConfigurationService {
         if let Some(worker) = &configuration.production_worker {
             worker.validate(store, &configuration.services)?;
         }
+        if matches!(configuration.environment, Environment::SingleUser) {
+            return Ok(());
+        }
         self.client_secret(configuration)?;
         let origin = reqwest::Url::parse(&configuration.origin)
             .map_err(|_| Error::InvalidInput("service origin is invalid".into()))?;
-        load_tls(
-            configuration,
-            origin
-                .host_str()
-                .ok_or(Error::Internal("hostname is missing"))?
-                .trim_matches(['[', ']']),
-        )?;
+        let hostname = origin
+            .host_str()
+            .ok_or(Error::Internal("hostname is missing"))?
+            .trim_matches(['[', ']']);
+        match configuration.tls_mode {
+            TlsMode::Manual => {
+                load_tls(configuration, hostname)?;
+            }
+            TlsMode::AzureDns => {
+                let managed = configuration.managed_tls.as_ref().ok_or_else(|| {
+                    Error::InvalidInput("managed TLS configuration is missing".into())
+                })?;
+                managed.binding(hostname)?;
+                self.check_certificate_layout(configuration, managed, store)?;
+            }
+        }
         Ok(())
+    }
+
+    fn check_certificate_layout(
+        &self,
+        configuration: &Configuration,
+        managed: &ManagedTlsConfiguration,
+        store: &Store,
+    ) -> Result<()> {
+        use crate::infrastructure::certificates::StateDirectory;
+        store.inspect_certificate_root(&managed.state_directory)?;
+        let candidate = StateDirectory::inspect(&managed.state_directory)?;
+        for file in self
+            .protected(configuration)
+            .into_iter()
+            .chain(std::iter::once(configuration.database.clone()))
+        {
+            if configuration.browser_assets.as_ref() == Some(&file) {
+                let (path, directory) = LibraryDirectory::canonical(&file)?;
+                if candidate.overlaps(&path, directory.native_root()) {
+                    return Err(Error::InvalidInput(
+                        "certificate state overlaps browser assets".into(),
+                    ));
+                }
+            } else {
+                let (parent, directory) = LibraryDirectory::canonical(
+                    file.parent()
+                        .ok_or(Error::Internal("protected file has no parent"))?,
+                )?;
+                let path = parent.join(
+                    file.file_name()
+                        .ok_or(Error::Internal("protected file has no name"))?,
+                );
+                if path.starts_with(&candidate.path)
+                    || (candidate.exists
+                        && directory
+                            .native_root()
+                            .ancestors
+                            .contains(&candidate.native.identity))
+                {
+                    return Err(Error::InvalidInput(
+                        "certificate state contains configuration, database or credentials".into(),
+                    ));
+                }
+            }
+        }
+        for path in configuration
+            .cache
+            .iter()
+            .map(|cache| &cache.root)
+            .chain(
+                configuration
+                    .local_acquisition
+                    .iter()
+                    .map(|local| &local.staging_root),
+            )
+            .chain(
+                configuration
+                    .production_worker
+                    .iter()
+                    .filter_map(|worker| worker.acquisition.as_ref())
+                    .map(|local| &local.staging_root),
+            )
+        {
+            let (path, directory) = LibraryDirectory::canonical(path)?;
+            if candidate.overlaps(&path, directory.native_root()) {
+                return Err(Error::InvalidInput(
+                    "certificate state overlaps cache or staging".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Local certificate commands use the same passive JSON and file boundary,
+    /// without constructing an API host or requiring an active certificate.
+    pub(crate) fn certificate_configuration(
+        path: &Path,
+    ) -> Result<(ManagedTlsConfiguration, String, Store)> {
+        Self::certificate_configuration_mode(path, false)
+    }
+
+    pub(crate) fn certificate_operation_configuration(
+        path: &Path,
+    ) -> Result<(ManagedTlsConfiguration, String, Store)> {
+        Self::certificate_configuration_mode(path, true)
+    }
+
+    fn certificate_configuration_mode(
+        path: &Path,
+        write: bool,
+    ) -> Result<(ManagedTlsConfiguration, String, Store)> {
+        let (service, configuration, hostname) = Self::load(path)?;
+        if configuration.tls_mode != TlsMode::AzureDns
+            || matches!(configuration.environment, Environment::SingleUser)
+        {
+            return Err(Error::InvalidInput(
+                "certificate commands require explicit managed HTTPS configuration".into(),
+            ));
+        }
+        let store = if write {
+            Store::open_current_existing(&configuration.database)?
+        } else {
+            Store::open_read_current(&configuration.database)?
+        };
+        service.check_files(&configuration, &store)?;
+        Ok((
+            configuration.managed_tls.ok_or_else(|| {
+                Error::InvalidInput("managed TLS configuration is missing".into())
+            })?,
+            hostname,
+            store,
+        ))
     }
 
     pub(super) fn startup_material(
         &self,
         store: &Store,
         hostname: &str,
-    ) -> Result<(Option<ClientSecret>, axum_server::tls_rustls::RustlsConfig)> {
+    ) -> Result<(
+        Option<ClientSecret>,
+        Option<axum_server::tls_rustls::RustlsConfig>,
+    )> {
         self.check_files(&self.active, store)?;
+        if matches!(self.active.environment, Environment::SingleUser) {
+            return Ok((None, None));
+        }
+        if self.active.tls_mode == TlsMode::AzureDns {
+            let managed = self.active.managed_tls.as_ref().ok_or_else(|| {
+                Error::InvalidInput("managed TLS configuration is missing".into())
+            })?;
+            let directory = crate::infrastructure::certificates::StateDirectory::inspect(
+                &managed.state_directory,
+            )?;
+            if !directory.exists {
+                return Err(Error::InvalidInput(
+                    "managed TLS state is missing; run local bootstrap".into(),
+                ));
+            }
+            store.check_native_root(
+                directory.path.to_str().ok_or_else(|| {
+                    Error::InvalidInput("certificate state path must be Unicode".into())
+                })?,
+                "certificate",
+                &directory.native,
+            )?;
+            let (selected, _, tls) =
+                crate::infrastructure::certificates::state::StateStore::load_active(
+                    &managed.state_directory,
+                    &managed.binding(hostname)?,
+                    hostname,
+                )?;
+            store.check_native_root(
+                directory.path.to_str().ok_or_else(|| {
+                    Error::InvalidInput("certificate state path must be Unicode".into())
+                })?,
+                "certificate",
+                &selected.root,
+            )?;
+            *self
+                .certificate_selection
+                .lock()
+                .map_err(|_| Error::Internal("live certificate selection lock failed"))? =
+                Some(selected);
+            return Ok((self.client_secret(&self.active)?, Some(tls)));
+        }
         Ok((
             self.client_secret(&self.active)?,
-            load_tls(&self.active, hostname)?,
+            Some(load_tls(&self.active, hostname)?),
         ))
     }
 
@@ -1504,12 +1906,18 @@ impl ConfigurationService {
     pub(super) fn tls_material(configuration: &Configuration) -> Result<(Vec<u8>, Vec<u8>)> {
         Ok((
             crate::infrastructure::local_file::read_local(
-                &configuration.certificate_file,
+                configuration
+                    .certificate_file
+                    .as_deref()
+                    .ok_or_else(|| Error::InvalidInput("TLS certificate file is missing".into()))?,
                 262144,
                 false,
             )?,
             crate::infrastructure::local_file::read_local(
-                &configuration.private_key_file,
+                configuration
+                    .private_key_file
+                    .as_deref()
+                    .ok_or_else(|| Error::InvalidInput("TLS private-key file is missing".into()))?,
                 16384,
                 true,
             )?,
@@ -1565,13 +1973,7 @@ fn configuration_error(error: BackendConfigurationIssue) -> Error {
 }
 
 fn valid_reference(path: &Path) -> Result<()> {
-    require_local_disk(path)?;
-    if !path.is_absolute() || path.components().any(|component| {
-        matches!(component, std::path::Component::Normal(name) if name.to_str().is_none_or(|name| name.contains(':') || name.chars().any(char::is_control)))
-    }) {
-        return Err(Error::InvalidInput("service references require absolute local paths without alternate streams".into()));
-    }
-    Ok(())
+    crate::infrastructure::local_file::validate_reference(path)
 }
 
 fn issue_for_error(error: &Error) -> BackendConfigurationIssue {
@@ -1628,6 +2030,7 @@ fn summary(configuration: &Configuration) -> BackendConfiguration {
         environment: match configuration.environment {
             Environment::Production => "production",
             Environment::Development => "development",
+            Environment::SingleUser => "single_user",
         }
         .into(),
         system_settings_read_only: configuration.system_settings_read_only,
@@ -1650,9 +2053,28 @@ fn summary(configuration: &Configuration) -> BackendConfiguration {
         client_secret_file_configured: configuration.client_secret_file.is_some(),
         certificate_file: configuration
             .certificate_file
-            .to_string_lossy()
-            .into_owned(),
-        private_key_file_configured: !configuration.private_key_file.as_os_str().is_empty(),
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned()),
+        private_key_file_configured: configuration.private_key_file.is_some(),
+        tls_mode: configuration.tls_mode,
+        managed_tls: configuration
+            .managed_tls
+            .as_ref()
+            .map(|managed| BackendManagedTls {
+                environment: managed.environment,
+                state_directory: managed.state_directory.to_string_lossy().into_owned(),
+                tenant_id_configured: !managed.dns.tenant_id.is_empty(),
+                client_id_configured: !managed.dns.client_id.is_empty(),
+                client_secret_file_configured: !managed
+                    .dns
+                    .client_secret_file
+                    .as_os_str()
+                    .is_empty(),
+                subscription_id: managed.dns.subscription_id.clone(),
+                resource_group: managed.dns.resource_group.clone(),
+                zone: managed.dns.zone.clone(),
+                terms_of_service_agreed: managed.terms_of_service_agreed,
+            }),
         browser_assets: configuration
             .browser_assets
             .as_ref()

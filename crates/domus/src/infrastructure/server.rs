@@ -121,16 +121,46 @@ pub async fn serve_listener(
         .acceptor(ConnectionLimit::new(acceptor))
         .http1_only()
         .handle(handle);
+    configure_http_limits(server.http_builder());
     server
-        .http_builder()
+        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+}
+
+/// The anonymous application uses the same connection and HTTP parser limits,
+/// without TLS. Both the bind and the guarded router require direct loopback.
+pub async fn serve_plain_listener(
+    listener: TcpListener,
+    router: Router,
+    handle: axum_server::Handle<SocketAddr>,
+) -> io::Result<()> {
+    if !listener.local_addr()?.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "anonymous HTTP requires loopback",
+        ));
+    }
+    let _shutdown = ShutdownOnDrop(handle.clone());
+    listener.set_nonblocking(true)?;
+    let mut server = axum_server::from_tcp(listener)?
+        .acceptor(ConnectionLimit::new(axum_server::accept::DefaultAcceptor))
+        .http1_only()
+        .handle(handle);
+    configure_http_limits(server.http_builder());
+    server
+        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+}
+
+fn configure_http_limits(
+    builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
+) {
+    builder
         .http1()
         .max_headers(64)
         .max_buf_size(32768)
         .timer(TokioTimer::new())
         .header_read_timeout(Duration::from_secs(10));
-    server
-        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
-        .await
 }
 
 struct ShutdownOnDrop(axum_server::Handle<SocketAddr>);
@@ -140,6 +170,7 @@ impl Drop for ShutdownOnDrop {
     }
 }
 
+mod bootstrap;
 pub mod configuration;
 use configuration::{Configuration, Environment};
 
@@ -149,12 +180,18 @@ pub struct PreparedServer {
     configuration: Configuration,
     store: Store,
     secret: Option<ClientSecret>,
-    tls: RustlsConfig,
+    tls: Option<RustlsConfig>,
     hostname: String,
     configuration_source: Arc<configuration::ConfigurationService>,
 }
 
 impl PreparedServer {
+    /// No configuration selects only the explicit loopback single-user mode.
+    /// An explicitly supplied configuration never falls back after an error.
+    pub fn local() -> Result<Self> {
+        bootstrap::prepare()
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let (configuration_source, configuration, hostname) =
             configuration::ConfigurationService::load(path)?;
@@ -185,6 +222,13 @@ impl PreparedServer {
     }
 
     async fn prepare(self) -> Result<Host> {
+        self.prepare_with_certificate_guard(None).await
+    }
+
+    async fn prepare_with_certificate_guard(
+        self,
+        previous: Option<Arc<crate::infrastructure::certificates::HostGuard>>,
+    ) -> Result<Host> {
         let Self {
             configuration,
             store,
@@ -193,8 +237,31 @@ impl PreparedServer {
             hostname,
             configuration_source,
         } = self;
+        let certificate_guard = if configuration.tls_mode
+            == crate::domain::certificates::TlsMode::AzureDns
+            && tls.is_some()
+        {
+            let path = configuration
+                .managed_tls
+                .as_ref()
+                .ok_or(Error::Internal("managed TLS configuration is missing"))?
+                .state_directory
+                .clone();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    crate::infrastructure::certificates::HostGuard::acquire(&path, previous)
+                })
+                .await
+                .map_err(|_| Error::Internal("certificate host gate task failed"))??,
+            )
+        } else {
+            None
+        };
         let cache = store.cache();
         let mut api = match configuration.environment {
+            Environment::SingleUser => {
+                Api::single_user(&configuration.origin, store, configuration.services.clone())?
+            }
             Environment::Development => Api::development_with_services(
                 &configuration.origin,
                 store,
@@ -260,22 +327,37 @@ impl PreparedServer {
             tls,
             hostname,
             source: configuration_source,
+            certificate_guard,
         })
     }
 
     pub async fn run(self) -> Result<()> {
-        let (sender, mut reloads) = tokio::sync::mpsc::channel(1);
+        let (sender, reloads) = tokio::sync::mpsc::channel(1);
         self.configuration_source.attach_reload(sender)?;
-        let mut host = self.prepare().await?;
+        let host = self.prepare().await?;
+        let mut renewals = renewal_owner(&host).await?;
+        let result = Self::run_host(host, reloads, &mut renewals).await;
+        if let Some(owner) = &mut renewals {
+            owner.drain().await?;
+        }
+        result
+    }
+
+    async fn run_host(
+        mut host: Host,
+        mut reloads: tokio::sync::mpsc::Receiver<String>,
+        renewals: &mut Option<crate::infrastructure::certificates::RenewalOwner>,
+    ) -> Result<()> {
         let mut listener = TcpListener::bind(host.configuration.listen)?;
         let (mut handle, mut serving) = host.start(&listener).await?;
         let mut shutdown = ShutdownOnDrop(handle.clone());
         eprintln!(
             "{} API preview listening on {}",
-            if matches!(host.configuration.environment, Environment::Development) {
-                "WARNING: development _anonymous (authentication disabled)"
-            } else {
-                "Authenticated production"
+            match host.configuration.environment {
+                Environment::Development =>
+                    "WARNING: development _anonymous (authentication disabled)",
+                Environment::SingleUser => "Single-user _anonymous HTTP (loopback only)",
+                Environment::Production => "Authenticated production",
             },
             host.configuration.listen,
         );
@@ -298,6 +380,10 @@ impl PreparedServer {
                 Event::Stop(result) => break result,
                 Event::Reload(revision) => revision,
             };
+            if let Some(owner) = renewals {
+                owner.drain().await?;
+            }
+            *renewals = None;
             let prepared = tokio::time::timeout(
                 Duration::from_secs(30),
                 host.replacement(&revision, &listener),
@@ -311,6 +397,12 @@ impl PreparedServer {
                         revision,
                         Err(Error::Internal("reload preparation failed")),
                     )?;
+                    match renewal_owner(&host).await {
+                        Ok(owner) => *renewals = owner,
+                        Err(_) => eprintln!(
+                            "Certificate renewal could not restart after rejected reload; the previous listener remains active. Stop the API before local recovery."
+                        ),
+                    }
                     continue;
                 }
             };
@@ -329,7 +421,13 @@ impl PreparedServer {
                 .await
                 .unwrap_or(Err(Error::Internal("API activation revision task failed")));
             let started = match verified {
-                Ok(()) => candidate.start(&candidate_listener).await,
+                Ok(()) => match renewal_owner(&candidate).await {
+                    Ok(owner) => {
+                        *renewals = owner;
+                        candidate.start(&candidate_listener).await
+                    }
+                    Err(error) => Err(error),
+                },
                 Err(error) => Err(error),
             };
             match started {
@@ -343,17 +441,23 @@ impl PreparedServer {
                     eprintln!("API configuration reload activated");
                 }
                 Err(_) => {
+                    if let Some(owner) = renewals {
+                        owner.drain().await?;
+                    }
+                    *renewals = None;
                     eprintln!("API reload handover failed; restoring the previous host");
                     let source = host.source.clone();
                     let configuration = host.configuration.clone();
                     let hostname = host.hostname.clone();
+                    let previous_guard = host.certificate_guard.clone();
                     host = tokio::task::spawn_blocking(move || {
                         Self::from_source(source, configuration, hostname)
                     })
                     .await
                     .map_err(|_| Error::Internal("API restoration task failed"))??
-                    .prepare()
+                    .prepare_with_certificate_guard(previous_guard)
                     .await?;
+                    *renewals = renewal_owner(&host).await?;
                     (handle, serving) = host.start(&listener).await?;
                     shutdown.0 = handle.clone();
                     host.source
@@ -372,9 +476,10 @@ impl PreparedServer {
 struct Host {
     configuration: Configuration,
     api: Api,
-    tls: RustlsConfig,
+    tls: Option<RustlsConfig>,
     hostname: String,
     source: Arc<configuration::ConfigurationService>,
+    certificate_guard: Option<Arc<crate::infrastructure::certificates::HostGuard>>,
 }
 
 type ListenerTask = tokio::task::JoinHandle<io::Result<()>>;
@@ -390,10 +495,12 @@ impl Host {
         let serving_handle = handle.clone();
         let tls = self.tls.clone();
         let router = self.api.router();
-        let mut serving =
-            tokio::spawn(
-                async move { serve_listener(listener, tls, router, serving_handle).await },
-            );
+        let mut serving = tokio::spawn(async move {
+            match tls {
+                Some(tls) => serve_listener(listener, tls, router, serving_handle).await,
+                None => serve_plain_listener(listener, router, serving_handle).await,
+            }
+        });
         tokio::select! {
             ready = handle.listening() => {
                 if ready.is_none() {
@@ -435,7 +542,9 @@ impl Host {
         })
         .await
         .map_err(|_| Error::Internal("API reload preparation task failed"))??;
-        let candidate = prepared.prepare().await?;
+        let candidate = prepared
+            .prepare_with_certificate_guard(self.certificate_guard.clone())
+            .await?;
         let listener = if candidate.configuration.listen == self.configuration.listen {
             listener.try_clone()?
         } else {
@@ -475,16 +584,36 @@ pub(crate) async fn shutdown_signal() -> io::Result<()> {
     }
 }
 
-fn load_tls(configuration: &Configuration, hostname: &str) -> Result<RustlsConfig> {
-    let (certificate, key) = tls_material(configuration)?;
-    tls::configuration(hostname, &certificate, &key)
-}
-
 fn tls_material(configuration: &Configuration) -> Result<(Vec<u8>, Vec<u8>)> {
     configuration::ConfigurationService::tls_material(configuration)
 }
 
-async fn watch_tls(configuration: Configuration, hostname: String, active: RustlsConfig) {
+fn load_tls(configuration: &Configuration, hostname: &str) -> Result<RustlsConfig> {
+    if configuration.tls_mode == crate::domain::certificates::TlsMode::AzureDns {
+        let managed = configuration
+            .managed_tls
+            .as_ref()
+            .ok_or_else(|| Error::InvalidInput("managed TLS configuration is missing".into()))?;
+        return crate::infrastructure::certificates::state::StateStore::load_active(
+            &managed.state_directory,
+            &managed.binding(hostname)?,
+            hostname,
+        )
+        .map(|(_, _, configuration)| configuration);
+    }
+    let (certificate, key) = tls_material(configuration)?;
+    tls::configuration(hostname, &certificate, &key)
+}
+
+async fn watch_tls(configuration: Configuration, hostname: String, active: Option<RustlsConfig>) {
+    if configuration.tls_mode == crate::domain::certificates::TlsMode::AzureDns {
+        std::future::pending::<()>().await;
+        return;
+    }
+    let Some(active) = active else {
+        std::future::pending::<()>().await;
+        return;
+    };
     let configuration = Arc::new(configuration);
     let mut timer = tokio::time::interval(Duration::from_secs(60));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -507,10 +636,105 @@ async fn watch_tls(configuration: Configuration, hostname: String, active: Rustl
     }
 }
 
+async fn renewal_owner(
+    host: &Host,
+) -> Result<Option<crate::infrastructure::certificates::RenewalOwner>> {
+    let Some(tls) = host.tls.clone() else {
+        return Ok(None);
+    };
+    if host.configuration.tls_mode != crate::domain::certificates::TlsMode::AzureDns {
+        return Ok(None);
+    }
+    let managed = host
+        .configuration
+        .managed_tls
+        .clone()
+        .ok_or(Error::Internal("managed TLS configuration is missing"))?;
+    let hostname = host.hostname.clone();
+    let database = host.configuration.database.clone();
+    let selection = host.source.certificate_selection();
+    let recovery = host.source.certificate_recovery();
+    let runtime_recovery = recovery.clone();
+    let started = tokio::task::spawn_blocking(move || {
+        crate::infrastructure::certificates::RenewalOwner::start(
+            managed, hostname, database, tls, selection, recovery,
+        )
+    })
+    .await
+    .map_err(|_| Error::Internal("certificate owner start task failed"));
+    match started {
+        Ok(Ok(owner)) => Ok(Some(owner)),
+        Ok(Err(error)) | Err(error) => {
+            runtime_recovery.store(true, std::sync::atomic::Ordering::Release);
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum_server::accept::DefaultAcceptor;
+
+    #[tokio::test]
+    async fn single_user_http_serves_guarded_anonymous_api_without_tls()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
+        let store = Store::open(&directory.path().join("state.db"))?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let origin = format!("http://{}", listener.local_addr()?);
+        let api = Api::single_user(&origin, store, Default::default())?;
+        let handle = axum_server::Handle::new();
+        let serving_handle = handle.clone();
+        let serving = tokio::spawn(serve_plain_listener(listener, api.router(), serving_handle));
+        assert!(handle.listening().await.is_some());
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        let response = client.get(format!("{origin}/api/session")).send().await?;
+        assert!(response.status().is_success());
+        assert!(!response.headers().contains_key("strict-transport-security"));
+        assert!(!response.headers().contains_key("set-cookie"));
+        let body: serde_json::Value = response.json().await?;
+        assert!(body.to_string().contains("_anonymous"));
+        let rejected = client
+            .get(format!("{origin}/api/session"))
+            .header("Origin", "http://other.invalid")
+            .send()
+            .await?;
+        assert_eq!(rejected.status(), 403);
+        let rejected = client
+            .get(format!("{origin}/api/session"))
+            .header("Host", "other.invalid")
+            .send()
+            .await?;
+        assert_eq!(rejected.status(), 421);
+        let rejected = client
+            .post(format!("{origin}/api/jobs"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await?;
+        assert_eq!(rejected.status(), 403);
+        handle.shutdown();
+        serving.await??;
+        Ok(())
+    }
+
+    #[test]
+    fn single_user_http_cannot_be_selected_by_missing_production_credentials()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
+        let file = directory.path().join("service.json");
+        let database = directory.path().join("state.db");
+        Store::open(&database)?;
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!({
+                "database":database, "origin":"http://127.0.0.1:8080", "listen":"127.0.0.1:8080"
+            }))?,
+        )?;
+        assert!(PreparedServer::load(&file).is_err());
+        assert!(PreparedServer::load(&directory.path().join("absent.json")).is_err());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn connection_permits_cover_the_complete_stream_lifetime() -> io::Result<()> {

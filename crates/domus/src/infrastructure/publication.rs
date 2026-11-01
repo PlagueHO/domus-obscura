@@ -13,8 +13,6 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-#[cfg(windows)]
-use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -1118,29 +1116,7 @@ fn verify_replacement(directory: &Dir, files: &[ReplacementFile]) -> Result<()> 
 }
 
 fn rename_no_replace(directory: &Dir, from: &str, to: &str) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let directory = directory.try_clone()?.into_std_file();
-        rustix::fs::renameat_with(
-            &directory,
-            from,
-            &directory,
-            to,
-            rustix::fs::RenameFlags::NOREPLACE,
-        )
-        .map_err(std::io::Error::from)?;
-    }
-    #[cfg(windows)]
-    {
-        let directory = fence_windows::DirectoryHandle::from_directory_file(
-            directory.try_clone()?.into_std_file(),
-        )
-        .map_err(std::io::Error::other)?;
-        directory
-            .rename_child_noreplace(OsStr::new(from), OsStr::new(to))
-            .map_err(std::io::Error::other)?;
-    }
-    Ok(())
+    super::filesystem::rename_no_replace(directory, from, to)
 }
 
 fn verify(
