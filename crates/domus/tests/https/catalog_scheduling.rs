@@ -110,19 +110,41 @@ async fn catalog_capacity_and_cancelled_waits_never_submit_network_requests() ->
         let router = router.clone();
         let cookie = cookie.clone();
         work.push(tokio::spawn(async move {
-            api_request(&router, "GET", &path, Some(&cookie), None, None)
-                .await
-                .map_err(|error| error.to_string())
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let response = api_request(&router, "GET", &path, Some(&cookie), None, None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let status = response.status();
+                let body = json_body(response)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                // Cache lookup has its own capacity; reach the provider lane before checking it.
+                if status == StatusCode::SERVICE_UNAVAILABLE
+                    && body["error"] == "database is busy; retry later"
+                    && Instant::now() < deadline
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+                return Ok::<_, String>((status, body));
+            }
         }));
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // The held owner blocks admission; requests beyond the four waiting slots must finish.
+    while work.iter().filter(|task| task.is_finished()).count() < work.len() - 4 {
+        if Instant::now() >= deadline {
+            return Err("catalog requests did not reach capacity".into());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let mut saturated = 0;
     let mut waiting = Vec::new();
     for task in work {
         if task.is_finished() {
-            let response = task.await?.map_err(std::io::Error::other)?;
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-            let body = json_body(response).await?;
+            let (status, body) = task.await?.map_err(std::io::Error::other)?;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
             if body["provider_state"] == "saturated" {
                 saturated += 1;
             }
