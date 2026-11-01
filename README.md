@@ -58,7 +58,7 @@ approval, recovery and external-service rules.
 
 An experimental one-shot acquisition worker can process an already-selected,
 approved source through private normalization and new-only publication. The
-connected React application in `frontend/app` uses the guarded HTTPS API for
+connected React application in `frontend/app` uses the guarded API for
 discovery, approvals, local acquisition and saved decisions. It is a partial
 implementation of the approved [UI study](docs/ui-poc/README.md), not a replacement
 design. Its Orbit navigation, Home queue, shared status pills, fixed-size media
@@ -67,6 +67,33 @@ shared components. Browser answers and safe recovery remain separate actions.
 Atomic album publication, replacement/restore management, automated source
 selection, native worker service supervision, the remaining UI port,
 native services and production packages remain incomplete.
+
+## Single-user launch without cloud setup
+
+Run `domus serve` without a configuration argument. Open
+`http://127.0.0.1:8080`. This starts the real browser application with the fixed
+`_anonymous` identity. It needs no Azure, DNS, certificate, Entra registration,
+Node.js or infrastructure tool at runtime.
+
+The release executable requires built browser files in a sibling `browser`
+directory. Debug builds use `frontend/dist-app` when packaged files are absent.
+Build these files with `pnpm --dir frontend build:app`. Missing browser files
+and an occupied port are errors, not an API-only fallback.
+
+First launch creates private `DomusObscura` state below `LOCALAPPDATA` on Windows
+or `XDG_DATA_HOME` on Linux. Linux falls back to `$HOME/.local/share`.
+Later launches reuse `service.json` and `state.db`. Existing configuration and
+interrupted `.service.json.pending` files are not replaced automatically.
+Provider services are disabled and system settings are read-only by default.
+Configure local roots and optional services separately through the existing
+operator commands. No media operation is approved by starting the app.
+
+Anonymous HTTP accepts only direct loopback peers. Exact Host, Origin and
+`x-domus-csrf` checks and connection/parser limits remain active. It does not
+set an OAuth cookie or HSTS. `domus serve <absolute-configuration-file>` and
+`api-preview <absolute-configuration-file>` use the specified configuration.
+Missing credentials, invalid TLS or a failed secure startup never select
+anonymous HTTP.
 
 ## Indexed Library
 
@@ -1456,6 +1483,10 @@ This software is based in part on the work of the Independent JPEG Group. Includ
 
 Windows builds use a minimal local patch of `file-id` 0.2.3. It exposes the existing full-resolution query through a borrowed file handle instead of reopening a path. The source, verified archive digest, upstream revision and patch description are in `third_party\file-id-0.2.3`. Include its unmodified `LICENSE-MIT` and `LICENSE-APACHE` with Windows binary distributions. Application code contains no unsafe blocks.
 
+The certificate dependencies have separate [distribution notices](third_party/certificate-dependencies/NOTICES.txt).
+Include these notices and their license files with binary distributions.
+The public TLS trust-root data uses CDLA-Permissive-2.0, not the application's license.
+
 On Windows:
 
 ```powershell
@@ -1768,7 +1799,150 @@ Use absolute Linux paths on Linux. Secret and private-key files must have owner-
 .\target\debug\domus.exe api-preview C:\ProgramData\DomusObscura\service.local.json
 ```
 
-Startup validates configuration and TLS before binding. Production also requires successful trusted Entra discovery. TLS loading checks the key pair, certificate chain, hostname, and current validity. HTTPS clients independently check certificate trust. TLS files are checked again every minute. Invalid replacement material is rejected without activating it. Reload failures are reported to stderr. This is manual certificate loading, not ACME automation.
+Startup validates configuration and TLS before binding. Production also requires successful trusted Entra discovery. TLS loading checks the key pair, certificate chain, hostname, and current validity. HTTPS clients independently check certificate trust. In manual mode, TLS files are checked again every minute. Invalid replacement material is rejected without activating it. Reload failures are reported to stderr. Omitted `tls_mode` keeps manual mode.
+
+### Optional Azure DNS certificates
+
+Anonymous single-user HTTP needs none of this setup. Managed HTTPS is explicit.
+Use one exact hostname in an existing Azure DNS zone. A DDNS CNAME target is not
+a certificate identifier. Do not put a CNAME on its DNS-01 challenge name.
+Keep manual TLS available by setting `"tls_mode": "manual"`.
+
+Use a separate DNS service principal and a separate private client-secret file.
+Do not reuse the Entra browser application's secret. The DNS principal needs
+only TXT read and write access on the exact challenge record. Optional pinned
+Bicep setup is in [infra](infra/README.md). Normal deployment does not create
+passwords or initialize DNS records.
+
+Add this section to an explicit HTTPS configuration:
+
+```json
+{
+  "tls_mode": "azure_dns",
+  "managed_tls": {
+    "environment": "production",
+    "state_directory": "C:\\ProgramData\\DomusCertificates\\media",
+    "terms_of_service_agreed": true,
+    "dns": {
+      "tenant_id": "<dns-tenant-uuid>",
+      "client_id": "<dns-client-uuid>",
+      "client_secret_file": "C:\\ProgramData\\DomusObscura\\dns-secret.txt",
+      "subscription_id": "<subscription-uuid>",
+      "resource_group": "<existing-dns-resource-group>",
+      "zone": "example.com"
+    }
+  }
+}
+```
+
+Set the service `origin` to its exact hostname, such as
+`https://media.example.com:8443`. Review the
+[Let's Encrypt subscriber agreement](https://letsencrypt.org/repository/)
+before setting `terms_of_service_agreed` to `true`. Use `"environment": "staging"`
+inside `managed_tls` for ACME tests. A staging generation cannot activate HTTPS.
+Use separate private state directories for staging and production.
+
+The final state directory must not exist before first initialization. Its
+private parent must exist. Keep state outside Git, SQLite, configuration,
+credentials, browser assets, media, staging and cache roots. Initialization
+records its native identity in the current-schema database. Copied journals and
+owner markers cannot bind another root.
+
+Stop the API before local issuance or recovery. These commands do not start a
+listener or change machine certificate trust:
+
+```powershell
+.\target\debug\domus.exe certificate-status C:\ProgramData\DomusObscura\service.local.json
+.\target\debug\domus.exe certificate-bootstrap C:\ProgramData\DomusObscura\service.local.json
+```
+
+Status is passive. Bootstrap contacts ACME and Azure DNS and can change the
+challenge TXT record. Get separate approval before live issuance. The command
+saves each account key, order intent, DNS intent and CSR before submission.
+It checks the exact TXT value at every Azure DNS authority before validation.
+It removes only the value covered by its conditional write receipt. Unrelated
+TXT values, TTL and metadata remain unchanged.
+
+A running managed host owns renewal. Renewal timing uses ACME renewal information
+when available and a lifetime-based deadline as a backstop. It saves the selected
+time and initial advice with the immutable generation. Publication and recovery
+retain this advice before the candidate becomes active. Renewal refreshes advice
+after the saved CA hint. An unchanged window retains
+the selected time. Refresh never rewrites an immutable certificate generation.
+Unsupported advice is recorded explicitly and uses the lifetime schedule.
+A retry or refresh interval survives restart; restart waits the whole saved interval.
+One attempt permits at most eight timed retries. An unsupported delay or
+uncertain ownership pauses work. A complete, independently validated production
+generation is selected atomically. A failed cleanup keeps the certificate and
+its cleanup evidence. Browser status shows only fresh status for the exact active
+configuration revision and confirmed live generation, native root and exact
+generation bytes. A committed selection
+that differs from the live listener requires local recovery; it is not shown as
+active. Local status can inspect committed selection but cannot prove live
+activation. Saving settings does not initialize state or issue a certificate.
+
+Confirmed credential failures before DNS submission and definitive rejected
+updates retain no uncertain write intent. They still pause for explicit recovery.
+A lost or incomplete PUT result retains its intent and never grants ownership.
+Successful responses also preserve supported polling backoff.
+
+Use explicit recovery after inspection. Recovery keeps exact private journal
+evidence. It does not grant permission to create a replacement order:
+
+```powershell
+.\target\debug\domus.exe certificate-recover C:\ProgramData\DomusObscura\service.local.json resume
+.\target\debug\domus.exe certificate-recover C:\ProgramData\DomusObscura\service.local.json pending
+.\target\debug\domus.exe certificate-recover C:\ProgramData\DomusObscura\service.local.json bindings
+```
+
+`resume` retains the saved phase, order, CSR and key. It rejects an unresolved DNS
+intent or a lost new-order URL. `pending` accepts only a complete, native-bound
+pending journal and retains both journal versions. Keep an incomplete pending
+file for manual recovery. Do not delete it or reset uncertain work.
+`bindings` permits credential rotation for pending work only when its frozen
+hostname, ACME environment, Azure tenant, client and exact DNS resource remain
+unchanged. It keeps all saved intents and receipts and does not resume paused
+work. A resource change requires completed work. Older journals without a
+frozen resource policy also require completed work before rotation.
+
+For `certificate-recover ... order <verified-order-url>`, obtain the original
+order URL independently. Recovery checks its account, fixed ACME authority and
+exact hostname. It never creates another order. For
+`certificate-recover ... write <verified-write-etag>`, supply the ETag from an
+independently verified successful write receipt. Recovery also requires the
+entire current TXT body to match the saved intent. A matching TXT value alone
+does not prove ownership. `certificate-recover ... cleanup` verifies the complete
+saved cleanup result before clearing its pending receipt. These observations
+contact the selected service. They require approval for live recovery.
+Run bootstrap separately after recovery to continue the saved work.
+
+`certificate-recover ... archive` compacts inactive generation history while work
+is complete or explicitly paused.
+It keeps the latest four generations and any selected generation. A private,
+hash-linked archive keeps their exact references. Certificate files remain
+unchanged. No generation is deleted. Use this explicit operation before the
+64-entry current-history limit prevents another publication.
+
+`certificate-recover ... generation` checks a retained complete generation
+against the certificate from the original valid order and the saved private key.
+It preserves partial, different and unknown files. For a failed order,
+`certificate-recover ... cleanup-owned` removes only a value with a successful
+owned-write receipt. A changed ETag requires
+`certificate-recover ... receipt <operator-confirmed-current-etag>` first.
+This confirmation retains the original receipt evidence and requires the exact
+owned entry to remain unique. It is an explicit ownership decision, not automatic
+adoption of a matching TXT value.
+
+`certificate-recover ... restart` requires a fresh observation that the original
+order is invalid. It also requires completed DNS cleanup. It preserves the failed
+attempt before preparing new work. A lost order URL or an uncertain DNS intent
+cannot use this command. Run bootstrap separately to create the new order.
+
+Stop and drain the API before backup. Back up the private state directory,
+database, configuration and separate credential files together. Protect backups
+as private keys. Do not copy a backup to another root and assume it is bound.
+Restore the original root and native binding, or use a new state directory and
+explicit bootstrap. Never delete unknown generation files as automatic cleanup.
 
 The listener permits at most 64 complete connections, including handshakes and idle connections. TLS and HTTP-header timeouts are ten seconds. Header count is limited to 64. The HTTP parser buffer is limited to 32 KiB. Application headers are limited to 16 KiB and URLs to 8 KiB. Application requests are limited to 32 concurrent operations and 25 seconds. Database work uses at most four admitted blocking tasks and one short-held store lock. The JSON body limit is 2 MiB; settings requests have a 16 KiB limit.
 

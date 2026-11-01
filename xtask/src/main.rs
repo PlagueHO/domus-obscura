@@ -88,12 +88,12 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         Some("contracts") => contracts(false),
         Some("local-test") => {
             toolchains()?;
-            pnpm(&["--filter", "@domus/frontend", "build:local-test"])?;
+            pnpm(&["--dir", "frontend", "run", "build:local-test"])?;
             cargo(&["run", "--locked", "--package", "domus", "--example", "local_test"])
         }
         Some("local-test-build") => {
             toolchains()?;
-            pnpm(&["--filter", "@domus/frontend", "build:local-test"])?;
+            pnpm(&["--dir", "frontend", "run", "build:local-test"])?;
             cargo(&["build", "--locked", "--package", "domus", "--example", "local_test"])
         }
         Some("fmt") => {
@@ -116,7 +116,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             cargo(&["test", "--locked", "--workspace"])?;
             cargo(&["test", "--locked", "--package", "domus", "--example", "local_test"])?;
             pnpm(&["format:check"])?;
-            pnpm(&["--filter", "@domus/frontend", "check"])?;
+            pnpm(&["--dir", "frontend", "run", "check"])?;
             Ok(())
         }
         Some("test") => {
@@ -127,8 +127,8 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         Some("build") => {
             toolchains()?;
             contracts(true)?;
-            pnpm(&["--filter", "@domus/frontend", "build"])?;
-            pnpm(&["--filter", "@domus/frontend", "build:app"])?;
+            pnpm(&["--dir", "frontend", "run", "build"])?;
+            pnpm(&["--dir", "frontend", "run", "build:app"])?;
             cargo(&["build", "--locked", "--package", "domus"])
         }
         Some("smoke") => cargo(&[

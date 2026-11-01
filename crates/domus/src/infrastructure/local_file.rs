@@ -19,6 +19,24 @@ impl Drop for ProcessLock {
 }
 
 impl ProcessLock {
+    /// Verify that the pathname still names the locked object. Replacing a
+    /// stable lock file must not create a second owner for the same operation.
+    pub(crate) fn verify(&self, database: &Path, purpose: &str) -> Result<()> {
+        let directory = LibraryDirectory::open(
+            database
+                .parent()
+                .ok_or(Error::Internal("process lock parent is missing"))?,
+        )?;
+        let name = format!(".domus-{purpose}.lock");
+        let current = directory.open_file(std::ffi::OsStr::new(&name))?;
+        if super::filesystem::native_file_identity(&current)?
+            != super::filesystem::native_file_identity(&self._file)?
+        {
+            return Err(Error::Conflict("process lock identity changed".into()));
+        }
+        Ok(())
+    }
+
     pub(crate) fn acquire(database: &Path, purpose: &str) -> Result<Self> {
         Self::acquire_mode(database, purpose, false)
     }
@@ -92,13 +110,18 @@ impl ProcessLock {
     }
 }
 
-pub(crate) fn read_local(path: &Path, maximum: u64, sensitive: bool) -> Result<Vec<u8>> {
-    if !path.is_absolute() {
-        return Err(Error::InvalidInput(
-            "service file paths must be absolute".into(),
-        ));
-    }
+pub(crate) fn validate_reference(path: &Path) -> Result<()> {
     require_local_disk(path)?;
+    if !path.is_absolute() || path.components().any(|component| {
+        matches!(component, std::path::Component::Normal(name) if name.to_str().is_none_or(|name| name.contains(':') || name.chars().any(char::is_control)))
+    }) {
+        return Err(Error::InvalidInput("service references require absolute local paths without alternate streams".into()));
+    }
+    Ok(())
+}
+
+pub(crate) fn read_local(path: &Path, maximum: u64, sensitive: bool) -> Result<Vec<u8>> {
+    validate_reference(path)?;
     let parent = path
         .parent()
         .ok_or_else(|| Error::InvalidInput("service file parent is missing".into()))?;

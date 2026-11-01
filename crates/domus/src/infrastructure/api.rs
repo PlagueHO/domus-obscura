@@ -60,6 +60,7 @@ struct Shared {
     login_times: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
     origin: String,
     authority: String,
+    plain_http: bool,
 }
 
 #[derive(Debug)]
@@ -142,6 +143,23 @@ impl From<Error> for ApiError {
             Error::Remote(message) => {
                 eprintln!("{message}");
                 Self::new(StatusCode::BAD_GATEWAY, "remote service is unavailable")
+            }
+            Error::CertificateNoDnsEffect(error) => Self::from(*error),
+            Error::CertificateDnsConflict => Self::new(
+                StatusCode::CONFLICT,
+                "Azure DNS conditional update conflicted",
+            ),
+            Error::Certificate {
+                reason,
+                retry_after_seconds,
+            } => {
+                eprintln!("{reason}");
+                Self(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    reason.into(),
+                    retry_after_seconds,
+                    None,
+                )
             }
             Error::Catalog {
                 reason,
@@ -230,6 +248,7 @@ impl Api {
             Some(broker),
             MusicBrainzClient::new()?,
             configuration,
+            false,
         )
     }
 
@@ -244,6 +263,24 @@ impl Api {
             None,
             MusicBrainzClient::new()?,
             configuration,
+            false,
+        )
+    }
+
+    /// Explicit single-user composition. HTTP is permitted only on loopback;
+    /// a missing or failed Entra broker never selects this entry point.
+    pub fn single_user(
+        origin: &str,
+        store: Store,
+        configuration: crate::application::services::ServiceConfiguration,
+    ) -> Result<Self> {
+        Self::build_services(
+            origin,
+            store,
+            None,
+            MusicBrainzClient::new()?,
+            configuration,
+            true,
         )
     }
 
@@ -253,7 +290,7 @@ impl Api {
         broker: Option<EntraBroker>,
         catalog: MusicBrainzClient,
     ) -> Result<Self> {
-        Self::build_services(origin, store, broker, catalog, Default::default())
+        Self::build_services(origin, store, broker, catalog, Default::default(), false)
     }
 
     fn build_services(
@@ -262,10 +299,11 @@ impl Api {
         broker: Option<EntraBroker>,
         catalog: MusicBrainzClient,
         configuration: crate::application::services::ServiceConfiguration,
+        plain_http: bool,
     ) -> Result<Self> {
         let url = reqwest::Url::parse(origin)
             .map_err(|_| Error::InvalidInput("public origin is invalid".into()))?;
-        if url.scheme() != "https"
+        if url.scheme() != if plain_http { "http" } else { "https" }
             || url.host_str().is_none()
             || !url.username().is_empty()
             || url.password().is_some()
@@ -275,6 +313,11 @@ impl Api {
         {
             return Err(Error::InvalidInput(
                 "API origin must be HTTPS without a path, credentials, query or fragment".into(),
+            ));
+        }
+        if plain_http && (broker.is_some() || !Self::development_origin(&url)) {
+            return Err(Error::InvalidInput(
+                "single-user HTTP requires a loopback origin without Entra".into(),
             ));
         }
         if broker
@@ -292,8 +335,9 @@ impl Api {
         }
         let origin = url.origin().ascii_serialization();
         let authority = origin
-            .strip_prefix("https://")
-            .ok_or_else(|| Error::InvalidInput("public origin must use HTTPS".into()))?
+            .split_once("://")
+            .map(|(_, authority)| authority)
+            .ok_or_else(|| Error::InvalidInput("API origin has no scheme".into()))?
             .into();
         Ok(Self(Arc::new(Shared {
             browser: None,
@@ -312,6 +356,7 @@ impl Api {
             login_times: Mutex::new(HashMap::new()),
             origin,
             authority,
+            plain_http,
         })))
     }
 
@@ -441,6 +486,7 @@ impl Api {
             )
             .route("/api/system/settings-policy", get(settings_policy))
             .route("/api/system/configuration", get(backend_configuration))
+            .route("/api/system/certificates/status", get(certificate_status))
             .merge(artist_images::routes())
             .route(
                 "/api/system/configuration/validate",
@@ -1074,7 +1120,6 @@ async fn security(State(api): State<Api>, request: Request, next: Next) -> Respo
     let headers = response.headers_mut();
     for (name, value) in [
         ("cache-control", "no-store"),
-        ("strict-transport-security", "max-age=31536000"),
         ("x-content-type-options", "nosniff"),
         ("referrer-policy", "no-referrer"),
         ("x-frame-options", "DENY"),
@@ -1084,6 +1129,12 @@ async fn security(State(api): State<Api>, request: Request, next: Next) -> Respo
         ),
     ] {
         headers.insert(name, HeaderValue::from_static(value));
+    }
+    if !api.0.plain_http {
+        headers.insert(
+            "strict-transport-security",
+            HeaderValue::from_static("max-age=31536000"),
+        );
     }
     response
 }
@@ -1871,6 +1922,17 @@ async fn backend_configuration(
         .await
         .map_err(|_| Error::Internal("backend configuration read task failed"))??;
     Ok(Json(state))
+}
+
+async fn certificate_status(
+    State(api): State<Api>,
+) -> ApiResult<Json<super::server::configuration::BackendCertificateStatus>> {
+    let source = api.configuration_service()?;
+    Ok(Json(
+        tokio::task::spawn_blocking(move || source.certificate_status())
+            .await
+            .map_err(|_| Error::Internal("certificate status task failed"))??,
+    ))
 }
 
 async fn validate_backend_configuration(

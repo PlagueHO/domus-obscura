@@ -2,7 +2,13 @@
 
 This is an explicit local development workflow, not a complete V1 deployment.
 It uses the fixed `_anonymous` identity. It needs no Entra registration.
-Production remains the default and requires Entra. All listeners stay on loopback.
+An explicit configuration defaults to production and requires Entra.
+All listeners stay on loopback.
+
+For the normal application without setup, use `domus serve` without a configuration
+argument. It starts anonymous loopback HTTP without TLS, Azure, DNS or Entra.
+See [normal startup](../README.md#single-user-launch-without-cloud-setup) before using this optional
+developer HTTPS workflow.
 
 The separate [production worker](../README.md#separate-production-worker) uses
 `production_worker`, not this guide's optional `local_acquisition` runtime.

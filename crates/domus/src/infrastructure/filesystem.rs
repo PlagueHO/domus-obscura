@@ -69,6 +69,33 @@ pub(crate) fn sync_directory(directory: &Dir) -> Result<()> {
     Ok(())
 }
 
+/// Publish a new child without replacing a concurrent writer's destination.
+pub(crate) fn rename_no_replace(directory: &Dir, from: &str, to: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let directory = directory.try_clone()?.into_std_file();
+        rustix::fs::renameat_with(
+            &directory,
+            from,
+            &directory,
+            to,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(std::io::Error::from)?;
+    }
+    #[cfg(windows)]
+    {
+        let directory = fence_windows::DirectoryHandle::from_directory_file(
+            directory.try_clone()?.into_std_file(),
+        )
+        .map_err(std::io::Error::other)?;
+        directory
+            .rename_child_noreplace(OsStr::new(from), OsStr::new(to))
+            .map_err(std::io::Error::other)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn is_unsafe_cap_link(metadata: &cap_std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {

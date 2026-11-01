@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 pub mod catalog;
+pub mod certificates;
 mod normalization;
 pub mod services;
 pub mod sharing;

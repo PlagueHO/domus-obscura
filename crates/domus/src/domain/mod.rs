@@ -1,5 +1,6 @@
 mod audio;
 mod catalog;
+pub mod certificates;
 pub(crate) mod identifiers;
 pub(crate) use catalog::credit_text;
 mod jobs;

@@ -34,6 +34,18 @@ pub enum Error {
     Authentication,
     #[error("{0}")]
     Remote(&'static str),
+    /// The DNS adapter confirmed that no mutation occurred. Transport failures
+    /// after submission must never use this variant.
+    #[error("{0}")]
+    CertificateNoDnsEffect(#[source] Box<Error>),
+    #[error("Azure DNS conditional update conflicted")]
+    CertificateDnsConflict,
+    #[error("{reason}")]
+    Certificate {
+        reason: &'static str,
+        /// None requires explicit recovery, not an automatic retry.
+        retry_after_seconds: Option<u32>,
+    },
     #[error("{reason}; {advice}", advice = catalog_retry_advice(*retry_after_seconds))]
     Catalog {
         reason: &'static str,

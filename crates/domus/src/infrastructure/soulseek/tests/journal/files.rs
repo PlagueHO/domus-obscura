@@ -171,8 +171,14 @@ fn wrong_reverse_requests_never_connect_or_reset_the_accepted_transfer() -> Test
         let (listener, address) = listener()?;
         let endpoint = address.address;
         let task = std::thread::spawn(move || -> TestResultSend {
-            let mut control = handshake(listener.try_clone()?)?;
-            accept(&mut control)?;
+            let mut control = handshake(listener.try_clone()?)
+                .map_err(|error| format!("{fault}: control handshake failed: {error}"))?;
+            if fault == "count" {
+                // The bounded loop needs two read passes per notification.
+                control.set_read_timeout(Some(OPERATION_TIMEOUT))?;
+            }
+            accept(&mut control)
+                .map_err(|error| format!("{fault}: upload acceptance failed: {error}"))?;
             if fault == "claim" {
                 Connection::open(database)?
                     .execute("UPDATE jobs SET claim_generation=claim_generation+1", [])?;
@@ -223,7 +229,12 @@ fn wrong_reverse_requests_never_connect_or_reset_the_accepted_transfer() -> Test
                     other => return Err(other.into()),
                 }
             }
-            assert_eq!(control.read(&mut [0; 1])?, 0);
+            assert_eq!(
+                control
+                    .read(&mut [0; 1])
+                    .map_err(|error| format!("{fault}: control closure failed: {error}"))?,
+                0
+            );
             // The listener has never received an F socket.
             listener.set_nonblocking(true)?;
             assert!(
@@ -236,16 +247,25 @@ fn wrong_reverse_requests_never_connect_or_reset_the_accepted_transfer() -> Test
             username: "fixture-user".into(),
         };
         let mut peer = session.connect_address(address)?;
-        assert!(
-            acquire_transfer(
-                &mut fixture.store,
-                &fixture.claim,
-                &staging,
-                fixture.file,
-                &mut peer
-            )
-            .is_err()
+        let result = acquire_transfer(
+            &mut fixture.store,
+            &fixture.claim,
+            &staging,
+            fixture.file,
+            &mut peer,
         );
+        if fault == "count" {
+            assert!(
+                matches!(
+                    &result,
+                    Err(Error::Remote("Soulseek notification rate limit exceeded"))
+                ),
+                "notification burst returned {:?}",
+                result.as_ref().err()
+            );
+        } else {
+            assert!(result.is_err(), "{fault}: invalid request was accepted");
+        }
         assert!(peer.file_connection(17, || Ok(())).is_err());
         drop(peer);
         let transfer = fixture

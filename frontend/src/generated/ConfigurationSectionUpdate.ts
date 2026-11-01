@@ -2,11 +2,13 @@
 import type { BackendAcquisitionWorkerDraft } from "./BackendAcquisitionWorkerDraft";
 import type { BackendCacheConfiguration } from "./BackendCacheConfiguration";
 import type { BackendLocalAcquisitionDraft } from "./BackendLocalAcquisitionDraft";
+import type { BackendManagedTlsDraft } from "./BackendManagedTlsDraft";
 import type { BackendSharingDraft } from "./BackendSharingDraft";
 import type { ConfigurationReplacement } from "./ConfigurationReplacement";
 import type { ServiceConfiguration } from "./ServiceConfiguration";
+import type { TlsMode } from "./TlsMode";
 
 /**
  * Each variant owns a complete section. Omitted sections are never replaced.
  */
-export type ConfigurationSectionUpdate = { "section": "general", environment: string, listen: string, origin: string, browser_assets: string | null, } | { "section": "identity", tenant_id: ConfigurationReplacement, object_id: ConfigurationReplacement, client_id: ConfigurationReplacement, client_secret_file: ConfigurationReplacement, } | { "section": "tls", certificate_file: string, private_key_file: ConfigurationReplacement, } | { "section": "storage", database: string, cache: BackendCacheConfiguration | null, } | { "section": "music_providers", services: ServiceConfiguration, } | { "section": "music_acquisition", local_acquisition: BackendLocalAcquisitionDraft | null, production_worker: BackendAcquisitionWorkerDraft | null, } | { "section": "music_sharing", sharing: BackendSharingDraft | null, };
+export type ConfigurationSectionUpdate = { "section": "general", environment: string, listen: string, origin: string, browser_assets: string | null, } | { "section": "identity", tenant_id: ConfigurationReplacement, object_id: ConfigurationReplacement, client_id: ConfigurationReplacement, client_secret_file: ConfigurationReplacement, } | { "section": "tls", certificate_file: string | null, private_key_file: ConfigurationReplacement, tls_mode: TlsMode, managed_tls: BackendManagedTlsDraft | null, } | { "section": "storage", database: string, cache: BackendCacheConfiguration | null, } | { "section": "music_providers", services: ServiceConfiguration, } | { "section": "music_acquisition", local_acquisition: BackendLocalAcquisitionDraft | null, production_worker: BackendAcquisitionWorkerDraft | null, } | { "section": "music_sharing", sharing: BackendSharingDraft | null, };

@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
+import type { BackendCertificateStatus } from "../src/generated/BackendCertificateStatus";
 import type { BackendConfigurationResult } from "../src/generated/BackendConfigurationResult";
 import type { ConfigurationSection } from "../src/generated/ConfigurationSection";
 import type { ConfigurationReloadState } from "../src/generated/ConfigurationReloadState";
@@ -389,6 +390,13 @@ export function BackendConfiguration({
             <ConfigurationCard title={currentSection?.title ?? "Settings"}>
               <p className="muted">{currentSection?.description}</p>
               {!state && !resource.error && <p role="status">Loading settings…</p>}
+              {state &&
+                fresh &&
+                backendSection === "tls" &&
+                state.active.environment !== "single_user" &&
+                state.active.tls_mode === "azure_dns" && (
+                  <ManagedCertificateStatus revision={state.active_revision} />
+                )}
               {state && backendSection === "music_sharing" && (
                 <>
                   <SharingWorkerStatus revision={state.saved_revision} />
@@ -496,6 +504,58 @@ export function sharingWorkerEvidence(
   return "The worker heartbeat confirms this saved configuration revision. This does not prove that peers can connect or that every folder is available.";
 }
 
+export function ManagedCertificateStatus({ revision }: { revision: string }) {
+  const resource = useResource(
+    (signal) => request<BackendCertificateStatus>("/api/system/certificates/status", { signal }),
+    `managed-certificate:${revision}`,
+    15000,
+  );
+  const fresh =
+    !resource.loading && !resource.error && resource.data?.configuration_revision === revision;
+  const value = fresh ? resource.data?.certificate : undefined;
+  const time = (seconds: number | null) => {
+    if (seconds === null) return "Not recorded";
+    const date = new Date(seconds * 1000);
+    return Number.isSafeInteger(seconds) && !Number.isNaN(date.getTime())
+      ? date.toLocaleString()
+      : "Invalid timestamp. Use local recovery.";
+  };
+  return (
+    <div>
+      <h3>Active certificate status</h3>
+      {!value ? (
+        <p role="status">Certificate status is unknown. Refresh before relying on it.</p>
+      ) : (
+        <>
+          <dl className="properties">
+            <dt>Lifecycle phase</dt>
+            <dd>{value.phase.replaceAll("_", " ")}</dd>
+            <dt>Certificate expiry</dt>
+            <dd>{time(value.expires_at)}</dd>
+            <dt>Renewal time</dt>
+            <dd>{time(value.renew_at)}</dd>
+            <dt>Next attempt</dt>
+            <dd>{time(value.next_attempt)}</dd>
+            <dt>Last success</dt>
+            <dd>{time(value.last_success)}</dd>
+          </dl>
+          {value.expires_at !== null && value.expires_at * 1000 <= Date.now() && (
+            <p role="alert">The active certificate has expired. Use local recovery.</p>
+          )}
+          {value.recovery_required && <p role="alert">Local certificate recovery is required.</p>}
+          {value.cleanup_pending && (
+            <p role="status">DNS cleanup is pending. The recorded certificate is retained.</p>
+          )}
+        </>
+      )}
+      <Alert error={resource.error} />
+      <Button variant="ghost" disabled={resource.loading} onClick={resource.refresh}>
+        Refresh certificate status
+      </Button>
+    </div>
+  );
+}
+
 function SharingWorkerStatus({ revision }: { revision: string }) {
   const status = useResource(
     (signal) => request<LocalStatus>("/api/local/status", { signal }),
@@ -529,23 +589,47 @@ function SectionSummary({
   const rows: [string, ReactNode][] =
     section === "general"
       ? [
-          ["Environment", value.environment],
+          [
+            "Access mode",
+            value.environment === "single_user"
+              ? "Single user · anonymous HTTP"
+              : value.environment === "development"
+                ? "Development · anonymous HTTPS"
+                : "Production · Entra HTTPS",
+          ],
           ["Listen address", value.listen],
           ["Browser origin", value.origin],
           ["Browser assets", value.browser_assets ?? "Not configured"],
         ]
       : section === "identity"
-        ? [
-            ["Entra tenant", configured(value.tenant_id_configured)],
-            ["Authorized Entra object", configured(value.object_id_configured)],
-            ["Entra client", configured(value.client_id_configured)],
-            ["Entra secret file", configured(value.client_secret_file_configured)],
-          ]
-        : section === "tls"
-          ? [
-              ["TLS certificate file", value.certificate_file],
-              ["TLS private-key file", configured(value.private_key_file_configured)],
+        ? value.environment === "single_user"
+          ? [["Authentication", "Disabled. Saved Entra references are inactive."]]
+          : [
+              ["Entra tenant", configured(value.tenant_id_configured)],
+              ["Authorized Entra object", configured(value.object_id_configured)],
+              ["Entra client", configured(value.client_id_configured)],
+              ["Entra secret file", configured(value.client_secret_file_configured)],
             ]
+        : section === "tls"
+          ? value.environment === "single_user"
+            ? [["TLS", "Not enabled. Single-user HTTP needs no certificate or Azure setup."]]
+            : value.tls_mode === "azure_dns"
+              ? [
+                  ["Certificate source", "Let's Encrypt with Azure DNS"],
+                  ["ACME environment", value.managed_tls?.environment ?? "Not configured"],
+                  ["Certificate state", value.managed_tls?.state_directory ?? "Not configured"],
+                  ["Azure DNS zone", value.managed_tls?.zone ?? "Not configured"],
+                  ["DNS tenant", configured(value.managed_tls?.tenant_id_configured ?? false)],
+                  ["DNS client", configured(value.managed_tls?.client_id_configured ?? false)],
+                  [
+                    "DNS secret file",
+                    configured(value.managed_tls?.client_secret_file_configured ?? false),
+                  ],
+                ]
+              : [
+                  ["TLS certificate file", value.certificate_file ?? "Not configured"],
+                  ["TLS private-key file", configured(value.private_key_file_configured)],
+                ]
           : section === "storage"
             ? [
                 ["Local database", value.database],

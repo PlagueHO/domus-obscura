@@ -11,6 +11,11 @@ const USAGE: &str = "Usage:
   domus contracts <output-directory>
   domus init <local-database>
   domus api-preview <absolute-configuration-file>
+  domus serve [absolute-configuration-file]
+  domus certificate-status <absolute-configuration-file>
+  domus certificate-bootstrap <absolute-configuration-file>
+  domus certificate-recover <absolute-configuration-file> <resume|pending|bindings|cleanup|cleanup-owned|archive|generation|restart>
+  domus certificate-recover <absolute-configuration-file> <order|write|receipt> <verified-evidence>
   domus worker <absolute-configuration-file>
   domus worker-once <absolute-configuration-file>
   domus worker-check <absolute-configuration-file>
@@ -59,7 +64,8 @@ const USAGE: &str = "Usage:
   domus scan <local-database> <location-id>
   domus browse <local-database> <location-id> <relative-folder> <after-id> <limit>
 
-Only api-preview opens a listener. It requires HTTPS and loopback binding.
+serve without configuration uses single-user anonymous HTTP on loopback.
+serve with configuration and api-preview never downgrade failed secure configuration.
 Production requires Entra. Explicit development mode uses _anonymous without sign-in.
 The worker and worker-once download only an approved album from an explicitly selected source.
 It requires separate Soulseek credentials and explicit plaintext-login acknowledgement.
@@ -76,6 +82,42 @@ The database must be outside every configured media root.";
 
 fn run(args: &[String]) -> Result<()> {
     match args {
+        [command, configuration, action] if command == "certificate-recover" => {
+            println!(
+                "{}",
+                serde_json::to_string(&domus::infrastructure::certificates::recover(
+                    Path::new(configuration),
+                    action,
+                    None
+                )?)?
+            );
+        }
+        [command, configuration, action, evidence] if command == "certificate-recover" => {
+            println!(
+                "{}",
+                serde_json::to_string(&domus::infrastructure::certificates::recover(
+                    Path::new(configuration),
+                    action,
+                    Some(evidence)
+                )?)?
+            );
+        }
+        [command, configuration] if command == "certificate-bootstrap" => {
+            println!(
+                "{}",
+                serde_json::to_string(&domus::infrastructure::certificates::bootstrap(
+                    Path::new(configuration)
+                )?)?
+            );
+        }
+        [command, configuration] if command == "certificate-status" => {
+            println!(
+                "{}",
+                serde_json::to_string(&domus::infrastructure::certificates::status(Path::new(
+                    configuration
+                ))?)?
+            );
+        }
         [command] if command == "settings-default" => {
             println!("{}", serde_json::to_string(&OutputSettings::default())?);
         }
@@ -220,6 +262,34 @@ fn run(args: &[String]) -> Result<()> {
                 (
                     "BackendCacheConfiguration.ts",
                     domus::infrastructure::server::configuration::BackendCacheConfiguration::export_to_string(&config),
+                ),
+                (
+                    "TlsMode.ts",
+                    domus::domain::certificates::TlsMode::export_to_string(&config),
+                ),
+                (
+                    "AcmeEnvironment.ts",
+                    domus::domain::certificates::AcmeEnvironment::export_to_string(&config),
+                ),
+                (
+                    "BackendManagedTls.ts",
+                    domus::infrastructure::server::configuration::BackendManagedTls::export_to_string(&config),
+                ),
+                (
+                    "BackendManagedTlsDraft.ts",
+                    domus::infrastructure::server::configuration::BackendManagedTlsDraft::export_to_string(&config),
+                ),
+                (
+                    "CertificateStatus.ts",
+                    domus::infrastructure::certificates::state::CertificateStatus::export_to_string(&config),
+                ),
+                (
+                    "BackendCertificateStatus.ts",
+                    domus::infrastructure::server::configuration::BackendCertificateStatus::export_to_string(&config),
+                ),
+                (
+                    "CertificatePhase.ts",
+                    domus::domain::certificates::CertificatePhase::export_to_string(&config),
                 ),
                 (
                     "BackendLocalAcquisition.ts",
@@ -549,7 +619,16 @@ fn run(args: &[String]) -> Result<()> {
             Store::open(Path::new(database))?;
             println!("Database initialized.");
         }
-        [command, configuration] if command == "api-preview" => {
+        [command] if command == "serve" => {
+            let prepared = domus::infrastructure::server::PreparedServer::local()?;
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .max_blocking_threads(4)
+                .enable_all()
+                .build()?
+                .block_on(prepared.run())?;
+        }
+        [command, configuration] if matches!(command.as_str(), "api-preview" | "serve") => {
             let prepared =
                 domus::infrastructure::server::PreparedServer::load(Path::new(configuration))?;
             tokio::runtime::Builder::new_multi_thread()

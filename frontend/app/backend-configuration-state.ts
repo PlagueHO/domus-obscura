@@ -4,6 +4,21 @@ import type { BackendConfigurationState } from "../src/generated/BackendConfigur
 import type { ConfigurationSection } from "../src/generated/ConfigurationSection";
 import type { ConfigurationSectionUpdate } from "../src/generated/ConfigurationSectionUpdate";
 import type { BackendSharingDraft } from "../src/generated/BackendSharingDraft";
+import type { BackendManagedTlsDraft } from "../src/generated/BackendManagedTlsDraft";
+
+export function newManagedTlsDraft(): BackendManagedTlsDraft {
+  return {
+    environment: "staging",
+    state_directory: "",
+    tenant_id: { action: "keep" },
+    client_id: { action: "keep" },
+    client_secret_file: { action: "keep" },
+    subscription_id: "",
+    resource_group: "",
+    zone: "",
+    terms_of_service_agreed: false,
+  };
+}
 
 export function newSharingDraft(): BackendSharingDraft {
   return {
@@ -89,7 +104,7 @@ export const configurationSections = [
 const sectionFields = {
   general: ["environment", "listen", "origin", "browser_assets"],
   identity: ["tenant_id", "object_id", "client_id", "client_secret_file"],
-  tls: ["certificate_file", "private_key_file"],
+  tls: ["certificate_file", "private_key_file", "tls_mode", "managed_tls"],
   storage: ["database", "cache"],
   music_providers: ["services"],
   music_acquisition: ["local_acquisition", "production_worker"],
@@ -120,6 +135,20 @@ export function beginConfigurationEdit(state: BackendConfigurationState): Config
     client_secret_file: { action: "keep" },
     certificate_file: value.certificate_file,
     private_key_file: { action: "keep" },
+    tls_mode: value.tls_mode,
+    managed_tls: value.managed_tls
+      ? {
+          environment: value.managed_tls.environment,
+          state_directory: value.managed_tls.state_directory,
+          tenant_id: { action: "keep" },
+          client_id: { action: "keep" },
+          client_secret_file: { action: "keep" },
+          subscription_id: value.managed_tls.subscription_id,
+          resource_group: value.managed_tls.resource_group,
+          zone: value.managed_tls.zone,
+          terms_of_service_agreed: value.managed_tls.terms_of_service_agreed,
+        }
+      : null,
     browser_assets: value.browser_assets,
     local_acquisition: value.local_acquisition
       ? {
@@ -194,6 +223,8 @@ export function sectionUpdate(
         section,
         certificate_file: draft.certificate_file,
         private_key_file: draft.private_key_file,
+        tls_mode: draft.tls_mode,
+        managed_tls: draft.managed_tls,
       };
     case "storage":
       return { section, database: draft.database, cache: draft.cache };

@@ -238,7 +238,7 @@ fn source_review_does_not_invent_receipts_for_manual_selection_or_legacy_upgrade
     fixture.store = Store::open_existing(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        30
+        31
     );
     assert!(
         fixture

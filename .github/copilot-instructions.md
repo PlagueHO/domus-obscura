@@ -19,7 +19,7 @@ See AGENTS.md for layout and commands.
 - Recheck indexed observation bindings before approved work.
 - Keep incomplete observations distinct from confirmed absence.
 - Keep media mutations out of library browsing.
-- Require Entra in production. Only explicit development configuration can use the fixed _anonymous identity. Keep development HTTPS, loopback peer/origin checks and command guards. Never infer development mode from missing credentials or failed authentication. Never add a public MCP endpoint.
+- Require Entra in production. With no host configuration, construct explicit single_user anonymous HTTP on loopback only. Explicit development keeps anonymous HTTPS. Preserve loopback peer, Host, Origin and command guards. Never switch a failed secure configuration to anonymous mode. Never add a public MCP endpoint.
 - Keep the local browser test harness in its separate development example. It can use only fresh temporary databases and generated roots, never the production API router, live providers or existing-library paths.
 - Bind login state to one browser and consume it before token exchange.
 - Keep pending PKCE secrets and nonces out of SQLite.

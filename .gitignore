@@ -19,3 +19,5 @@ service.local.json
 .impeccable/hook.cache.json
 .impeccable/questions/
 frontend/dist-app/
+infra/*.local.bicepparam
+infra/*.json.local

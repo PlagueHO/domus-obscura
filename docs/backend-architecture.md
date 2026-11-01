@@ -24,7 +24,7 @@ Rust import graph.
 ```mermaid
 flowchart TB
     subgraph Entry["Entry adapters"]
-        API["Guarded HTTPS API"]
+        API["Guarded HTTP / HTTPS API"]
         CLI["CLI commands"]
         MCP["Private stdio MCP<br/>Read-service commands only"]
         Runtime["LocalRuntime / worker host"]
@@ -62,7 +62,7 @@ flowchart TB
         Gate["Durable catalog budget<br/>OS lock and provider backoff"]
         Caches["MusicBrainz and legacy CAA caches<br/>SQLite-backed"]
         FileCache["Configured MusicBrainz, CAA and JPEG variants<br/>Shared file-cache port"]
-        Auth["Entra / identity / sessions<br/>Guarded TLS listener"]
+        Auth["Explicit single-user / Entra sessions<br/>Guarded listener"]
     end
 
     API --> Host
@@ -143,18 +143,19 @@ Pure domain rules are in `crates/domus/src/domain`. Durable rules also remain in
 `infrastructure/store`; the code does not yet enforce a fully independent
 application layer.
 
-| Domain area                      | Owned concepts and rules                                                                      | Main source                                                                 |
-| -------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Catalog and edition identity     | Artists, releases, release groups, ordered media/tracks, credits and release filters          | `domain/catalog.rs`, `domain/identifiers.rs`                                |
-| Output planning and settings     | Immutable settings, edition selections, planned tracks, portable templates and output formats | `domain/planning.rs`, `domain/templates.rs`                                 |
-| Source assessment                | Complete folder mapping, unexpected files, advertised quality and unknown metadata            | `domain/sources.rs`                                                         |
-| Jobs and decisions               | Job states, artwork issues, bounded questions and offered choices                             | `domain/jobs.rs`, `domain/questions.rs`                                     |
-| Media metadata                   | Exact-release tags and identifiers; tag text stays separate from filename replacements        | `domain/media.rs`                                                           |
-| Library paths and paging         | Library-relative identifiers and bounded page requests                                        | `domain/paths.rs`                                                           |
-| Durable acquisition and recovery | Claims, leases, source approval, transfer intent, sealed inputs and receipts                  | `store/source_candidates.rs`, `store/transfers.rs`, application acquisition |
-| Artwork evidence and approval    | Original-image provenance, retained JPEG bytes, exact hash approval and recovery questions    | `store/caa.rs`, `store/artwork.rs`, `store/artwork_questions.rs`            |
-| Publication                      | New-only destination intent, exact output receipts, backup state and restart verification     | Application publication, `store/publication.rs`                             |
-| Identity and access              | Entra tenant/object authorization, browser login state and durable sessions                   | `infrastructure/entra`, `infrastructure/identity`, `store/sessions.rs`      |
+| Domain area                      | Owned concepts and rules                                                                      | Main source                                                                            |
+| -------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Catalog and edition identity     | Artists, releases, release groups, ordered media/tracks, credits and release filters          | `domain/catalog.rs`, `domain/identifiers.rs`                                           |
+| Output planning and settings     | Immutable settings, edition selections, planned tracks, portable templates and output formats | `domain/planning.rs`, `domain/templates.rs`                                            |
+| Source assessment                | Complete folder mapping, unexpected files, advertised quality and unknown metadata            | `domain/sources.rs`                                                                    |
+| Jobs and decisions               | Job states, artwork issues, bounded questions and offered choices                             | `domain/jobs.rs`, `domain/questions.rs`                                                |
+| Media metadata                   | Exact-release tags and identifiers; tag text stays separate from filename replacements        | `domain/media.rs`                                                                      |
+| Library paths and paging         | Library-relative identifiers and bounded page requests                                        | `domain/paths.rs`                                                                      |
+| Durable acquisition and recovery | Claims, leases, source approval, transfer intent, sealed inputs and receipts                  | `store/source_candidates.rs`, `store/transfers.rs`, application acquisition            |
+| Artwork evidence and approval    | Original-image provenance, retained JPEG bytes, exact hash approval and recovery questions    | `store/caa.rs`, `store/artwork.rs`, `store/artwork_questions.rs`                       |
+| Publication                      | New-only destination intent, exact output receipts, backup state and restart verification     | Application publication, `store/publication.rs`                                        |
+| Identity and access              | Entra tenant/object authorization, browser login state and durable sessions                   | `infrastructure/entra`, `infrastructure/identity`, `store/sessions.rs`                 |
+| Certificate lifecycle            | Exact hostname, owned TXT values, renewal timing, private intents and validated generations   | `domain/certificates.rs`, `application/certificates.rs`, `infrastructure/certificates` |
 
 ## Main workflows and boundaries
 
@@ -298,7 +299,7 @@ installation remains open. Retrieval and processing ports are independently
 replaceable; no provider client owns resize policy. The existing read-only MCP
 original-fetch contract is unchanged.
 
-The file-backed HTTPS bootstrap and guarded API share `ConfigurationService`.
+The file-backed HTTP/HTTPS startup and guarded API share `ConfigurationService`.
 This is the sole backend JSON access boundary. It owns parsing, normalization,
 startup loading, active/saved inspection, redaction, revisions, hidden-field
 merging, validation, and atomic persistence. Runtime startup still owns migrations,
@@ -348,6 +349,28 @@ After revision verification, the old generation drains and the new generation
 uses the same guarded listener implementation. A retained bound socket permits
 restoration on handover failure. Separate worker processes remain unchanged.
 Passive service operations cannot enter this lifecycle path.
+
+## Certificate and listener boundary
+
+With no configuration argument, `domus serve` creates private application state
+and starts the real single-user browser over loopback HTTP. It uses `_anonymous`
+without TLS, Azure, DNS or Entra. Explicit secure configuration failures never
+select this mode. HTTP and HTTPS share the guarded connection and parser limits.
+Manual HTTPS remains independent of ACME and Azure DNS.
+
+Certificate policy stays in `domain/certificates.rs`. The application lifecycle
+saves private account, order, DNS and CSR intent before external effects.
+The ACME, Azure DNS, authoritative DNS and native state adapters stay in
+`infrastructure/certificates`. Certificate state is outside Git and SQLite;
+SQLite reserves only its native root identity and ancestry.
+
+Local bootstrap opens no listener. A managed host loads a validated production
+generation and owns later renewal. Its live selection binds the generation
+number, native root and exact bytes. Publication retains initial ARI advice;
+refresh changes only journal scheduling. Failed renewal or activation preserves
+the current TLS configuration and reports recovery. Passive status never issues
+a certificate or changes DNS. Optional Bicep setup is not a runtime dependency.
+Live issuance and Windows/Linux service acceptance remain separate checks.
 
 ## Read-only sharing boundary
 
@@ -442,17 +465,18 @@ listener is installed.
 
 Source paths below are relative to `crates/domus/src`.
 
-| Concern                              | Source                                                                            |
-| ------------------------------------ | --------------------------------------------------------------------------------- |
-| Service contracts and typed requests | `application/services.rs`, `application/services/acquisition.rs`                  |
-| Composition and installed clients    | `infrastructure/services.rs`                                                      |
-| Catalog planning                     | `application/catalog.rs`                                                          |
-| Indexing                             | `application.rs`                                                                  |
-| Media workflows                      | `application/acquisition.rs`, `normalization.rs`, `publication.rs`, `playback.rs` |
-| Remote protocols                     | `infrastructure/catalog`, `caa`, `soulseek`                                       |
-| API, worker and stdio entry points   | `infrastructure/api.rs`, `worker.rs`, `local_runtime.rs`, `mcp`                   |
-| Images and audio processing          | `infrastructure/artwork`, `media.rs`, `mp3`, `flac`                               |
-| Durable state and migrations         | `infrastructure/store`, `crates/domus/migrations` from the repository root        |
+| Concern                              | Source                                                                                                        |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| Service contracts and typed requests | `application/services.rs`, `application/services/acquisition.rs`                                              |
+| Composition and installed clients    | `infrastructure/services.rs`                                                                                  |
+| Catalog planning                     | `application/catalog.rs`                                                                                      |
+| Indexing                             | `application.rs`                                                                                              |
+| Media workflows                      | `application/acquisition.rs`, `normalization.rs`, `publication.rs`, `playback.rs`                             |
+| Remote protocols                     | `infrastructure/catalog`, `caa`, `soulseek`                                                                   |
+| API, worker and stdio entry points   | `infrastructure/api.rs`, `worker.rs`, `local_runtime.rs`, `mcp`                                               |
+| Images and audio processing          | `infrastructure/artwork`, `media.rs`, `mp3`, `flac`                                                           |
+| Durable state and migrations         | `infrastructure/store`, `crates/domus/migrations` from the repository root                                    |
+| Certificates and guarded listeners   | `domain/certificates.rs`, `application/certificates.rs`, `infrastructure/certificates`, `server.rs`, `tls.rs` |
 
 Keep this map current when service boundaries change. Record implemented
 behavior separately from requirements in [PRODUCT.md](../PRODUCT.md).
