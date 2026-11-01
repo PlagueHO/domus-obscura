@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/domus", "crates/native-file-delete", "xtask"]
+members = ["crates/domus", "crates/native-file-delete", "crates/native-file-security", "xtask"]
 exclude = ["third_party/file-id-0.2.3"]
 resolver = "3"
 
@@ -53,8 +53,9 @@ base64 = "0.22.1"
 webpki-roots = "1.0.7"
 tower = { version = "0.5", features = ["util"] }
 turbojpeg = { version = "1.5.1", default-features = false }
-windows-permissions = "0.2.4"
+windows-sys = "=0.61.2"
 winsafe = { version = "=0.0.29", default-features = false, features = ["advapi"] }
+windows-service = "=0.8.1"
 rand = "0.8"
 rsa = "0.9"
 

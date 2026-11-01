@@ -8,6 +8,7 @@ It accepts the stable Rust alias only when its exact version matches the pin.
 
 ```powershell
 .\dev.ps1 bootstrap
+.\dev.ps1 dev
 .\dev.ps1 test backend_configuration
 .\dev.ps1 contracts
 .\dev.ps1 check
@@ -20,6 +21,7 @@ On Linux, use the same tasks:
 
 ```sh
 cargo task bootstrap
+cargo task dev
 cargo task test backend_configuration
 cargo task contracts
 cargo task check
@@ -87,6 +89,12 @@ for the real development HTTPS setup. Do not treat the harness as a production m
 | Lockfiles                  | Cargo.lock and one pnpm-lock.yaml |
 
 ## Operational boundaries
+
+Windows distribution tasks are `package-windows`, `package-check`, and
+`installer-windows`. Read [Windows operations](docs/windows-services.md) before
+changing installer or service behavior. NSIS compilation is not installation
+or native lifecycle proof. Do not install tools, create accounts, change ACLs,
+register services, or reboot a host without separate approval.
 
 - Use generated or permitted fixtures without live credentials for local checks.
 - Get separate approval for live downloads, existing-library writes, external configuration, software installation and public exposure.

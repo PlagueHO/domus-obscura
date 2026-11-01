@@ -17,22 +17,7 @@ impl FilePermissions {
         target.set_permissions(source.metadata()?.permissions())?;
         #[cfg(windows)]
         {
-            use windows_permissions::constants::{SeObjectType, SecurityInformation};
-            use windows_permissions::wrappers::{GetSecurityInfo, SetSecurityInfo};
-            let descriptor = GetSecurityInfo(
-                source,
-                SeObjectType::SE_FILE_OBJECT,
-                SecurityInformation::Dacl,
-            )?;
-            SetSecurityInfo(
-                target,
-                SeObjectType::SE_FILE_OBJECT,
-                SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-                None,
-                None,
-                descriptor.dacl(),
-                None,
-            )?;
+            native_file_security::copy_dacl(source, target)?;
         }
         self.check(target, false)
     }
@@ -77,16 +62,14 @@ impl FilePermissions {
     pub(crate) fn check(&self, file: &File, private: bool) -> Result<()> {
         #[cfg(windows)]
         {
-            use windows_permissions::constants::{SeObjectType, SecurityInformation};
-            use windows_permissions::wrappers::{
-                ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo,
-            };
-            let information = SecurityInformation::Owner | SecurityInformation::Dacl;
-            let descriptor = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, information)?;
-            let sddl =
-                ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, information)?;
-            let sddl = sddl.to_str().ok_or_else(permission_error)?;
-            check_sddl(sddl, &self.user, private)
+            let sddl = native_file_security::descriptor(file).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::InvalidData {
+                    permission_error()
+                } else {
+                    Error::Io(error)
+                }
+            })?;
+            check_sddl(&sddl, &self.user, private)
         }
         #[cfg(unix)]
         {
@@ -129,7 +112,7 @@ fn check_sddl(sddl: &str, user: &str, private: bool) -> Result<()> {
             // Windows can serialize the current local account as LA or LG.
             // Resolve it to the full SID; a matching RID alone is not authority.
             || (matches!(sid, "LA" | "LG")
-                && windows_permissions::wrappers::ConvertStringSidToSid(sid)
+                && winsafe::ConvertStringSidToSid(sid)
                     .is_ok_and(|resolved| resolved.to_string() == user))
             || matches!(sid, "SY" | "BA" | "S-1-5-18" | "S-1-5-32-544")
             || (sid == "LS" && user == "S-1-5-19")
@@ -202,7 +185,7 @@ mod tests {
     fn local_account_aliases_require_the_exact_resolved_sid()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         for alias in ["LA", "LG"] {
-            let resolved = windows_permissions::wrappers::ConvertStringSidToSid(alias)?.to_string();
+            let resolved = winsafe::ConvertStringSidToSid(alias)?.to_string();
             let sddl = format!("O:{alias}D:(A;;FA;;;{alias})");
             assert!(check_sddl(&sddl, &resolved, true).is_ok());
             for other in [USER, "S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-501"] {
@@ -257,10 +240,8 @@ mod tests {
     fn actual_file_permissions_are_checked_through_the_same_open_handle()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use std::os::windows::fs::OpenOptionsExt;
-        use windows_permissions::constants::{SeObjectType, SecurityInformation};
-        use windows_permissions::{LocalBox, SecurityDescriptor, wrappers::SetSecurityInfo};
         let directory = private_test_directory()?;
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
@@ -268,13 +249,7 @@ mod tests {
             .open(directory.path().join("permissions.fixture"))?;
         let permissions = FilePermissions::current()?;
         if let Err(error) = permissions.check(&file, true) {
-            use windows_permissions::wrappers::{
-                ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo,
-            };
-            let information = SecurityInformation::Owner | SecurityInformation::Dacl;
-            let descriptor = GetSecurityInfo(&file, SeObjectType::SE_FILE_OBJECT, information)?;
-            let sddl =
-                ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, information)?;
+            let sddl = native_file_security::descriptor(&file)?;
             return Err(format!(
                 "{error}; generated fixture user={}, descriptor={sddl:?}",
                 permissions.user
@@ -282,16 +257,9 @@ mod tests {
             .into());
         }
         for rights in ["FR", "FW"] {
-            let descriptor: LocalBox<SecurityDescriptor> =
-                format!("D:P(A;;FA;;;{})(A;;{rights};;;WD)", permissions.user).parse()?;
-            SetSecurityInfo(
-                &mut file,
-                SeObjectType::SE_FILE_OBJECT,
-                SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-                None,
-                None,
-                descriptor.dacl(),
-                None,
+            native_file_security::set_dacl(
+                &file,
+                &format!("D:P(A;;FA;;;{})(A;;{rights};;;WD)", permissions.user),
             )?;
             assert!(permissions.check(&file, true).is_err());
             assert_eq!(permissions.check(&file, false).is_ok(), rights == "FR");

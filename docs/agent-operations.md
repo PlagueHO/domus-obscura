@@ -208,7 +208,12 @@ continues to reject user cancellation. Never convert uncertain submissions into
 fresh queue commands. Preserve the existing finite per-operation reconnect budget.
 
 See the [production worker guide](../README.md#separate-production-worker).
-Native service installation and reboot acceptance remain issues #17 and #18.
+Windows SCM entry points and optional NSIS packaging use the existing runtimes.
+See [Windows operations](windows-services.md). Keep service setup off by default.
+Native installation and reboot acceptance are deferred to #48; Linux service delivery
+remains #18. A service callback requests stop; it must not abort active blocking
+work or release its native locks before draining. Only the API owns migration.
+An API restart under a live worker must open current schema without migration.
 Tokio documents that started [blocking tasks cannot be aborted](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html);
 the long-lived scheduler and its bounded operation lanes use dedicated threads.
 

@@ -15,8 +15,6 @@ pub fn directory(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        use windows_permissions::constants::{SeObjectType, SecurityInformation};
-        use windows_permissions::{LocalBox, SecurityDescriptor, wrappers::SetSecurityInfo};
         use winsafe::co;
 
         let token = winsafe::HPROCESS::GetCurrentProcess()
@@ -29,21 +27,12 @@ pub fn directory(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             return Err("fixture process user is absent".into());
         };
         let sid = user.User.Sid().ok_or("fixture process SID is absent")?;
-        let descriptor: LocalBox<SecurityDescriptor> = format!("D:P(A;OICI;FA;;;{sid})").parse()?;
-        let mut handle = std::fs::OpenOptions::new()
+        let handle = std::fs::OpenOptions::new()
             .read(true)
             .access_mode(0x0006_0000)
             .custom_flags(0x0200_0000)
             .open(path)?;
-        SetSecurityInfo(
-            &mut handle,
-            SeObjectType::SE_FILE_OBJECT,
-            SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-            None,
-            None,
-            descriptor.dacl(),
-            None,
-        )?;
+        native_file_security::set_dacl(&handle, &format!("D:P(A;OICI;FA;;;{sid})"))?;
     }
     Ok(())
 }

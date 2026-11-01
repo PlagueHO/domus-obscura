@@ -49,8 +49,9 @@ rustix.workspace = true
 fence-windows.workspace = true
 file-id.workspace = true
 native-file-delete = { path = "../native-file-delete" }
-windows-permissions.workspace = true
+native-file-security = { path = "../native-file-security" }
 winsafe.workspace = true
+windows-service.workspace = true
 
 [dev-dependencies]
 metaflac.workspace = true

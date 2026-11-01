@@ -316,16 +316,23 @@ impl PreparedProductionWorker {
     }
 
     pub async fn run(self) -> Result<()> {
+        self.run_with_lifecycle(super::lifecycle::Lifecycle::foreground())
+            .await
+    }
+
+    pub async fn run_with_lifecycle(self, lifecycle: super::lifecycle::Lifecycle) -> Result<()> {
         let stop = Arc::new(AtomicBool::new(false));
+        stop.store(lifecycle.stopping(), Ordering::Release);
         let stopping = stop.clone();
         let (sent, mut received) = tokio::sync::oneshot::channel();
+        let worker_lifecycle = lifecycle.clone();
         let thread = std::thread::spawn(move || {
-            let result = self.supervise(stop);
+            let result = self.supervise_with_lifecycle(stop, worker_lifecycle);
             let _ = sent.send(result);
         });
         let result = tokio::select! {
             result = &mut received => result.map_err(|_|Error::Internal("worker supervisor exited without a result"))?,
-            signal = super::server::shutdown_signal() => {
+            signal = lifecycle.stopped() => {
                 stopping.store(true,Ordering::Release);
                 let drained = received.await.map_err(|_|Error::Internal("worker supervisor failed while draining"))?;
                 signal?;
@@ -338,7 +345,19 @@ impl PreparedProductionWorker {
         result
     }
 
+    #[cfg(test)]
     fn supervise(self, stop: Arc<AtomicBool>) -> Result<()> {
+        self.supervise_with_lifecycle(stop, super::lifecycle::Lifecycle::controlled(|| Ok(())))
+    }
+
+    fn supervise_with_lifecycle(
+        self,
+        stop: Arc<AtomicBool>,
+        lifecycle: super::lifecycle::Lifecycle,
+    ) -> Result<()> {
+        if lifecycle.stopping() || stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let sharing = self
             .configuration
             .sharing
@@ -363,8 +382,19 @@ impl PreparedProductionWorker {
             stop: stop.clone(),
         };
         let lanes = &mut active.slots;
-        let mut failure = None;
+        let mut failure = if lifecycle.stopping() || stop.load(Ordering::Acquire) {
+            stop.store(true, Ordering::Release);
+            None
+        } else {
+            lifecycle.ready().err()
+        };
+        if failure.is_some() {
+            stop.store(true, Ordering::Release);
+        }
         loop {
+            if lifecycle.stopping() {
+                stop.store(true, Ordering::Release);
+            }
             if let Some(sharing) = &sharing
                 && let Err(error) = sharing.check()
             {
