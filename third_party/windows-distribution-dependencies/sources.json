@@ -1,0 +1,61 @@
+[
+  {
+    "name": "asn1-rs-impl",
+    "version": "0.2.0",
+    "repository": "https://github.com/rusticata/asn1-rs.git",
+    "revision": "a20e5f7319c896737ad0f2557037817b91ad854f",
+    "source_directory": "impl",
+    "notice_directory": "asn1-rs-impl-0.2.0",
+    "files": {
+      "LICENSE-MIT": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513",
+      "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    }
+  },
+  {
+    "name": "fence-windows",
+    "version": "0.1.0-alpha.2",
+    "repository": "https://github.com/22elix3r/fence",
+    "revision": "bfab04dee14a57e166301b4ca8984e6311e9d9b9",
+    "source_directory": "crates/fence-windows",
+    "notice_directory": "fence-windows-0.1.0-alpha.2",
+    "files": {
+      "LICENSE-MIT": "4727e8cfb0b299256af9634fd8e96ddb5702e1b4865720740a807f6f6ae15165",
+      "LICENSE-APACHE": "69849221bfb90053de2134ef5e6d540287b4b98062326492f1f96f5da685524b"
+    }
+  },
+  {
+    "name": "ts-rs",
+    "version": "12.0.1",
+    "repository": "https://github.com/Aleph-Alpha/ts-rs",
+    "revision": "7182ad8289596097235406b715fa04506443b4ad",
+    "source_directory": "ts-rs",
+    "notice_directory": "ts-rs-12.0.1",
+    "files": {
+      "LICENSE": "db7f7f8e7236a2d0b41b855b2501b7b913caebbcda6ce498637a304ad1706ce1"
+    }
+  },
+  {
+    "name": "ts-rs-macros",
+    "version": "12.0.1",
+    "repository": "https://github.com/Aleph-Alpha/ts-rs",
+    "revision": "7182ad8289596097235406b715fa04506443b4ad",
+    "source_directory": "macros",
+    "notice_directory": "ts-rs-12.0.1",
+    "files": {
+      "LICENSE": "db7f7f8e7236a2d0b41b855b2501b7b913caebbcda6ce498637a304ad1706ce1"
+    }
+  },
+  {
+    "name": "turbojpeg-sys",
+    "version": "1.2.0",
+    "repository": "https://github.com/honzasp/rust-turbojpeg/turbojpeg-sys",
+    "upstream_repository": "https://github.com/honzasp/rust-turbojpeg",
+    "revision": "05da705c6b6147baec1834a4c1f0de5e1df2614b",
+    "source_directory": "turbojpeg-sys",
+    "notice_directory": "turbojpeg-sys-1.2.0",
+    "files": {
+      "LICENSE": "1c99d306def307c6e570615a484c65e6eafdd7717913f42118b65847830c5123",
+      "UNLICENSE": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    }
+  }
+]

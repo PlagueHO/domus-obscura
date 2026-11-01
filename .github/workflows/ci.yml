@@ -43,6 +43,34 @@ jobs:
       - run: cargo task check
       - run: cargo task build
       - run: cargo task smoke
+      - name: Install pinned NSIS compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nsis --version=3.13 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned NSIS installation failed.' }
+          'MAKENSIS=C:\Program Files (x86)\NSIS\makensis.exe' >> $env:GITHUB_ENV
+      - name: Check Windows packaging helpers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($path in @('services.ps1', 'package-smoke.ps1', 'service-helper-tests.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD "packaging\windows\$path"), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+          powershell.exe -NoProfile -File packaging\windows\service-helper-tests.ps1 -NsisCompiler $env:MAKENSIS
+          if ($LASTEXITCODE -ne 0) { throw 'Service helper regressions failed.' }
+      - name: Build Windows package and installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\dev.ps1 installer-windows
+      - name: Verify Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\dev.ps1 package-check
 
   scale:
     name: Million-record pagination (${{ matrix.os }})

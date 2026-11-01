@@ -107,7 +107,9 @@ worker now accepts bounded durable requests, with one acquisition pipeline and
 one independent scan. Queue capacity is operator-controlled; requests can be
 accepted offline. Interrupted requests recover from saved evidence. Failed work
 and saved questions require explicit action. Source discovery remains
-development-only. Native supervised service packaging and complete Windows/Linux
+development-only. Windows SCM entry points and optional NSIS packaging reuse
+these runtimes. Service setup is off by default; clone-and-run foreground use
+does not require it. Native installed/reboot and complete Windows/Linux
 acceptance remain open.
 
 ## System Configuration Form

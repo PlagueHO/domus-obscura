@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::{Command, ExitCode};
 
 mod native_jpeg;
+mod windows_package;
 
 fn execute(program: &str, args: &[&str]) -> Result<(), Box<dyn Error>> {
     println!("> {program} {}", args.join(" "));
@@ -86,6 +87,22 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             pnpm(&["install", "--frozen-lockfile"])
         }
         Some("contracts") => contracts(false),
+        Some("dev") => {
+            toolchains()?;
+            pnpm(&["--dir", "frontend", "run", "build:app"])?;
+            cargo(&["run", "--locked", "--package", "domus", "--", "serve"])
+        }
+        Some("package-windows") | Some("installer-windows") => {
+            toolchains()?;
+            contracts(true)?;
+            pnpm(&["--dir", "frontend", "run", "build:app"])?;
+            windows_package::build(args[0] == "installer-windows")
+        }
+        Some("package-check") => {
+            let root = Path::new("target/windows-package");
+            windows_package::verify(root)?;
+            windows_package::smoke(root)
+        }
         Some("local-test") => {
             toolchains()?;
             pnpm(&["--dir", "frontend", "run", "build:local-test"])?;
@@ -151,7 +168,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             "--ignored",
         ]),
         _ => Err(
-            "Usage: cargo task <bootstrap|contracts|fmt|check|test [filter]|scale|build|smoke|local-test|local-test-build>"
+            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|build|smoke|package-windows|installer-windows|package-check|local-test|local-test-build>"
                 .into(),
         ),
     }

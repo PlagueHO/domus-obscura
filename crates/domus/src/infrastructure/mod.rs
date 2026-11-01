@@ -12,6 +12,7 @@ pub mod flac;
 pub mod http;
 pub mod identity;
 pub(crate) mod library_metadata;
+pub mod lifecycle;
 mod local_file;
 pub mod local_runtime;
 pub mod mcp;
@@ -29,4 +30,6 @@ pub mod soulseek;
 pub mod staging;
 pub mod store;
 pub mod tls;
+#[cfg(windows)]
+pub mod windows_service;
 pub mod worker;

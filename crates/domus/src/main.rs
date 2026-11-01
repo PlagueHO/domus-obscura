@@ -12,6 +12,8 @@ const USAGE: &str = "Usage:
   domus init <local-database>
   domus api-preview <absolute-configuration-file>
   domus serve [absolute-configuration-file]
+  domus windows-service <api|worker> <absolute-configuration-file>
+  domus windows-service-policy <api|worker> <enable|disable>
   domus certificate-status <absolute-configuration-file>
   domus certificate-bootstrap <absolute-configuration-file>
   domus certificate-recover <absolute-configuration-file> <resume|pending|bindings|cleanup|cleanup-owned|archive|generation|restart>
@@ -82,6 +84,15 @@ The database must be outside every configured media root.";
 
 fn run(args: &[String]) -> Result<()> {
     match args {
+        #[cfg(windows)]
+        [command, role, policy] if command == "windows-service-policy" => {
+            domus::infrastructure::windows_service::configure_policy(role, policy)?;
+            println!("Windows service supervision policy updated.");
+        }
+        #[cfg(windows)]
+        [command, role, configuration] if command == "windows-service" => {
+            domus::infrastructure::windows_service::dispatch(role, Path::new(configuration))?;
+        }
         [command, configuration, action] if command == "certificate-recover" => {
             println!(
                 "{}",

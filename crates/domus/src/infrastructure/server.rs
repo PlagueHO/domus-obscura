@@ -198,12 +198,32 @@ impl PreparedServer {
         Self::from_source(Arc::new(configuration_source), configuration, hostname)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn load_service(path: &Path) -> Result<Self> {
+        let (source, configuration, hostname) = configuration::ConfigurationService::load(path)?;
+        if super::windows_service::worker_stopped()? {
+            Self::from_source(Arc::new(source), configuration, hostname)
+        } else {
+            let store = Store::open_current_existing(&configuration.database)?;
+            Self::from_source_with_store(Arc::new(source), configuration, hostname, store)
+        }
+    }
+
     fn from_source(
         configuration_source: Arc<configuration::ConfigurationService>,
         configuration: Configuration,
         hostname: String,
     ) -> Result<Self> {
-        let mut store = Store::open_existing(&configuration.database)?;
+        let store = Store::open_existing(&configuration.database)?;
+        Self::from_source_with_store(configuration_source, configuration, hostname, store)
+    }
+
+    fn from_source_with_store(
+        configuration_source: Arc<configuration::ConfigurationService>,
+        configuration: Configuration,
+        hostname: String,
+        mut store: Store,
+    ) -> Result<Self> {
         let protected = configuration_source.protected(&configuration);
         let (secret, tls) = configuration_source.startup_material(&store, &hostname)?;
         if let Some(cache) = &configuration.cache {
@@ -332,11 +352,16 @@ impl PreparedServer {
     }
 
     pub async fn run(self) -> Result<()> {
+        self.run_with_lifecycle(super::lifecycle::Lifecycle::foreground())
+            .await
+    }
+
+    pub async fn run_with_lifecycle(self, lifecycle: super::lifecycle::Lifecycle) -> Result<()> {
         let (sender, reloads) = tokio::sync::mpsc::channel(1);
         self.configuration_source.attach_reload(sender)?;
         let host = self.prepare().await?;
         let mut renewals = renewal_owner(&host).await?;
-        let result = Self::run_host(host, reloads, &mut renewals).await;
+        let result = Self::run_host(host, reloads, &mut renewals, lifecycle).await;
         if let Some(owner) = &mut renewals {
             owner.drain().await?;
         }
@@ -347,10 +372,16 @@ impl PreparedServer {
         mut host: Host,
         mut reloads: tokio::sync::mpsc::Receiver<String>,
         renewals: &mut Option<crate::infrastructure::certificates::RenewalOwner>,
+        lifecycle: super::lifecycle::Lifecycle,
     ) -> Result<()> {
         let mut listener = TcpListener::bind(host.configuration.listen)?;
         let (mut handle, mut serving) = host.start(&listener).await?;
         let mut shutdown = ShutdownOnDrop(handle.clone());
+        let mut readiness = if lifecycle.stopping() {
+            Ok(())
+        } else {
+            lifecycle.ready()
+        };
         eprintln!(
             "{} API preview listening on {}",
             match host.configuration.environment {
@@ -362,13 +393,19 @@ impl PreparedServer {
             host.configuration.listen,
         );
         let result = loop {
+            if let Err(error) = std::mem::replace(&mut readiness, Ok(())) {
+                break Err(error);
+            }
+            if lifecycle.stopping() {
+                break Ok(());
+            }
             enum Event {
                 Reload(String),
                 Stop(Result<()>),
             }
             let event = tokio::select! {
                 result = &mut serving => Event::Stop(join_listener(result)),
-                result = shutdown_signal() => Event::Stop(result.map_err(Error::from)),
+                result = lifecycle.stopped() => Event::Stop(result.map_err(Error::from)),
                 _ = host.api.refresh_identity() => Event::Stop(Err(Error::Internal("identity refresh stopped unexpectedly"))),
                 _ = watch_tls(host.configuration.clone(), host.hostname.clone(), host.tls.clone()) => Event::Stop(Err(Error::Internal("TLS refresh stopped unexpectedly"))),
                 request = reloads.recv() => match request {
@@ -733,6 +770,69 @@ mod tests {
         )?;
         assert!(PreparedServer::load(&file).is_err());
         assert!(PreparedServer::load(&directory.path().join("absent.json")).is_err());
+        Ok(())
+    }
+
+    fn lifecycle_server(root: &Path) -> Result<(PreparedServer, String)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        let database = root.join("state.db");
+        drop(Store::open(&database)?);
+        let file = root.join("service.json");
+        let origin = format!("http://{address}");
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!({
+                "environment":"single_user", "database":database,
+                "listen":address.to_string(), "origin":origin
+            }))?,
+        )?;
+        Ok((PreparedServer::load(&file)?, origin))
+    }
+
+    #[tokio::test]
+    async fn api_lifecycle_readiness_means_listener_and_stop_releases_it()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
+        let (server, origin) = lifecycle_server(directory.path())?;
+        let (ready, mut observed) = tokio::sync::watch::channel(false);
+        let lifecycle = super::super::lifecycle::Lifecycle::controlled(move || {
+            ready.send_replace(true);
+            Ok(())
+        });
+        let serving = tokio::spawn(server.run_with_lifecycle(lifecycle.clone()));
+        tokio::time::timeout(Duration::from_secs(10), observed.wait_for(|ready| *ready)).await??;
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        let response = client.get(format!("{origin}/api/session")).send().await?;
+        assert!(response.status().is_success());
+        lifecycle.request_stop();
+        tokio::time::timeout(Duration::from_secs(10), serving).await???;
+        for _ in 0..100 {
+            if let Ok(listener) = TcpListener::bind(origin.trim_start_matches("http://")) {
+                drop(listener);
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Err("API listener remained active after stop".into())
+    }
+
+    #[tokio::test]
+    async fn api_lifecycle_early_stop_and_readiness_failure_do_not_report_success()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for early_stop in [false, true] {
+            let directory = crate::infrastructure::permissions::private_test_directory()?;
+            let (server, _) = lifecycle_server(directory.path())?;
+            let lifecycle = super::super::lifecycle::Lifecycle::controlled(|| {
+                Err(Error::Internal("injected readiness failure"))
+            });
+            if early_stop {
+                lifecycle.request_stop();
+            }
+            let result = server.run_with_lifecycle(lifecycle).await;
+            assert_eq!(result.is_ok(), early_stop);
+        }
         Ok(())
     }
 

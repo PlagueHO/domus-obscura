@@ -70,6 +70,20 @@ native services and production packages remain incomplete.
 
 ## Single-user launch without cloud setup
 
+For the simplest source workflow, install the pinned build prerequisites, then
+run these commands from the clone:
+
+```powershell
+.\dev.ps1 bootstrap
+.\dev.ps1 dev
+```
+
+This builds the real connected browser and starts the application in the
+foreground. It does not need service configuration or administrator runtime
+access. On Linux, use `cargo task bootstrap` and `cargo task dev`.
+The [Windows installation guide](docs/windows-services.md) describes the separate
+package and optional NSIS service setup. Services are off by default.
+
 Run `domus serve` without a configuration argument. Open
 `http://127.0.0.1:8080`. This starts the real browser application with the fixed
 `_anonymous` identity. It needs no Azure, DNS, certificate, Entra registration,
@@ -132,8 +146,10 @@ acceptance remain issues #21 and #23.
 
 `domus worker <absolute-configuration-file>` runs accepted background work in a
 separate foreground process. It uses the same local SQLite state as the guarded
-API. It opens no peer listener unless sharing explicitly configures one. Native Windows service and systemd installation remain
-separate work in issues #17 and #18. Do not treat foreground checks as service,
+API. It opens no peer listener unless sharing explicitly configures one.
+Windows SCM entry points and optional NSIS packaging are described in the
+[Windows guide](docs/windows-services.md). Native installed/reboot acceptance
+is deferred to #48; systemd installation remains #18. Do not treat foreground checks as service,
 reboot, Linux, or live-account acceptance.
 
 Add a `production_worker` section to the normal backend configuration. The
@@ -1296,7 +1312,7 @@ The journal records worker evidence; it does not itself open files, make staging
 
 Migration eleven adds a retained database identity and private-root reservations. Registering a media location rejects overlap with a reserved staging root. A staging root must already exist, have private permissions and contain no unowned files. Its `owner.lock` binds it to one database and holds an exclusive OS lock. Keep this file in place while any worker runs. A missing marker on a reserved root requires explicit recovery.
 
-Roots and files open through no-follow directory handles. Permission checks use those same handles. Windows checks the actual process SID and a strict set of supported owner/DACL forms. Unknown ACL forms fail closed. The safe descriptor binding is [windows-permissions 0.2.4](https://docs.rs/windows-permissions/0.2.4/windows_permissions/), last published in 2021, not a newly maintained dependency. [WinSafe](https://docs.rs/winsafe/0.0.29/winsafe/) reads the process token. Unix checks the effective UID and permission bits. Only the Windows path has run locally.
+Roots and files open through no-follow directory handles. Permission checks use those same handles. Windows checks the actual process SID and a strict set of supported owner/DACL forms. Unknown ACL forms fail closed. The original `native-file-security` boundary uses the [Windows SDK](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo) to read and copy descriptors through borrowed handles. It has no path APIs or permission policy. Its private FFI module owns and frees SDK buffers; application code still forbids unsafe Rust. [WinSafe](https://docs.rs/winsafe/0.0.29/winsafe/) reads the process token and resolves SID aliases. Unix checks the effective UID and permission bits. Only the Windows path has run locally.
 
 Inputs use controlled transfer IDs, not peer paths. The adapter requires exact stream completion, syncs and hashes the file, then saves a bounded immutable receipt sidecar. A short, oversized or interrupted stream cannot become a received input. Restart reconciliation requires both that receipt and the matching file bytes.
 

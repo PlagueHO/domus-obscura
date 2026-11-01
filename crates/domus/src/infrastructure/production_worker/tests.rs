@@ -21,6 +21,79 @@ fn runtime(directory: &Path) -> Result<PreparedProductionWorker> {
     })
 }
 
+#[tokio::test]
+async fn worker_lifecycle_reports_ready_and_keeps_native_ownership_until_stop() -> TestResult {
+    let temp = super::super::permissions::private_test_directory()?;
+    let worker = runtime(temp.path())?;
+    let database = worker.database.clone();
+    let (ready, mut observed) = tokio::sync::watch::channel(false);
+    let lifecycle = super::super::lifecycle::Lifecycle::controlled(move || {
+        ready.send_replace(true);
+        Ok(())
+    });
+    let running = tokio::spawn(worker.run_with_lifecycle(lifecycle.clone()));
+    tokio::time::timeout(Duration::from_secs(10), observed.wait_for(|ready| *ready)).await??;
+    assert!(matches!(
+        ProcessLock::acquire(&database, "worker"),
+        Err(Error::Busy(_))
+    ));
+    lifecycle.request_stop();
+    tokio::time::timeout(Duration::from_secs(10), running).await???;
+    let _next = ProcessLock::acquire(&database, "worker")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_lifecycle_readiness_failure_drains_and_releases_ownership() -> TestResult {
+    let temp = super::super::permissions::private_test_directory()?;
+    let worker = runtime(temp.path())?;
+    let database = worker.database.clone();
+    let lifecycle = super::super::lifecycle::Lifecycle::controlled(|| {
+        Err(Error::Internal("injected readiness failure"))
+    });
+    assert!(worker.run_with_lifecycle(lifecycle).await.is_err());
+    let _next = ProcessLock::acquire(&database, "worker")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_lifecycle_stop_before_start_does_not_admit_work() -> TestResult {
+    let temp = super::super::permissions::private_test_directory()?;
+    let worker = runtime(temp.path())?;
+    let lifecycle = super::super::lifecycle::Lifecycle::controlled(|| {
+        Err(Error::Internal("early stop must not report ready"))
+    });
+    lifecycle.request_stop();
+    worker.run_with_lifecycle(lifecycle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_lifecycle_stop_before_start_skips_sharing_initialization() -> TestResult {
+    let temp = super::super::permissions::private_test_directory()?;
+    let mut worker = runtime(temp.path())?;
+    let database = worker.database.clone();
+    worker.configuration.sharing = Some(super::super::sharing::SharingConfiguration {
+        policy: crate::domain::sharing::SharePolicy {
+            access: crate::domain::sharing::ShareAccess::All,
+            ..Default::default()
+        },
+        account: Some(super::super::sharing::SharingAccount {
+            credentials_file: temp.path().join("absent-credentials.json"),
+            server: "127.0.0.1:9".parse()?,
+            acknowledge_plaintext_login: true,
+        }),
+        listen: None,
+    });
+    let lifecycle = super::super::lifecycle::Lifecycle::controlled(|| {
+        Err(Error::Internal("early stop must not report ready"))
+    });
+    lifecycle.request_stop();
+    worker.run_with_lifecycle(lifecycle).await?;
+    let _next = ProcessLock::acquire(&database, "worker")?;
+    Ok(())
+}
+
 #[test]
 fn worker_runtime_runs_a_durable_scan_and_releases_native_ownership_on_stop() -> TestResult {
     let temp = super::super::permissions::private_test_directory()?;
