@@ -5,11 +5,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
+pub(crate) type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const TARGET: &str = "x86_64-pc-windows-msvc";
 const MAX_FILES: usize = 8192;
 
-fn output(command: &mut Command) -> Result<String> {
+pub(crate) fn output(command: &mut Command) -> Result<String> {
     let output = command.output()?;
     if !output.status.success() {
         return Err(format!(
@@ -21,7 +21,7 @@ fn output(command: &mut Command) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
-fn regular(path: &Path) -> Result<()> {
+pub(crate) fn regular(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     #[cfg(windows)]
     {
@@ -33,15 +33,19 @@ fn regular(path: &Path) -> Result<()> {
     if metadata.is_symlink() {
         return Err("package inputs must not be links".into());
     }
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err("package inputs must be regular files or directories".into());
+    }
     Ok(())
 }
 
-fn files(root: &Path) -> Result<BTreeMap<String, String>> {
+pub(crate) fn files(root: &Path) -> Result<BTreeMap<String, String>> {
     fn walk(
         root: &Path,
         directory: &Path,
         result: &mut BTreeMap<String, String>,
         depth: usize,
+        total: &mut u64,
     ) -> Result<()> {
         regular(directory)?;
         if depth > 16 {
@@ -51,12 +55,14 @@ fn files(root: &Path) -> Result<BTreeMap<String, String>> {
             let path = entry?.path();
             regular(&path)?;
             if path.is_dir() {
-                walk(root, &path, result, depth + 1)?;
+                walk(root, &path, result, depth + 1, total)?;
             } else if path != root.join("package-manifest.json") {
                 if result.len() >= MAX_FILES {
                     return Err("package file count exceeds the limit".into());
                 }
-                if fs::metadata(&path)?.len() > 256 * 1024 * 1024 {
+                let size = fs::metadata(&path)?.len();
+                *total += size;
+                if size > 256 * 1024 * 1024 || *total > 512 * 1024 * 1024 {
                     return Err("package file exceeds the 256 MiB limit".into());
                 }
                 let name = path
@@ -70,23 +76,47 @@ fn files(root: &Path) -> Result<BTreeMap<String, String>> {
         Ok(())
     }
     let mut result = BTreeMap::new();
-    walk(root, root, &mut result, 0)?;
+    walk(root, root, &mut result, 0, &mut 0)?;
     Ok(result)
 }
 
-fn copy(source: &Path, target: &Path) -> Result<()> {
-    regular(source)?;
-    if source.is_dir() {
-        fs::create_dir_all(target)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            copy(&entry.path(), &target.join(entry.file_name()))?;
+pub(crate) fn copy(source: &Path, target: &Path) -> Result<()> {
+    fn walk(
+        source: &Path,
+        target: &Path,
+        depth: usize,
+        count: &mut usize,
+        total: &mut u64,
+    ) -> Result<()> {
+        regular(source)?;
+        *count += 1;
+        if depth > 16 || *count > MAX_FILES {
+            return Err("package copy exceeds its depth or entry limit".into());
         }
-    } else {
-        fs::create_dir_all(target.parent().ok_or("package file parent is missing")?)?;
-        fs::copy(source, target)?;
+        if source.is_dir() {
+            fs::create_dir_all(target)?;
+            for entry in fs::read_dir(source)? {
+                let entry = entry?;
+                walk(
+                    &entry.path(),
+                    &target.join(entry.file_name()),
+                    depth + 1,
+                    count,
+                    total,
+                )?;
+            }
+        } else {
+            let size = fs::metadata(source)?.len();
+            *total += size;
+            if size > 256 * 1024 * 1024 || *total > 512 * 1024 * 1024 {
+                return Err("package copy exceeds its size limit".into());
+            }
+            fs::create_dir_all(target.parent().ok_or("package file parent is missing")?)?;
+            fs::copy(source, target)?;
+        }
+        Ok(())
     }
-    Ok(())
+    walk(source, target, 0, &mut 0, &mut 0)
 }
 
 fn notice_files(source: &Path, target: &Path) -> Result<usize> {
@@ -186,7 +216,7 @@ fn installer_notice(root: &Path, compiler: &Path) -> Result<serde_json::Value> {
     }))
 }
 
-fn notices(root: &Path, compiler: Option<&Path>) -> Result<()> {
+pub(crate) fn notices(root: &Path, target: &str, compiler: Option<&Path>) -> Result<()> {
     let metadata: serde_json::Value =
         serde_json::from_str(&output(Command::new(std::env::var("CARGO")?).args([
             "metadata",
@@ -194,7 +224,7 @@ fn notices(root: &Path, compiler: Option<&Path>) -> Result<()> {
             "--format-version",
             "1",
             "--filter-platform",
-            TARGET,
+            target,
         ]))?)?;
     let packages = metadata["packages"]
         .as_array()
@@ -271,7 +301,7 @@ fn notices(root: &Path, compiler: Option<&Path>) -> Result<()> {
         }));
     }
     let frontend: serde_json::Value = serde_json::from_str(&output(
-        Command::new("pnpm.cmd")
+        Command::new(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" })
             .args(["--dir", "frontend", "licenses", "list", "--prod", "--json"]),
     )?)?;
     for group in frontend
@@ -459,7 +489,7 @@ fn clear_previous(root: &Path) -> Result<()> {
     clear_verified(root, paths)
 }
 
-fn clear_verified(root: &Path, paths: BTreeMap<String, String>) -> Result<()> {
+pub(crate) fn clear_verified(root: &Path, paths: BTreeMap<String, String>) -> Result<()> {
     let mut directories = BTreeSet::<PathBuf>::new();
     for (name, expected) in &paths {
         let path = root.join(name);
@@ -629,7 +659,7 @@ pub fn build(installer: bool) -> Result<()> {
     }
     let runtime_imports = imports(&root.join("domus.exe"))?;
     smoke(root)?;
-    notices(&root.join("notices"), compiler.as_deref())?;
+    notices(&root.join("notices"), TARGET, compiler.as_deref())?;
     fs::write(
         root.join("uninstall-files.nsh"),
         uninstall_include(files(root)?)?,
@@ -681,6 +711,20 @@ pub fn build(installer: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_copy_rejects_excessive_depth() -> Result<()> {
+        let input = tempfile::tempdir()?;
+        let output = tempfile::tempdir()?;
+        let mut path = input.path().to_owned();
+        for _ in 0..18 {
+            path.push("child");
+        }
+        fs::create_dir_all(&path)?;
+        fs::write(path.join("file"), b"fixture")?;
+        assert!(copy(input.path(), &output.path().join("payload")).is_err());
+        Ok(())
+    }
 
     #[test]
     fn windows_package_installer_notices_require_the_exact_compiler_source() -> Result<()> {

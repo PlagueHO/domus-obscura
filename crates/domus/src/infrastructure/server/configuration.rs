@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-const MAXIMUM: u64 = 16384;
+pub(crate) const MAXIMUM: u64 = 16384;
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

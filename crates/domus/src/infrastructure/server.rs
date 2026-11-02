@@ -195,6 +195,27 @@ impl PreparedServer {
     pub fn load(path: &Path) -> Result<Self> {
         let (configuration_source, configuration, hostname) =
             configuration::ConfigurationService::load(path)?;
+        #[cfg(target_os = "linux")]
+        {
+            // Hold the worker's stable process lock through schema preparation.
+            // A live worker permits a current-schema restart, never migration.
+            match super::local_file::ProcessLock::acquire(&configuration.database, "worker") {
+                Ok(_migration_guard) => {
+                    Self::from_source(Arc::new(configuration_source), configuration, hostname)
+                }
+                Err(Error::Busy(_)) => {
+                    let store = Store::open_current_existing(&configuration.database)?;
+                    Self::from_source_with_store(
+                        Arc::new(configuration_source),
+                        configuration,
+                        hostname,
+                        store,
+                    )
+                }
+                Err(error) => Err(error),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
         Self::from_source(Arc::new(configuration_source), configuration, hostname)
     }
 
@@ -357,11 +378,21 @@ impl PreparedServer {
     }
 
     pub async fn run_with_lifecycle(self, lifecycle: super::lifecycle::Lifecycle) -> Result<()> {
+        if lifecycle.stopping() {
+            return Ok(());
+        }
         let (sender, reloads) = tokio::sync::mpsc::channel(1);
         self.configuration_source.attach_reload(sender)?;
         let host = self.prepare().await?;
+        if lifecycle.stopping() {
+            return Ok(());
+        }
         let mut renewals = renewal_owner(&host).await?;
-        let result = Self::run_host(host, reloads, &mut renewals, lifecycle).await;
+        let result = if lifecycle.stopping() {
+            Ok(())
+        } else {
+            Self::run_host(host, reloads, &mut renewals, lifecycle).await
+        };
         if let Some(owner) = &mut renewals {
             owner.drain().await?;
         }
@@ -791,6 +822,29 @@ mod tests {
         Ok((PreparedServer::load(&file)?, origin))
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_api_restart_under_worker_requires_current_schema_without_migration()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
+        let (server, _) = lifecycle_server(directory.path())?;
+        drop(server);
+        let database = directory.path().join("state.db");
+        let worker = super::super::local_file::ProcessLock::acquire(&database, "worker")?;
+        let configuration = directory.path().join("service.json");
+        drop(PreparedServer::load(&configuration)?);
+        let connection = rusqlite::Connection::open(&database)?;
+        connection.pragma_update(None, "user_version", 0)?;
+        assert!(matches!(
+            PreparedServer::load(&configuration),
+            Err(Error::Conflict(_))
+        ));
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(version, 0);
+        drop(worker);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn api_lifecycle_readiness_means_listener_and_stop_releases_it()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -823,7 +877,12 @@ mod tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         for early_stop in [false, true] {
             let directory = crate::infrastructure::permissions::private_test_directory()?;
-            let (server, _) = lifecycle_server(directory.path())?;
+            let (server, origin) = lifecycle_server(directory.path())?;
+            let _occupied = if early_stop {
+                Some(TcpListener::bind(origin.trim_start_matches("http://"))?)
+            } else {
+                None
+            };
             let lifecycle = super::super::lifecycle::Lifecycle::controlled(|| {
                 Err(Error::Internal("injected readiness failure"))
             });

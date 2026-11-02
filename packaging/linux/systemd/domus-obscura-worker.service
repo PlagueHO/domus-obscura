@@ -1,0 +1,44 @@
+[Unit]
+Description=Domus Obscura production worker
+Wants=domus-obscura-api.service network-online.target
+After=domus-obscura-api.service network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=domus-obscura
+Group=domus-obscura
+WorkingDirectory=/opt/domus-obscura
+ExecStartPre=/usr/bin/systemctl is-active --quiet domus-obscura-api.service
+ExecStart=/opt/domus-obscura/domus systemd-service worker /var/lib/domus-obscura/config/service.json
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=120
+TimeoutStopSec=180
+KillSignal=SIGTERM
+KillMode=mixed
+SendSIGKILL=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/domus-obscura
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
