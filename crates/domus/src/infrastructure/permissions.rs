@@ -99,6 +99,67 @@ fn permission_error() -> Error {
     Error::InvalidInput("file ownership or permissions allow untrusted access; private files require owner-only access".into())
 }
 
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn linux_private_resources_use_actual_handle_permissions()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = private_test_directory()?;
+        let permissions = FilePermissions::current()?;
+        for name in [
+            "configuration",
+            "credentials",
+            "cache",
+            "staging",
+            "library",
+        ] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, b"generated fixture")?;
+            let file = File::open(&path)?;
+            for mode in [0o400, 0o600] {
+                file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                permissions.check(&file, true)?;
+            }
+            for mode in [0o640, 0o604, 0o660, 0o666] {
+                file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                assert!(permissions.check(&file, true).is_err());
+            }
+            file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+            permissions.check(&file, false)?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o666))?;
+            assert!(permissions.check(&file, false).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn linux_permission_checks_remain_bound_to_the_opened_file()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = private_test_directory()?;
+        let path = directory.path().join("private");
+        std::fs::write(&path, b"original")?;
+        let original = File::open(&path)?;
+        original.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&path, directory.path().join("retained"))?;
+        std::fs::write(&path, b"replacement")?;
+        let replacement = File::open(&path)?;
+        replacement.set_permissions(std::fs::Permissions::from_mode(0o666))?;
+        let permissions = FilePermissions::current()?;
+        permissions.check(&original, true)?;
+        assert!(permissions.check(&replacement, true).is_err());
+        let root = File::open(directory.path())?;
+        root.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        permissions.check(&root, true)?;
+        root.set_permissions(std::fs::Permissions::from_mode(0o777))?;
+        assert!(permissions.check(&root, true).is_err());
+        root.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    }
+}
+
 /// Accept only a small, explicit subset of the OS-generated SDDL. This is an
 /// allow-list, not an effective-access evaluator. Unknown ACL forms fail closed.
 #[cfg(windows)]

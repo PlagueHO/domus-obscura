@@ -109,7 +109,9 @@ accepted offline. Interrupted requests recover from saved evidence. Failed work
 and saved questions require explicit action. Source discovery remains
 development-only. Windows SCM entry points and optional NSIS packaging reuse
 these runtimes. Service setup is off by default; clone-and-run foreground use
-does not require it. Native installed/reboot and complete Windows/Linux
+does not require it. Linux candidate archives and restricted systemd units also
+reuse these runtimes with manual setup and explicit readiness.
+Native installed/reboot and complete Windows/Linux
 acceptance remain open.
 
 ## System Configuration Form

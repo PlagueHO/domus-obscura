@@ -210,10 +210,18 @@ fresh queue commands. Preserve the existing finite per-operation reconnect budge
 See the [production worker guide](../README.md#separate-production-worker).
 Windows SCM entry points and optional NSIS packaging use the existing runtimes.
 See [Windows operations](windows-services.md). Keep service setup off by default.
-Native installation and reboot acceptance are deferred to #48; Linux service delivery
-remains #18. A service callback requests stop; it must not abort active blocking
+Native Windows installation and reboot acceptance are deferred to #48.
+Linux candidate packaging and systemd operations are in
+[Linux operations](linux-services.md). Installed Linux and reboot acceptance
+remain #18. A service callback requests stop; it must not abort active blocking
 work or release its native locks before draining. Only the API owns migration.
 An API restart under a live worker must open current schema without migration.
+Linux API startup holds the stable worker process lock through schema
+preparation. A busy lock permits only current-schema startup.
+The Linux-only `systemd-service <api|worker> <absolute-configuration-file>`
+entry point rejects root and requires private configuration and a notification
+socket. It connects readiness and early latched signals to the existing runtimes.
+Do not replace readiness with process creation or detach operation threads.
 Tokio documents that started [blocking tasks cannot be aborted](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html);
 the long-lived scheduler and its bounded operation lanes use dedicated threads.
 

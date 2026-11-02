@@ -29,6 +29,8 @@ pub mod sharing;
 pub mod soulseek;
 pub mod staging;
 pub mod store;
+#[cfg(target_os = "linux")]
+pub mod systemd;
 pub mod tls;
 #[cfg(windows)]
 pub mod windows_service;

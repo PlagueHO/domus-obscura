@@ -12,6 +12,7 @@ const USAGE: &str = "Usage:
   domus init <local-database>
   domus api-preview <absolute-configuration-file>
   domus serve [absolute-configuration-file]
+  domus systemd-service <api|worker> <absolute-configuration-file>
   domus windows-service <api|worker> <absolute-configuration-file>
   domus windows-service-policy <api|worker> <enable|disable>
   domus certificate-status <absolute-configuration-file>
@@ -84,6 +85,10 @@ The database must be outside every configured media root.";
 
 fn run(args: &[String]) -> Result<()> {
     match args {
+        #[cfg(target_os = "linux")]
+        [command, role, configuration] if command == "systemd-service" => {
+            domus::infrastructure::systemd::run(role, Path::new(configuration))?;
+        }
         #[cfg(windows)]
         [command, role, policy] if command == "windows-service-policy" => {
             domus::infrastructure::windows_service::configure_policy(role, policy)?;

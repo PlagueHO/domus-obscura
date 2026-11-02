@@ -3,8 +3,10 @@ use std::error::Error;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
+mod linux_package;
 mod native_jpeg;
-mod windows_package;
+mod package;
+use package as windows_package;
 
 fn execute(program: &str, args: &[&str]) -> Result<(), Box<dyn Error>> {
     println!("> {program} {}", args.join(" "));
@@ -103,6 +105,17 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             windows_package::verify(root)?;
             windows_package::smoke(root)
         }
+        Some("package-linux") => {
+            linux_package::require_host()?;
+            toolchains()?;
+            contracts(true)?;
+            pnpm(&["--dir", "frontend", "run", "build:app"])?;
+            linux_package::build()
+        }
+        Some("package-check-linux") => {
+            linux_package::require_host()?;
+            linux_package::check()
+        }
         Some("local-test") => {
             toolchains()?;
             pnpm(&["--dir", "frontend", "run", "build:local-test"])?;
@@ -168,7 +181,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             "--ignored",
         ]),
         _ => Err(
-            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|build|smoke|package-windows|installer-windows|package-check|local-test|local-test-build>"
+            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|build|smoke|package-windows|installer-windows|package-check|package-linux|package-check-linux|local-test|local-test-build>"
                 .into(),
         ),
     }

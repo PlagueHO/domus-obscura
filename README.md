@@ -149,7 +149,9 @@ separate foreground process. It uses the same local SQLite state as the guarded
 API. It opens no peer listener unless sharing explicitly configures one.
 Windows SCM entry points and optional NSIS packaging are described in the
 [Windows guide](docs/windows-services.md). Native installed/reboot acceptance
-is deferred to #48; systemd installation remains #18. Do not treat foreground checks as service,
+is deferred to #48. Linux candidate archives and manual systemd setup are in the
+[Linux guide](docs/linux-services.md). Installed Linux and reboot acceptance
+remain #18. Do not treat foreground checks as service,
 reboot, Linux, or live-account acceptance.
 
 Add a `production_worker` section to the normal backend configuration. The

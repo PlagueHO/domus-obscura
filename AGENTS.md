@@ -96,6 +96,12 @@ changing installer or service behavior. NSIS compilation is not installation
 or native lifecycle proof. Do not install tools, create accounts, change ACLs,
 register services, or reboot a host without separate approval.
 
+Linux distribution tasks are `package-linux` and `package-check-linux`.
+Read [Linux operations](docs/linux-services.md) before changing package or
+systemd behavior. Build on the native Ubuntu 24.04 x86_64 GNU/Linux baseline.
+Unit validation and foreground process checks are not installed-service or
+reboot proof. Keep manual installation and all host changes separately approved.
+
 - Use generated or permitted fixtures without live credentials for local checks.
 - Get separate approval for live downloads, existing-library writes, external configuration, software installation and public exposure.
 - Do not deploy or call this foundation the complete V1 application.
