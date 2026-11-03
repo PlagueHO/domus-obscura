@@ -311,3 +311,194 @@ fixtures where possible. Real acquisition, live Azure/CA operations,
 existing-library writes, and public exposure remain separate approvals.
 Do not close #18 or claim complete service acceptance when required installed
 or reboot checks have not run.
+
+## Reproducible service acceptance
+
+The source tree contains an opt-in runner:
+`packaging/linux/service-acceptance.py`.
+It is not an installer and is not included in the application archive.
+It does not create accounts, install software, register units, mount drives,
+change permissions, or reboot. Its `run` and `cleanup` modes use
+non-interactive `sudo` for the exact isolated test units. Review and approve
+these effects for the selected host before use. Do not grant general
+passwordless sudo to make a test work.
+
+The default evidence class for manual host checks is `not_run`.
+A successful runner command does not close #18.
+The runner records the package manifest hash, source revision/dirty state,
+host/kernel markers, runtime UID, rendered units, and individual results.
+It excludes credentials and raw application journals.
+The isolated units keep the shipped sandbox and timeout values.
+Only unit names, the existing account/group, program path, configuration path,
+and writable state path change. These results do not prove installation at
+the production paths or permission to access an existing library.
+
+Unprivileged checks run without installing services:
+
+```sh
+python3 packaging/linux/service-acceptance-tests.py
+cargo task test service_acceptance
+```
+
+The Rust checks use fresh state and generated media. They prepare artwork
+approval, plan approval, transfer receipts, completed normalization, and durable
+worker requests through existing application rules. A test-only SQLite trigger
+interrupts publication receipt persistence after intent and file creation.
+The trigger is removed before export. The fixtures do not invent approval or
+receipt rows. The worker resumes local publication without a provider login.
+The helper is a test binary, not a production command or HTTP endpoint.
+
+### Prepare an approved isolated run
+
+Use Ubuntu 24.04 on native Linux disk. Use an existing non-root runtime account.
+Reserve port 8080 for the loopback test API.
+Keep the verified program under a new administrator-owned path outside the
+writable fixture root, for example `/opt/domus-acceptance-trial-01`.
+All program files and parent directories must be administrator-owned and must
+not permit group/other writes.
+
+Select a new identifier for each case. The root must be exactly
+`/var/lib/domus-acceptance-<identifier>`.
+An administrator must separately approve and create that new empty directory
+for the runtime account with mode `0700`. Do not reuse a service data directory.
+The following example assumes that this setup and package staging are approved
+and complete:
+
+```sh
+RUN=trial-01
+ROOT=/var/lib/domus-acceptance-$RUN
+PACKAGE=/opt/domus-acceptance-trial-01
+DOMUS_SERVICE_ACCEPTANCE_ROOT="$ROOT" DOMUS_SERVICE_ACCEPTANCE_PACKAGE="$PACKAGE" \
+  cargo task test --release \
+  journal::service_acceptance::service_acceptance_export -- --ignored --exact
+python3 packaging/linux/service-acceptance.py preflight \
+  --run-id "$RUN" --root "$ROOT" --package "$PACKAGE"
+python3 packaging/linux/service-acceptance.py prepare \
+  --run-id "$RUN" --root "$ROOT" --package "$PACKAGE"
+```
+
+Use the release test profile for this large export. The normal unprivileged
+regressions use small fixtures.
+The exporter writes only inside the empty selected root. It creates 8192 scan
+directories and three generated MP3 inputs of about 33 MiB each, plus normalized
+outputs and private state. Allow space for both normalized and published copies.
+The generated credentials are not live credentials.
+The exporter validates the selected package's browser assets and records their
+absolute path in the explicit API configuration. The runner requires that exact
+path. Missing or different browser assets are not a successful installed check.
+The configured Soulseek address is an unused validation input: only scan and
+local `Publish` requests are queued. Do not submit acquisition work to this fixture.
+No sharing account is enabled.
+Discovery, metadata, artwork, and artist-image providers are disabled.
+The runner rejects changed configuration, live credentials, and any request
+other than the two generated scan/publication requests before service startup.
+
+`preflight` only reads existing inputs and prints its report.
+It does not migrate or open SQLite, create files, escalate privileges, or start
+a stopped WSL distribution. `prepare` only renders unit files under `$ROOT/units`.
+Neither command installs or starts services.
+The package checker must be from the same trusted verified package.
+
+Review the two rendered units. After separate installation approval, copy only
+those two files to `/etc/systemd/system` as root-owned files with mode `0644`.
+Do not overwrite an existing unit. Run `systemctl daemon-reload` after the copy.
+Do not add test drop-ins. The runner rejects changed unit files and drop-ins.
+
+### Run and collect
+
+Run as the runtime account. The host argument is an explicit execution gate,
+not a substitute for host approval:
+
+```sh
+python3 packaging/linux/service-acceptance.py run \
+  --run-id "$RUN" --root "$ROOT" --package "$PACKAGE" \
+  --approved-host "$(hostname)" --case lifecycle
+```
+
+`lifecycle` starts only the worker unit so the manager must start the API
+dependency first.
+It checks readiness ordering, real browser delivery, the effective
+non-root UID, zero effective capabilities, no-new-privileges, a separate mount
+namespace, a read-only root mount, API restart without worker replacement,
+generated work completion, output hashes, retained approvals/receipts,
+SQLite identity/integrity, and graceful stop.
+It does not infer every private-path access result from these sandbox checks.
+
+Use a new fixture root and new units for each `--case forced` and
+`--case graceful` run. Both cases wait for committed progress in the scan and
+publication lanes. They stop the owned worker briefly with SIGSTOP and confirm
+that both operations remain active. A competing foreground worker must fail
+with the native ownership error.
+If the work finishes before the observation, the check fails as inconclusive.
+Do not report idle-process termination as active recovery evidence.
+
+The forced case sends SIGKILL, cancels the pending restart, and starts the same
+worker again. It checks request generations before normal lease expiry and
+waits for recovery without editing lease timestamps.
+The graceful case asks systemd to stop the frozen worker; systemd resumes it
+for the normal SIGTERM drain. Both cases then require final file hashes,
+complete scan coverage, unchanged approvals/normalization receipts, and retained
+database identity. All waits have bounds.
+This tests local publication recovery, not uncertain network transfer recovery.
+Run the existing worker, queue, transfer, publication, and recovery Rust tests
+for stale claims, partial outputs, and failed/waiting policy separately.
+
+`collect` reads current unit status and durable state without manager mutations:
+
+```sh
+python3 packaging/linux/service-acceptance.py collect \
+  --run-id "$RUN" --root "$ROOT" --package "$PACKAGE"
+```
+
+Reports are new private `report-*.json` files in the fixture root.
+Failed runs save a failed result before returning an error.
+A failed run leaves state and services for inspection; it does not hide the
+failure with automatic deletion. An observed SIGSTOP is released on error.
+Use approved cleanup after inspection.
+
+### Host checklist and evidence still required
+
+These are separate manual cases. Do not replace them with a passed unit syntax
+check, a mocked runner test, or a historical WSL result.
+
+| Case                            | Required action and evidence                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Actual stop timeout             | On isolated units, use an approved debugger to keep only the owned application stopped through manager signals. Record the unchanged 180-second stop budget, manager timeout result, SIGKILL escalation, retained SQLite integrity, and ownership recovery. SIGSTOP alone is insufficient because systemd sends SIGCONT during stop.                         |
+| Restart rate limit              | With all state users stopped, make only the generated private configuration invalid. Record exactly three failed application starts within 300 seconds, followed by manager rate-limit rejection. Preserve the journal excerpt for these units only. Restore the exact generated input before an explicit reset/start.                                       |
+| Private access                  | Test the generated JSON, stable save lock, dummy credential, cache/staging bindings, and media roots under the runtime UID and actual service mount namespace. Record permitted access and denied group/other or unavailable-path cases. Do not use an administrator read or configured directives as proof.                                                 |
+| Mount loss                      | With separate mount approval, use a generated filesystem containing only fixture data. Record scan failure, retained indexed entries and bindings, incomplete coverage, and absence of replacement content after loss. Restore the mount before recovery. Never unmount an existing library.                                                                 |
+| Changed identity                | Record device/inode pairs before and after the approved generated remount. Reject the test as inconclusive if the pair is reused. Confirm rejection of a genuinely different identity without rebinding a copied marker. This does not resolve identity reuse or cloning.                                                                                    |
+| Update/removal                  | With all fixture state users stopped, hash configuration, dummy credentials, database/WAL, binding markers, media, receipts/recovery, and operator drop-ins. Use the existing checker on generated program copies. Check refusal for changed/unknown program files, then exact owned-file removal. Compare the retained inputs. Do not use production files. |
+| Failed/waiting and stale claims | Retain focused Rust workflow results separately. An installed-service assertion needs a generated failed/waiting request or old claim and evidence that restart neither approves nor retries it. A completed happy-path request is not proof.                                                                                                                |
+
+For boot checks, first complete the installed cases.
+Separately approve enablement of only the two isolated units.
+Capture a `boot-before` report. The operator then performs the approved restart,
+physical reboot, or cold boot without a manual service start.
+Capture `boot-after` with `--before /absolute/path/to/report-boot-before-....json`.
+Both modes take the same run/root/package arguments.
+The reports compare kernel boot ID, PID 1 start marker, and database identity.
+They also check running services, effective restrictions, and real browser access.
+The runner never initiates a reboot or enables units.
+Its result is only `running_after_observed_restart`: the operator must retain
+separate evidence of automatic startup and the physical boot method.
+A WSL manager restart cannot satisfy physical boot or reboot acceptance.
+
+### Exact-resource cleanup
+
+After review, use separately approved cleanup:
+
+```sh
+python3 packaging/linux/service-acceptance.py cleanup \
+  --run-id "$RUN" --root "$ROOT" --package "$PACKAGE" \
+  --approved-host "$(hostname)"
+```
+
+Cleanup checks the unit source, exact content, ownership, and absence of drop-ins.
+It stops and disables only these two units, rechecks them, unlinks only their
+unchanged files, and reloads the manager. A changed input causes an error.
+Partial cleanup is possible; inspect the error and retained report.
+It does not delete program files, fixture data, accounts, mounts, or evidence.
+Confirm that the two unit registrations and enable links are gone.
+Keep the fixture root for recovery inspection. Its removal needs a separate,
+exact-path operator decision after evidence retention.

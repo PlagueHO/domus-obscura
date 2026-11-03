@@ -26,6 +26,7 @@ mod caa;
 #[path = "playback.rs"]
 mod playback;
 mod publication;
+mod service_acceptance;
 #[path = "staging.rs"]
 mod staging;
 
@@ -42,6 +43,13 @@ struct Fixture {
     scratch: TempDir,
     _state: TempDir,
     _library: TempDir,
+}
+
+#[derive(Default)]
+struct FixtureInputs {
+    profile: Option<domus::domain::AudioProfile>,
+    directories: Option<[TempDir; 3]>,
+    source: Option<Vec<u8>>,
 }
 
 impl Fixture {
@@ -125,9 +133,34 @@ impl Fixture {
         replacement_action: Option<ReplacementAction>,
         profile: Option<domus::domain::AudioProfile>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let state = tempdir()?;
-        let library = tempdir()?;
-        let scratch = tempdir()?;
+        Self::build_with_inputs(
+            format,
+            staged,
+            approve_cover,
+            receive,
+            backup,
+            replacement_action,
+            FixtureInputs {
+                profile,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn build_with_inputs(
+        format: AudioFormat,
+        staged: bool,
+        approve_cover: bool,
+        receive: bool,
+        backup: Option<&std::path::Path>,
+        replacement_action: Option<ReplacementAction>,
+        inputs: FixtureInputs,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let [state, library, scratch] = match inputs.directories {
+            Some(directories) => directories,
+            None => [tempdir()?, tempdir()?, tempdir()?],
+        };
+        let profile = inputs.profile;
         let database = state.path().join("state.db");
         let mut store = Store::open(&database)?;
         let main = add_location(&store, library.path(), "main")?;
@@ -221,23 +254,25 @@ impl Fixture {
             .ok_or("missing claim")?
             .claim;
         store.advance(&claim, JobState::Queued, JobState::Searching)?;
-        let source =
-            if let Some(profile) = profile.filter(|profile| profile.format() == AudioFormat::Mp3) {
-                super::profiles::frames(
-                    &profile
-                        .bitrate()
-                        .map_or_else(|| vec![32, 192, 320], |bitrate| vec![bitrate; 3]),
-                    false,
-                    false,
-                    0,
-                    false,
-                )
-            } else {
-                match format {
-                    AudioFormat::Mp3 => mp3()?,
-                    AudioFormat::Flac => flac(),
-                }
-            };
+        let source = if let Some(source) = inputs.source {
+            source
+        } else if let Some(profile) = profile.filter(|profile| profile.format() == AudioFormat::Mp3)
+        {
+            super::profiles::frames(
+                &profile
+                    .bitrate()
+                    .map_or_else(|| vec![32, 192, 320], |bitrate| vec![bitrate; 3]),
+                false,
+                false,
+                0,
+                false,
+            )
+        } else {
+            match format {
+                AudioFormat::Mp3 => mp3()?,
+                AudioFormat::Flac => flac(),
+            }
+        };
         let files = (1..=3)
             .map(|track| SourceFile {
                 remote_path: format!("Peer\\Album\\track-{track}.{}", format.extension()),
