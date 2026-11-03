@@ -46,6 +46,9 @@ jobs:
       - name: Check Linux packaging helpers and unit syntax
         if: runner.os == 'Linux'
         run: python3 packaging/linux/package-check.py --self-test
+      - name: Check Linux acceptance runner without host changes
+        if: runner.os == 'Linux'
+        run: python3 packaging/linux/service-acceptance-tests.py
       - name: Build and verify Linux package
         if: runner.os == 'Linux'
         run: cargo task package-linux
