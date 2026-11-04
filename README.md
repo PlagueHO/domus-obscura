@@ -7,6 +7,12 @@ Personal home-media management with Rust, React, and SQLite.
 See the [backend services and domains](docs/backend-architecture.md) for architecture
 diagrams, current boundaries and planned changes.
 
+Use the [operator guide](docs/operator-guide.md) for foreground startup, status,
+shutdown, configuration activation, safe updates, and consistent backup/restore.
+Local binary execution is the current baseline. Native Windows installer/services
+and Linux systemd deployment remain deferred; their documented commands are not
+installed-service or reboot acceptance.
+
 Use [issue #1](https://github.com/PlagueHO/domus-obscura/issues/1) as the V1 scope
 tracker and remaining-work checklist. Follow its linked delivery issues rather
 than treating the foundation PR as complete V1. Future tag rules, conversational
@@ -64,9 +70,10 @@ implementation of the approved [UI study](docs/ui-poc/README.md), not a replacem
 design. Its Orbit navigation, Home queue, shared status pills, fixed-size media
 cards, download preparation drawer and safe-cancellation confirmation now use
 shared components. Browser answers and safe recovery remain separate actions.
-Atomic album publication, replacement/restore management, automated source
-selection, native worker service supervision, the remaining UI port,
-native services and production packages remain incomplete.
+The remaining V1 acceptance, automated source selection, and UI port are not
+complete. Native Windows installer/services and Linux systemd deployment remain
+deferred. Existing publication and retained-album recovery still require their
+exact approvals and receipt checks; they are not general filesystem rollback.
 
 ## Single-user launch without cloud setup
 
@@ -82,12 +89,14 @@ This builds the real connected browser and starts the application in the
 foreground. It does not need service configuration or administrator runtime
 access. On Linux, use `cargo task bootstrap` and `cargo task dev`.
 The [Windows installation guide](docs/windows-services.md) describes the separate
-package and optional NSIS service setup. Services are off by default.
+package and optional NSIS service setup. Services are off by default, and native
+deployment is deferred in [#17](https://github.com/PlagueHO/domus-obscura/issues/17).
 
-Run `domus serve` without a configuration argument. Open
-`http://127.0.0.1:8080`. This starts the real browser application with the fixed
-`_anonymous` identity. It needs no Azure, DNS, certificate, Entra registration,
-Node.js or infrastructure tool at runtime.
+For a fresh first launch, run `domus serve` without a configuration argument.
+Open `http://127.0.0.1:8080`. This creates single-user configuration and starts
+the real browser application with the fixed `_anonymous` identity. This default
+mode needs no Azure, DNS, certificate, Entra registration, Node.js or infrastructure
+tool at runtime.
 
 The release executable requires built browser files in a sibling `browser`
 directory. Debug builds use `frontend/dist-app` when packaged files are absent.
@@ -96,9 +105,11 @@ and an occupied port are errors, not an API-only fallback.
 
 First launch creates private `DomusObscura` state below `LOCALAPPDATA` on Windows
 or `XDG_DATA_HOME` on Linux. Linux falls back to `$HOME/.local/share`.
-Later launches reuse `service.json` and `state.db`. Existing configuration and
-interrupted `.service.json.pending` files are not replaced automatically.
-Provider services are disabled and system settings are read-only by default.
+Later launches load existing `service.json` and reuse `state.db`. Omitting the
+configuration argument does not reset authentication, providers, or certificates;
+use the saved origin and review configured startup effects. Existing configuration
+and interrupted `.service.json.pending` files are not replaced automatically.
+Provider services are disabled and system settings are read-only in a fresh default configuration.
 Configure local roots and optional services separately through the existing
 operator commands. No media operation is approved by starting the app.
 
@@ -1682,8 +1693,8 @@ Failed refreshes retain the last values with a stale warning, not a current-stat
 claim. APIs without a file-backed Configuration service return an explicit unavailable
 error instead of invented values.
 
-When both active and saved configuration permit editing, select **Edit backend
-configuration**. The form covers all supported host and provider fields,
+When both active and saved configuration permit editing, select the required
+System section. The form covers all supported host and provider fields,
 including optional cache, browser assets, and development acquisition.
 Entra identifiers and secret-file references use write-only replacement controls.
 **Keep saved value** and a blank replacement preserve the current value.
@@ -1691,8 +1702,8 @@ Removing an optional hidden value requires **Remove saved value**.
 Disabling an optional group removes its configuration, not its files.
 The form never accepts credential contents or edits `system_settings_read_only`.
 
-**Validate section** runs passive checks through
-`POST /api/system/configuration/sections/validate`. **Save section** repeats
+Under **Advanced**, **Check changes before saving** runs passive checks through
+`POST /api/system/configuration/sections/validate`. **Save changes** repeats
 those checks and uses `POST /api/system/configuration/sections/save`. Both use the existing
 authentication, loopback, exact Origin, and CSRF guards. Validation reads local
 inputs and checks TLS without contacting providers. It uses a current-schema
@@ -1707,7 +1718,7 @@ startup loading, redaction, revision checks, secret merging, and atomic saves.
 
 The sidebar separates General, Identity, TLS, and Storage/cache from Music
 Providers, Acquisition, Output policy, and Library roots. A section save sends
-only that section. **Save changed backend sections** saves related changes
+only that section. **Save all changed sections** saves related changes
 together. Unchanged saved sections and other browser drafts are preserved.
 The existing whole-draft validate/save routes remain supported.
 
@@ -1956,11 +1967,15 @@ order is invalid. It also requires completed DNS cleanup. It preserves the faile
 attempt before preparing new work. A lost order URL or an uncertain DNS intent
 cannot use this command. Run bootstrap separately to create the new order.
 
-Stop and drain the API before backup. Back up the private state directory,
-database, configuration and separate credential files together. Protect backups
-as private keys. Do not copy a backup to another root and assume it is bound.
-Restore the original root and native binding, or use a new state directory and
-explicit bootstrap. Never delete unknown generation files as automatic cleanup.
+Use the [consistent backup procedure](docs/operator-guide.md#consistent-backup).
+Stop and exclude every state user, not only the API. Preserve matching SQLite
+sidecars, configuration, separate credentials, managed generations/journals, and
+media recovery evidence. Protect backups as private keys.
+Follow the [restore prerequisites](docs/operator-guide.md#restore-a-backup) before
+activation. Copied markers cannot restore native identity, and an older snapshot
+cannot undo later DNS writes or uncertain submissions. A new state directory and
+explicit bootstrap are separate recovery decisions, not transparent restore.
+Never delete unknown generation files as automatic cleanup.
 
 The listener permits at most 64 complete connections, including handshakes and idle connections. TLS and HTTP-header timeouts are ten seconds. Header count is limited to 64. The HTTP parser buffer is limited to 32 KiB. Application headers are limited to 16 KiB and URLs to 8 KiB. Application requests are limited to 32 concurrent operations and 25 seconds. Database work uses at most four admitted blocking tasks and one short-held store lock. The JSON body limit is 2 MiB; settings requests have a 16 KiB limit.
 

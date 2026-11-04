@@ -10,6 +10,11 @@ argument. It starts anonymous loopback HTTP without TLS, Azure, DNS or Entra.
 See [normal startup](../README.md#single-user-launch-without-cloud-setup) before using this optional
 developer HTTPS workflow.
 
+Use the [operator guide](operator-guide.md) for status, configuration activation,
+all-process shutdown, backup/restore, and safe updates. Local binary execution is
+the current baseline. Native Windows services and Linux systemd deployment remain
+deferred; this developer workflow does not provide their acceptance evidence.
+
 The separate [production worker](../README.md#separate-production-worker) uses
 `production_worker`, not this guide's optional `local_acquisition` runtime.
 Do not enable both. Production source discovery is not part of that worker.
@@ -71,9 +76,10 @@ retains the last values with a stale warning. Inspection creates no database,
 cache root or staging directory and starts no provider work.
 Set `system_settings_read_only: false` outside the UI to enable editing.
 Both the running configuration and saved file must permit a backend JSON save.
-Use **Edit backend configuration**, then **Validate section** or
-**Save section**. These commands retain the draft after failure.
-Navigation retains unsaved sections. **Save changed backend sections** saves
+Select the required section. Under **Advanced**, use
+**Check changes before saving** for passive validation. Use **Save changes** to
+save the section. These commands retain the draft after failure.
+Navigation retains unsaved sections. **Save all changed sections** saves
 related backend edits together without changing other saved sections.
 A stale revision requires reload and review; the form never overwrites it.
 Secret-file references and Entra identifiers have write-only replacement controls.
@@ -327,15 +333,19 @@ The page shows the local operation error and durable job/transfer/publication st
 The last-operation message is process-local; receipts and questions are durable.
 
 For foreground shutdown, use Ctrl+C. On Linux, SIGTERM uses the same path.
+Before backup, restore, or upgrade, complete the
+[all-state-user maintenance boundary](operator-guide.md#stop-and-exclude-all-state-users).
+Stopping only this API does not exclude a separate worker, CLI, or certificate owner.
 The server first rejects new local source, download and publication operations.
-It closes HTTP connections with a ten-second grace period, then waits for the
-current local operation and its result recording. This wait has no forced
+It requests immediate HTTP shutdown; in-flight requests can lose their responses.
+It then waits for the current local operation and its result recording.
+The ten-second HTTP grace period applies only to configuration reload.
+The normal operation drain has no forced
 timeout: it must not abandon an active receive or publication copy.
 A server error also drains before the process exits. A forced process kill
 cannot use this path; inspect saved receipts and uncertainty before recovery.
-This is not a native Windows service or systemd package.
-The local drain regression runs on Windows. Linux signal execution and
-service-manager shutdown still need Linux acceptance.
+This foreground workflow is not installed-service or reboot evidence.
+Native Windows and systemd host lifecycle acceptance remains deferred.
 
 Open **Decisions** in the application navigation for durable questions. Pending
 answers and saved answers that still need recovery remain in the paginated inbox.
@@ -425,9 +435,10 @@ through local protocol sockets, normalize and publish them.
 
 Passing generated tests does not prove that any arbitrary peer has the exact
 edition or permitted content. No new live test was authorized or performed here.
-The local browser shell is an initial connected implementation. Narrow-screen
-polish, full artwork-recovery UI, scheduling, atomic replacement, service
-packages and public acceptance remain outside this delivery.
+These generated checks are not complete V1 or public acceptance. Native service
+deployment and reboot acceptance remain deferred. Use the operator guide's
+[evidence classes](operator-guide.md#scope-and-evidence) when recording local,
+remote, or host-specific results.
 
 ## Manual setup on Linux or with an existing developer certificate
 
