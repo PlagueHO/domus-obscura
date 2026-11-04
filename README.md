@@ -1693,8 +1693,8 @@ Failed refreshes retain the last values with a stale warning, not a current-stat
 claim. APIs without a file-backed Configuration service return an explicit unavailable
 error instead of invented values.
 
-When both active and saved configuration permit editing, select **Edit backend
-configuration**. The form covers all supported host and provider fields,
+When both active and saved configuration permit editing, select the required
+System section. The form covers all supported host and provider fields,
 including optional cache, browser assets, and development acquisition.
 Entra identifiers and secret-file references use write-only replacement controls.
 **Keep saved value** and a blank replacement preserve the current value.
@@ -1702,8 +1702,8 @@ Removing an optional hidden value requires **Remove saved value**.
 Disabling an optional group removes its configuration, not its files.
 The form never accepts credential contents or edits `system_settings_read_only`.
 
-**Validate section** runs passive checks through
-`POST /api/system/configuration/sections/validate`. **Save section** repeats
+Under **Advanced**, **Check changes before saving** runs passive checks through
+`POST /api/system/configuration/sections/validate`. **Save changes** repeats
 those checks and uses `POST /api/system/configuration/sections/save`. Both use the existing
 authentication, loopback, exact Origin, and CSRF guards. Validation reads local
 inputs and checks TLS without contacting providers. It uses a current-schema
@@ -1718,7 +1718,7 @@ startup loading, redaction, revision checks, secret merging, and atomic saves.
 
 The sidebar separates General, Identity, TLS, and Storage/cache from Music
 Providers, Acquisition, Output policy, and Library roots. A section save sends
-only that section. **Save changed backend sections** saves related changes
+only that section. **Save all changed sections** saves related changes
 together. Unchanged saved sections and other browser drafts are preserved.
 The existing whole-draft validate/save routes remain supported.
 

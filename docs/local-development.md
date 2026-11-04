@@ -76,9 +76,10 @@ retains the last values with a stale warning. Inspection creates no database,
 cache root or staging directory and starts no provider work.
 Set `system_settings_read_only: false` outside the UI to enable editing.
 Both the running configuration and saved file must permit a backend JSON save.
-Use **Edit backend configuration**, then **Validate section** or
-**Save section**. These commands retain the draft after failure.
-Navigation retains unsaved sections. **Save changed backend sections** saves
+Select the required section. Under **Advanced**, use
+**Check changes before saving** for passive validation. Use **Save changes** to
+save the section. These commands retain the draft after failure.
+Navigation retains unsaved sections. **Save all changed sections** saves
 related backend edits together without changing other saved sections.
 A stale revision requires reload and review; the form never overwrites it.
 Secret-file references and Entra identifiers have write-only replacement controls.
@@ -336,8 +337,10 @@ Before backup, restore, or upgrade, complete the
 [all-state-user maintenance boundary](operator-guide.md#stop-and-exclude-all-state-users).
 Stopping only this API does not exclude a separate worker, CLI, or certificate owner.
 The server first rejects new local source, download and publication operations.
-It closes HTTP connections with a ten-second grace period, then waits for the
-current local operation and its result recording. This wait has no forced
+It requests immediate HTTP shutdown; in-flight requests can lose their responses.
+It then waits for the current local operation and its result recording.
+The ten-second HTTP grace period applies only to configuration reload.
+The normal operation drain has no forced
 timeout: it must not abandon an active receive or publication copy.
 A server error also drains before the process exits. A forced process kill
 cannot use this path; inspect saved receipts and uncertainty before recovery.

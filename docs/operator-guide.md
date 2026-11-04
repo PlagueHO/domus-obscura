@@ -207,10 +207,11 @@ This is the maintenance boundary for backup, restore, and upgrade.
 2. Stop the worker first with Ctrl+C in its foreground terminal. On Linux,
    SIGTERM uses the same drain path. Wait for operation/session threads to finish
    and for the process to exit.
-3. Stop the API with Ctrl+C. Linux SIGTERM also requests normal drain. The local
-   API closes HTTP connections with a ten-second grace period, then waits for
-   active local work and result recording. That operation drain has no forced
-   timeout.
+3. Stop the API with Ctrl+C. Linux SIGTERM also requests normal drain. The API
+   requests immediate HTTP shutdown; in-flight requests can lose their responses.
+   It then waits for active local work and result recording. That operation drain
+   has no forced timeout. The ten-second HTTP grace period applies only to
+   configuration reload, not normal stop.
 4. Stop every other state user: one-shot workers, source tools, scan commands,
    `service-call`, `mcp-stdio`, standalone certificate bootstrap/recovery,
    SQLite tools, and external configuration writers. Confirm their actual exit.
@@ -248,8 +249,10 @@ Changing one does not rewrite existing plans or approve media work.
 | Reload/restart required    | Saved JSON differs from the API snapshot. API activation and worker activation are separate.          |
 
 Use System to inspect settings. When both active and saved configuration permit
-editing, use **Validate section** before **Save section**, or save related changed
-sections together. Validation reads existing inputs, verifies TLS, and queries
+editing, select the required section. Open **Advanced** and use
+**Check changes before saving** for passive validation. Use **Save changes** to
+save that section, or **Save all changed sections** for related changed sections.
+Validation reads existing inputs, verifies TLS, and queries
 current-schema SQLite. It does not migrate, create/bind roots, contact providers,
 start work, or activate TLS. There is no general backend-validation CLI.
 Do not substitute `serve`, `api-preview`, or `PreparedServer::load` for validation.
