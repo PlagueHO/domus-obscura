@@ -1,5 +1,16 @@
 # Linux package and systemd services
 
+**Native systemd deployment is deferred in
+[#18](https://github.com/PlagueHO/domus-obscura/issues/18).** Foreground binary
+execution under an approved non-root account is the current baseline.
+The candidate and unit implementation remain available, but installed-service
+and reboot acceptance is not complete. Reconfirm deployment before privileged
+host work; do not claim unattended service support.
+Use the
+[operator guide](https://github.com/PlagueHO/domus-obscura/blob/main/docs/operator-guide.md)
+for foreground status, configuration activation, backup/restore, and recovery.
+The full URL also works from the packaged copy of this platform guide.
+
 ## Supported candidate
 
 The first target is `x86_64-unknown-linux-gnu` on Ubuntu 24.04.
@@ -242,29 +253,58 @@ Service restart does not start a new download without durable approved work.
 
 ## Update and consistent backup
 
-1. Disable boot startup for both units. Apply runtime masks during maintenance
-   so a dependency or another systemd start cannot restart them.
+Complete the shared
+[maintenance and backup procedure](https://github.com/PlagueHO/domus-obscura/blob/main/docs/operator-guide.md#consistent-backup)
+before these optional systemd update steps. Keep native deployment deferred unless
+its scope and host changes are separately approved.
+
+1. Disable boot startup for both units. Establish and verify a service activation
+   block during maintenance. Runtime masks are sufficient only when both units
+   actually report `LoadState=masked`; see the checks below.
 2. Stop worker, then API. Stop all foreground state users. Confirm stopped
    status and coordinate with other operators.
-3. Back up the complete SQLite state with all users stopped, including retained
-   WAL/journal files. Do not copy a live database file alone.
+3. Back up the complete SQLite state with all users stopped, including matching
+   retained WAL/journal sidecars. Do not copy a live database file alone.
 4. Preserve configuration, credential references, native bindings, certificate
    state, cache/staging ownership, receipts, and recovery journals.
-   Keep backups private. Check a separate isolated backup without live roots
-   or providers. Wider backup/restore procedures remain #19.
+   Include required retained album/media files outside application state.
+   Keep backups private. Check a separate isolated working copy without live
+   roots, application startup, or providers. Use the common backup inventory.
 5. Verify the new archive separately. Verify the old installed manifest.
    A changed or unknown program file blocks payload removal.
 6. Remove only the old verified payload files with the checker.
    Keep the root directory. Copy the new verified payload into the empty root.
    Replace only unchanged owned unit files. Keep site-specific drop-ins.
-7. Reload unit definitions. Remove the runtime masks. Start API, then worker.
-   Only API startup may migrate the existing database.
-   Inspect recovery and active configuration before enabling boot startup again.
+7. Reload unit definitions. Remove the verified activation block for the API only.
+   Keep worker activation blocked. Start one API as the migration owner. Inspect
+   schema, recovery, and active configuration before removing the worker's block.
+   Then start the worker and check its fresh revision. It can resume interrupted
+   accepted work. Enable boot startup only after approved readiness checks.
 
 Use `systemctl mask --runtime` and `systemctl unmask --runtime` with the exact
-two unit names. Masks do not prevent a foreground process; coordinate all users.
+two unit names only when runtime masking is effective for that installation.
+The supplied manual setup places units in `/etc/systemd/system`. Local files
+can prevent masking or take precedence over a runtime mask. Do not assume command
+success proves that activation is blocked. Check both units after masking and stop:
+
+```sh
+systemctl show domus-obscura-api.service domus-obscura-worker.service \
+  --property=Id --property=LoadState --property=ActiveState --property=MainPID
+```
+
+Require `LoadState=masked`, `ActiveState=inactive` or `failed`, and `MainPID=0`
+for each unit before copying state. Also confirm that operation processes and
+foreground state users have exited. If these conditions are not met, stop
+maintenance. Use a separately reviewed activation block for the installed layout;
+do not overwrite unit files or suppress mask errors to force success.
+See the official [mask contract](https://www.freedesktop.org/software/systemd/man/255/systemctl.html#mask%20UNIT%E2%80%A6).
+Disabling boot startup alone does not block a manual or dependency start.
+Masks do not prevent a foreground process; coordinate all users.
 After a schema upgrade, an older binary is not a database rollback.
-Restore only a tested consistent backup under an explicit recovery procedure.
+Use the
+[restore procedure](https://github.com/PlagueHO/domus-obscura/blob/main/docs/operator-guide.md#restore-a-backup).
+Preserve the current stopped state first. Copied markers do not restore native
+identity, and an old snapshot cannot undo later media, transfer, or DNS effects.
 No update command replaces configuration or deletes application data.
 
 ## Non-destructive uninstall

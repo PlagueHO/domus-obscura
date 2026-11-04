@@ -4,6 +4,11 @@ This guide preserves the detailed operational rules from the original root
 AGENTS.md. Read the relevant command and service boundaries before changing them.
 The root AGENTS.md provides the short command and repository guide.
 
+The [operator guide](operator-guide.md) defines the shared foreground lifecycle,
+all-state-user maintenance boundary, consistent backup/restore, and safe upgrades.
+Native installer/service deployment remains deferred. Preserve the detailed
+command-specific rules below when applying that common procedure.
+
 ## Artist photos
 
 Commons is the only installed artist-photo source. Keep its selection separate

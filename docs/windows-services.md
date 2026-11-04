@@ -1,5 +1,15 @@
 # Windows installation and services
 
+**Native installer and service deployment is deferred in
+[#17](https://github.com/PlagueHO/domus-obscura/issues/17).** Local binary execution
+under the user's normal account is the current baseline. Keep the existing
+implementation, but reconfirm the deployment approach before installed-service
+or reboot work. This guide does not claim unattended service acceptance.
+Use the
+[operator guide](https://github.com/PlagueHO/domus-obscura/blob/main/docs/operator-guide.md)
+for foreground status, configuration activation, backup/restore, and recovery.
+The full URL also works from the packaged copy of this platform guide.
+
 ## Clone and run first
 
 Services and the installer are optional. From a clone with the pinned build
@@ -151,6 +161,8 @@ The services are `DomusObscuraApi` and `DomusObscuraWorker`.
 The Start action checks both service roles and their actual account SIDs before
 starting either process. Both must use the same enabled non-administrator local
 account. Stop and Remove remain available for an owned, misconfigured service.
+Start launches both roles in order and has no API-only inspection pause.
+Do not use it as an API-only migration or restore check.
 Worker startup depends on API readiness. Only the API migrates SQLite.
 An API service restart under a live worker service requires current schema and
 cannot migrate it. Do not run a foreground worker against the same state while
@@ -185,26 +197,44 @@ to make a failed service start.
 
 ## Update and consistent backup
 
+Complete the shared
+[maintenance and backup procedure](https://github.com/PlagueHO/domus-obscura/blob/main/docs/operator-guide.md#consistent-backup)
+before these optional native update steps. Keep native deployment deferred unless
+its scope and host changes are separately approved.
+
 1. Stop worker, then API. Stop every foreground process using the installation.
 2. Confirm stopped status. Prevent another operator or supervisor from starting
    either process during backup and update.
 3. Back up the complete local SQLite state with all users stopped. Include
-   any retained WAL/journal files. Alternatively use SQLite's supported online
-   backup API under a separate documented procedure; do not copy a live database
-   file alone.
+   matching retained WAL/journal sidecars. Do not copy a live database alone.
+   SQLite's online backup API is a database-only alternative; it needs a separate
+   reviewed procedure for matching application and media state.
 4. Preserve configuration, root bindings, credential references, certificate
-   state, staging, and recovery journals. Protect backup permissions.
+   state, staging, and recovery journals. Include required retained album/media
+   files outside application state. Protect backup permissions.
 5. Check the backup in a separate isolated copy. Do not open live media roots or
    run providers to test the backup.
 6. Run the installer update. It rejects active services and foreground processes.
    Confirm the stopped-state backup before replacement.
-7. Start API, check its current schema and active configuration, then start worker.
-   Inspect durable recovery before approving any new operation.
+7. Complete the API-only maintenance check below before service startup. Then
+   run `.\services.ps1 -Action Start` only when both roles may run. Confirm the
+   worker's fresh revision. Starting it can resume interrupted accepted work.
+
+For the API-only check, keep both services stopped and automatic startup disabled.
+Under the same dedicated runtime account, use the installed
+`domus.exe serve <absolute-configuration-file>` as the sole migration owner.
+Check the schema, active configuration, and retained recovery before allowing
+worker startup. Stop and drain that foreground API before using the service helper.
+This needs a separately approved way to run under the restricted account.
+If that access is unavailable, stop the update/recovery procedure. Do not grant
+interactive logon rights or run as an administrator to bypass it.
 
 The installer does not migrate SQLite or replace saved configuration.
 After a schema upgrade, installing an older executable is not a database
-rollback. Restore a tested, consistent backup only through an explicit recovery
-procedure. Wider operating and restore procedures remain #19.
+rollback. Follow the
+[restore procedure](https://github.com/PlagueHO/domus-obscura/blob/main/docs/operator-guide.md#restore-a-backup).
+Preserve the current stopped state first. Copied markers do not restore native
+identity, and an old snapshot cannot undo later media, transfer, or DNS effects.
 
 ## Recovery and uninstall
 
@@ -234,9 +264,10 @@ Record actual restricted-account start/stop, active-operation drain, forced
 exit/restart, missing drives, credential denial, update, uninstall, and reboot
 results separately. Use a disposable Windows environment and fresh generated
 state. Account/ACL changes, installation, and reboot require separate approval.
-The deferred Azure Windows VM checks are tracked in #48. Run them after the
-other outstanding work is complete. Native acceptance remains unverified until
-those checks and distribution review are complete.
+The deferred Azure Windows VM checks are tracked in
+[#48](https://github.com/PlagueHO/domus-obscura/issues/48). Do not schedule them
+until the deployment approach is reconfirmed under #17. Native acceptance remains
+unverified until the required checks and distribution review are complete.
 
 Official contracts:
 [ServiceMain](https://learn.microsoft.com/en-us/windows/win32/services/service-servicemain-function),
