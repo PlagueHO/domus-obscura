@@ -48,6 +48,7 @@ test("narrow tray overrides win the cascade and reserve the collapsed height", a
         await collapsedTray(page, current, count);
         await expect(page.locator(".tray-bar")).toHaveCSS("flex-wrap", "nowrap");
         await expect(page.locator(".tray-bar h2")).toHaveCSS("font-size", "12.75px");
+        await expect(page.locator(".tray-bar .button")).toHaveCSS("white-space", "nowrap");
         await expect(page.locator(".step-rail")).toHaveCSS("flex-basis", "0px");
         await expect(page.locator(".step-rail")).toHaveCSS("overflow-x", "auto");
         await expect(page.locator(".step-rail li").first()).toHaveCSS("padding-left", "4px");
