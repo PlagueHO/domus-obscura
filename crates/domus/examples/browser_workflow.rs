@@ -12,7 +12,10 @@ use domus::infrastructure::api::{
 };
 use domus::infrastructure::browser::BrowserAssets;
 use domus::infrastructure::catalog::{CatalogQuery, CatalogResult};
-use domus::infrastructure::server::configuration::ConfigurationService;
+use domus::infrastructure::server::configuration::{
+    ConfigurationReplacement, ConfigurationSectionCommand, ConfigurationSectionUpdate,
+    ConfigurationService,
+};
 use domus::infrastructure::staging::StagingRoot;
 use domus::infrastructure::store::{PlanRequest, Store};
 use domus::{Error, Result};
@@ -88,7 +91,9 @@ impl Fixture {
     fn new() -> Result<Self> {
         let root = private::tempdir().map_err(|error| Error::InvalidInput(error.to_string()))?;
         for folder in ["main", "backup", "staging", "state"] {
-            std::fs::create_dir(root.path().join(folder))?;
+            let path = root.path().join(folder);
+            std::fs::create_dir(&path)?;
+            private::directory(&path).map_err(|error| Error::InvalidInput(error.to_string()))?;
         }
         let mut store = Store::open(&root.path().join("state").join("state.db"))?;
         let main = add_location(&store, &root.path().join("main"), "main")?;
@@ -299,6 +304,52 @@ impl Fixture {
         )
     }
 
+    fn configuration_command(&self, body: &[u8]) -> Result<ConfigurationSectionCommand> {
+        let command: ConfigurationSectionCommand = decode(body)?;
+        for section in &command.sections {
+            let permitted = match section {
+                ConfigurationSectionUpdate::General { browser_assets, .. } => {
+                    browser_assets.is_none()
+                }
+                ConfigurationSectionUpdate::Identity {
+                    client_secret_file, ..
+                } => !matches!(client_secret_file, ConfigurationReplacement::Replace(_)),
+                ConfigurationSectionUpdate::Tls {
+                    certificate_file,
+                    private_key_file,
+                    managed_tls,
+                    ..
+                } => {
+                    certificate_file.is_none()
+                        && !matches!(private_key_file, ConfigurationReplacement::Replace(_))
+                        && managed_tls.is_none()
+                }
+                ConfigurationSectionUpdate::Storage { database, cache } => {
+                    database == &self.store.database_path().to_string_lossy() && cache.is_none()
+                }
+                ConfigurationSectionUpdate::MusicProviders { .. } => true,
+                ConfigurationSectionUpdate::MusicAcquisition {
+                    local_acquisition,
+                    production_worker,
+                } => {
+                    local_acquisition.is_none()
+                        && production_worker
+                            .as_ref()
+                            .is_none_or(|worker| worker.acquisition.is_none())
+                }
+                ConfigurationSectionUpdate::MusicSharing { sharing } => sharing
+                    .as_ref()
+                    .is_none_or(|sharing| sharing.account.is_none()),
+            };
+            if !permitted {
+                return Err(Error::InvalidInput(
+                    "browser fixture configuration accepts only its generated database and no additional file, root or credential references".into(),
+                ));
+            }
+        }
+        Ok(command)
+    }
+
     fn dispatch(
         &mut self,
         method: &Method,
@@ -379,10 +430,12 @@ impl Fixture {
                 return json_response(self.configuration.read()?);
             }
             ("POST", "/api/system/configuration/sections/validate") => {
-                return json_response(self.configuration.validate_sections(decode(body)?)?);
+                let command = self.configuration_command(body)?;
+                return json_response(self.configuration.validate_sections(command)?);
             }
             ("POST", "/api/system/configuration/sections/save") => {
-                return json_response(self.configuration.save_sections(decode(body)?)?);
+                let command = self.configuration_command(body)?;
+                return json_response(self.configuration.save_sections(command)?);
             }
             ("GET", "/api/settings") => return json_response(self.store.settings()?),
             ("PUT", "/api/settings") => {
@@ -903,6 +956,116 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_child_directories_are_private() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new()?;
+        for folder in ["main", "backup", "staging", "state"] {
+            let permissions = std::fs::metadata(fixture.root.path().join(folder))?.permissions();
+            assert_eq!(permissions.mode() & 0o777, 0o700, "{folder}");
+        }
+        fixture.dispose()
+    }
+
+    #[test]
+    fn configuration_endpoints_reject_non_fixture_resources_before_validation() -> Result<()> {
+        let mut fixture = Fixture::new()?;
+        let revision = fixture.configuration.read()?.saved_revision;
+        let external = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let keep = json!({"action":"keep"});
+        let replace = json!({"action":"replace","value":external});
+        let acquisition = json!({
+            "staging_root":fixture.root.path().join("staging"),
+            "credentials_file":replace,
+            "server":"generated.invalid:2242", "acknowledge_plaintext_login":false
+        });
+        let managed = json!({
+            "environment":"staging", "state_directory":external,
+            "tenant_id":keep, "client_id":keep, "client_secret_file":keep,
+            "subscription_id":"generated", "resource_group":"generated", "zone":"generated.invalid",
+            "terms_of_service_agreed":false
+        });
+        let sections = [
+            json!({"section":"storage","database":external,"cache":null}),
+            json!({"section":"storage","database":fixture.root.path().join("state").join("other.db"),"cache":null}),
+            json!({"section":"storage","database":fixture.root.path().join("state").join("..").join("state").join("state.db"),"cache":null}),
+            json!({"section":"storage","database":fixture.store.database_path(),
+                "cache":{"root":external,"item_bytes":1024,"total_bytes":4096,"entries":2}}),
+            json!({"section":"general","environment":"single_user","listen":AUTHORITY,
+                "origin":ORIGIN,"browser_assets":external}),
+            json!({"section":"identity","tenant_id":keep,"object_id":keep,"client_id":keep,
+                "client_secret_file":replace}),
+            json!({"section":"tls","certificate_file":external,"private_key_file":keep,"managed_tls":null}),
+            json!({"section":"tls","certificate_file":null,"private_key_file":replace,"managed_tls":null}),
+            json!({"section":"tls","certificate_file":null,"private_key_file":keep,"managed_tls":managed}),
+            json!({"section":"music_acquisition","local_acquisition":acquisition,"production_worker":null}),
+            json!({"section":"music_acquisition","local_acquisition":null,
+                "production_worker":{"queue_capacity":1,"acquisition":acquisition}}),
+            json!({"section":"music_sharing","sharing":{"policy":{},"listen":null,
+                "account":{"credentials_file":replace,"server":"generated.invalid:2242",
+                    "acknowledge_plaintext_login":false}}}),
+        ];
+        for endpoint in ["validate", "save"] {
+            for section in &sections {
+                let body = serde_json::to_vec(&json!({
+                    "expected_revision":revision, "sections":[section]
+                }))?;
+                let result = fixture.dispatch(
+                    &Method::POST,
+                    &format!("/api/system/configuration/sections/{endpoint}"),
+                    &BTreeMap::new(),
+                    &body,
+                );
+                assert!(
+                    matches!(result, Err(Error::InvalidInput(ref message))
+                        if message.starts_with("browser fixture configuration accepts only")),
+                    "{endpoint} must reject {section} before configuration validation"
+                );
+                assert_eq!(fixture.configuration.read()?.saved_revision, revision);
+            }
+        }
+        fixture.dispose()
+    }
+
+    #[test]
+    fn configuration_endpoints_preserve_generated_database_and_section_saves() -> Result<()> {
+        let mut fixture = Fixture::new()?;
+        let revision = fixture.configuration.read()?.saved_revision;
+        let body = serde_json::to_vec(&json!({
+            "expected_revision":revision,
+            "sections":[
+                {"section":"general","environment":"single_user","listen":"127.0.0.1:4175",
+                    "origin":"http://127.0.0.1:4175","browser_assets":null},
+                {"section":"storage","database":fixture.store.database_path(),"cache":null}
+            ]
+        }))?;
+        for endpoint in ["validate", "save"] {
+            let response = fixture.dispatch(
+                &Method::POST,
+                &format!("/api/system/configuration/sections/{endpoint}"),
+                &BTreeMap::new(),
+                &body,
+            )?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let state = fixture.configuration.read()?;
+            if endpoint == "validate" {
+                assert_eq!(state.saved_revision, revision);
+            } else {
+                assert_ne!(state.saved_revision, revision);
+                assert_eq!(state.saved.origin, "http://127.0.0.1:4175");
+                assert_eq!(state.active.origin, ORIGIN);
+                assert!(state.restart_required);
+            }
+            assert_eq!(
+                fixture.store.database_path().to_string_lossy(),
+                state.saved.database
+            );
+        }
+        fixture.dispose()
+    }
 
     #[test]
     fn generated_catalog_and_private_configuration_use_real_contracts() -> Result<()> {

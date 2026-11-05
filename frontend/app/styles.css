@@ -51,34 +51,6 @@
 .tray-spacer {
   height: 84px;
 }
-@media (max-width: 700px) {
-  .tray-spacer {
-    height: 76px;
-  }
-  .tray-bar {
-    flex-wrap: nowrap;
-    gap: 8px;
-    padding: 10px 12px;
-  }
-  .tray-bar h2 {
-    font-size: 0.85rem;
-  }
-  .step-rail {
-    flex: 1 1 0;
-    min-width: 0;
-  }
-  .step-rail li {
-    flex: 0 0 auto;
-    padding: 4px;
-  }
-  .step-rail li:not([data-state="current"]) {
-    font-size: 0;
-    gap: 0;
-  }
-  .step-rail li:not([data-state="current"]) span {
-    font-size: 0.75rem;
-  }
-}
 .tray {
   position: fixed;
   inset: auto 0 0 0;
@@ -2278,6 +2250,37 @@ footer {
   .artist-card .cover-placeholder {
     flex-basis: 68px;
     width: 68px;
+  }
+  .album-selection {
+    --collapsed-tray-height: 76px;
+  }
+  .tray-spacer {
+    height: var(--collapsed-tray-height);
+  }
+  .tray-bar {
+    min-height: calc(var(--collapsed-tray-height) - 1px);
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+  .tray-bar h2 {
+    font-size: 0.85rem;
+  }
+  .step-rail {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow-x: auto;
+  }
+  .step-rail li {
+    flex: 0 0 auto;
+    padding: 4px;
+  }
+  .step-rail li:not([data-state="current"]) {
+    font-size: 0;
+    gap: 0;
+  }
+  .step-rail li:not([data-state="current"]) span {
+    font-size: 0.75rem;
   }
 }
 @media (prefers-reduced-motion: reduce) {

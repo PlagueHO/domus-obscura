@@ -96,6 +96,11 @@ unchanged.
 | Recovery          | Version inventory, fresh file preview and exact confirmation   | Retained real restore/deletion/continuation operations. Failed preview hides actions. Recorded bytes are not current disk allocation.                                                                                                                        |
 | Component library | Shared primitives, status rows, spacing and type               | Retained. No new theme, font, external asset or runtime style package.                                                                                                                                                                                       |
 
+If saved batch checks find changed plans or a missing job, inspect the saved
+requests, then use **Remove inspected batch from selection** to unlock the tray.
+This removes only that batch from the tray. It does not change, create or retry
+saved jobs. A failed read alone does not enable this action.
+
 The narrow Orbit tools occupy their own header row. They do not cover page content
 when the page scrolls. The sidebar uses that same header height.
 
@@ -121,6 +126,9 @@ configuration, staging and main/backup roots. Its own router does not mount the
 production API. Catalog and transfer input are generated; planning, approval,
 normalization, native publication and recovery use the real Rust implementations.
 The host accepts no library path or provider credential from the browser.
+Configuration validation and saves allow only the generated database path.
+Additional asset, cache, TLS, staging and credential references are rejected
+before the configuration service can inspect them.
 The sample-data harness at port 4173 remains separate.
 
 Desktop and narrow Chromium cases use the built connected app. The narrow

@@ -201,6 +201,57 @@ test("lost batch response is reconciled without a second submission or new jobs"
   expect(jobs[0]!.plan_version).toBe(2);
 });
 
+test("an inspected mismatched batch can be removed without creating or retrying jobs", async ({
+  page,
+}) => {
+  let submissions = 0;
+  let creations = 0;
+  await page.route("**/api/jobs", async (route) => {
+    if (route.request().method() === "POST") creations++;
+    await route.continue();
+  });
+  await page.route("**/api/discovery/plans", async (route) => {
+    submissions++;
+    const body = route.request().postDataJSON() as CatalogBatchPlanRequest;
+    body.albums[0]!.request.accepts_incomplete_coverage = true;
+    await route.fetch({ postData: JSON.stringify(body) });
+    await route.abort("connectionreset");
+  });
+  await page.goto("/#/search?q=Browser");
+  await page.getByRole("button", { name: "Select Browser Album 1", exact: true }).click();
+  await page.getByRole("button", { name: "Select Browser Album 2", exact: true }).click();
+  let selection = await openSelection(page);
+  await selection.getByRole("checkbox", { name: /^main/ }).check();
+  await selection.getByRole("button", { name: "Prepare selected albums" }).click();
+  await expect(selection.getByRole("alert")).toBeVisible();
+  const abandon = selection.getByRole("button", {
+    name: "Remove inspected batch from selection",
+  });
+  await expect(abandon).toHaveCount(0);
+  await page.route("**/api/jobs?*", (route) => route.abort("connectionreset"));
+  await selection.getByRole("button", { name: "Check saved batch result" }).click();
+  await expect(selection.getByRole("alert")).toContainText("Failed to fetch");
+  await expect(abandon).toHaveCount(0);
+  await expect(selection.getByRole("button", { name: "Remove Browser Album 1" })).toBeDisabled();
+  await page.unroute("**/api/jobs?*");
+  await selection.getByRole("button", { name: "Check saved batch result" }).click();
+  await expect(selection.getByRole("alert")).toContainText("Saved plans changed");
+  await expect(abandon).toBeEnabled();
+  await expect(selection.getByRole("button", { name: "Remove Browser Album 2" })).toBeDisabled();
+  await selection.getByRole("link", { name: "Inspect the saved queue" }).click();
+  selection = await openSelection(page);
+  await selection.getByRole("button", { name: "Remove inspected batch from selection" }).click();
+  await expect(page.getByRole("region", { name: /^Selected albums/ })).toHaveCount(0);
+  await page.goto("/#/search?q=Browser");
+  await expect(
+    page.getByRole("button", { name: "Select Browser Album 1", exact: true }),
+  ).toBeEnabled();
+  const jobs: JobSummary[] = await (await page.request.get("/api/jobs")).json();
+  expect(jobs.map((job) => job.plan_version)).toEqual([2, 2]);
+  expect(creations).toBe(2);
+  expect(submissions).toBe(1);
+});
+
 test("backup pending keeps the verified main separate and resumes retained publication", async ({
   page,
 }) => {
