@@ -171,6 +171,7 @@ export function AlbumSelection({
   const [destinations, setDestinations] = useState<number[]>([]);
   const [coverage, setCoverage] = useState(false);
   const [open, setOpen] = useState(false);
+  const [batchMismatch, setBatchMismatch] = useState(false);
   const uncertain = useRef<CatalogBatchPlanRequest | null>(null);
   useEffect(() => {
     const close = () => setOpen(false);
@@ -191,6 +192,7 @@ export function AlbumSelection({
           "A job creation response was lost. Inspect the queue before removing that selection. No job creation is retried.",
         );
       if (uncertain.current) {
+        setBatchMismatch(false);
         const plans: StoredPlan[] = [];
         for (const item of pending) {
           if (!item.job) throw new Error("The batch has an unknown job. Inspect the queue.");
@@ -198,16 +200,21 @@ export function AlbumSelection({
             `/api/jobs?after=${item.job.job_id - 1}&limit=1`,
           );
           const job = rows.find((row) => row.id === item.job?.job_id);
-          if (!job) throw new Error("A selected job is missing. Inspect the queue.");
+          if (!job) {
+            setBatchMismatch(true);
+            throw new Error("A selected job is missing. Inspect the queue.");
+          }
           if (job.plan_version !== item.job.plan_version) {
             plans.push(await request<StoredPlan>(`/api/jobs/${job.id}/plans/${job.plan_version}`));
           }
         }
         if (plans.length) {
-          if (!preparedSelectionMatches(pending, plans, uncertain.current))
+          if (!preparedSelectionMatches(pending, plans, uncertain.current)) {
+            setBatchMismatch(true);
             throw new Error(
               "Saved plans changed. Inspect each selected request before continuing.",
             );
+          }
           for (const item of pending)
             update(item.release.id, {
               plan: plans.find((plan) => plan.job_id === item.job?.job_id)!,
@@ -438,6 +445,34 @@ export function AlbumSelection({
                 </Button>
                 <a href="#/queue">Inspect the saved queue</a>
               </div>
+              {batchMismatch && (
+                <div>
+                  <p>
+                    After inspecting the saved requests, remove this batch from the selection to
+                    unlock the tray. Saved jobs stay unchanged. No jobs are created or retried.
+                  </p>
+                  <Button
+                    variant="secondary"
+                    disabled={selection.busy}
+                    onClick={() =>
+                      void command.run(async () => {
+                        const batch = uncertain.current;
+                        if (!batch) return;
+                        for (const item of items)
+                          if (
+                            batch.albums.some((album) => album.request.job_id === item.job?.job_id)
+                          )
+                            selection.toggle(item.release);
+                        uncertain.current = null;
+                        setBatchMismatch(false);
+                        setLocked(false);
+                      })
+                    }
+                  >
+                    Remove inspected batch from selection
+                  </Button>
+                </div>
+              )}
             </>
           )}
           <Alert error={command.error} />

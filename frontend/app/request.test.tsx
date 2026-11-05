@@ -311,6 +311,7 @@ describe("request approval progress", () => {
         sourceApproved={false}
         coverApproved={false}
         inputsReceived={false}
+        jobState="queued"
       />,
     );
     expect(markup).toContain("Separate request approvals");
@@ -370,7 +371,13 @@ describe("request approval progress", () => {
 
   it("does not turn source acknowledgement into cover approval", () => {
     const markup = renderToStaticMarkup(
-      <RequestProgress planApproved sourceApproved coverApproved={false} inputsReceived={false} />,
+      <RequestProgress
+        planApproved
+        sourceApproved
+        coverApproved={false}
+        inputsReceived={false}
+        jobState="queued"
+      />,
     );
     expect(markup).toContain("Acknowledgement saved");
     expect(markup).not.toContain("Exact JPEG approved");
@@ -378,11 +385,78 @@ describe("request approval progress", () => {
 
   it("identifies retained inputs without inventing a legacy source approval", () => {
     const markup = renderToStaticMarkup(
-      <RequestProgress planApproved sourceApproved={false} coverApproved inputsReceived />,
+      <RequestProgress
+        planApproved
+        sourceApproved={false}
+        coverApproved
+        inputsReceived
+        jobState="queued"
+      />,
     );
     expect(markup).toContain("Received inputs retained");
     expect(markup).toContain("Exact JPEG approved");
     expect(markup).not.toContain("Acknowledgement saved");
     expect(markup).not.toContain("Complete");
+  });
+
+  it("keeps Start current only when the queued approvals are ready", () => {
+    const markup = renderToStaticMarkup(
+      <RequestProgress
+        planApproved
+        sourceApproved
+        coverApproved
+        inputsReceived={false}
+        jobState="queued"
+      />,
+    );
+    expect(markup).toMatch(
+      /<li data-state="current" aria-current="step"><span[^>]*>4<\/span><div><strong>Start<\/strong><small>Ready to start/,
+    );
+    expect(markup).not.toContain("Request complete");
+  });
+
+  it("marks an accepted start done before the saved job leaves queued", () => {
+    const markup = renderToStaticMarkup(
+      <RequestProgress
+        planApproved
+        sourceApproved
+        coverApproved
+        inputsReceived={false}
+        jobState="queued"
+        submitted
+      />,
+    );
+    expect(markup).toMatch(
+      /<li data-state="done"><span[^>]*>✓<\/span><div><strong>Start<\/strong><small>Start request saved/,
+    );
+    expect(markup).not.toContain('aria-current="step"');
+    expect(markup).not.toContain("Ready to start");
+    expect(markup).not.toContain("Request complete");
+  });
+
+  it.each([
+    ["searching", "Request in progress"],
+    ["downloading", "Request in progress"],
+    ["validating", "Request in progress"],
+    ["normalizing", "Request in progress"],
+    ["publishing", "Request in progress"],
+    ["awaiting_input", "Decision required"],
+    ["backup_pending", "Primary verified; backup pending"],
+    ["failed", "Request failed; review status"],
+    ["cancelled", "Request cancelled"],
+    ["complete", "Request complete"],
+  ] as const)("uses the saved %s state for Start after a reload", (state, label) => {
+    const markup = renderRequest({ job: { ...savedJob, state } });
+    const rail = markup.slice(markup.indexOf('<ol class="request-progress"')).split("</ol>")[0];
+    expect(rail).toMatch(
+      new RegExp(
+        `<li data-state="done"><span[^>]*>✓</span><div><strong>Start</strong><small>${label}`,
+      ),
+    );
+    expect(rail).not.toContain("After the three approvals");
+    expect(rail).not.toContain("Ready to start");
+    if (state !== "complete") expect(rail).not.toContain("Request complete");
+    expect(rail).not.toContain("Acknowledgement saved");
+    expect(rail).not.toContain("Exact JPEG approved");
   });
 });

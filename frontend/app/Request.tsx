@@ -31,12 +31,24 @@ export function RequestProgress({
   sourceApproved,
   coverApproved,
   inputsReceived,
+  jobState,
+  submitted = false,
 }: {
   planApproved: boolean;
   sourceApproved: boolean;
   coverApproved: boolean;
   inputsReceived: boolean;
+  jobState: JobSummary["state"];
+  submitted?: boolean;
 }) {
+  const started =
+    submitted ||
+    activeStates.has(jobState) ||
+    jobState === "awaiting_input" ||
+    jobState === "backup_pending" ||
+    jobState === "failed" ||
+    jobState === "cancelled" ||
+    jobState === "complete";
   const steps = [
     {
       label: "Edition and outputs",
@@ -57,7 +69,31 @@ export function RequestProgress({
       done: coverApproved,
       status: coverApproved ? "Exact JPEG approved" : "Choose and approve exact preview",
     },
-    { label: "Start", done: false, status: "After the three approvals" },
+    {
+      label: "Start",
+      done: started,
+      status:
+        jobState === "complete"
+          ? "Request complete"
+          : jobState === "failed"
+            ? "Request failed; review status"
+            : jobState === "cancelled"
+              ? "Request cancelled"
+              : jobState === "awaiting_input"
+                ? "Decision required"
+                : jobState === "backup_pending"
+                  ? "Primary verified; backup pending"
+                  : activeStates.has(jobState)
+                    ? "Request in progress"
+                    : submitted
+                      ? "Start request saved"
+                      : jobState === "queued" &&
+                          planApproved &&
+                          (sourceApproved || inputsReceived) &&
+                          coverApproved
+                        ? "Ready to start"
+                        : "After the three approvals",
+    },
   ];
   const current = steps.findIndex((step) => !step.done);
   return (
@@ -329,6 +365,8 @@ export function RequestPage({
               sourceApproved={Boolean(source && source.approved_at !== null)}
               coverApproved={Boolean(cover && cover.approved_at !== null)}
               inputsReceived={allReceived}
+              jobState={current.state}
+              submitted={submitted}
             />
             {status?.last_error && (
               <p role="alert" className="warning">
