@@ -126,6 +126,15 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             pnpm(&["--dir", "frontend", "run", "build:local-test"])?;
             cargo(&["build", "--locked", "--package", "domus", "--example", "local_test"])
         }
+        Some("browser-build") | Some("browser") => {
+            toolchains()?;
+            pnpm(&["--dir", "frontend", "run", "build:app"])?;
+            cargo(&["build", "--locked", "--package", "domus", "--example", "browser_workflow"])?;
+            if args[0] == "browser" {
+                pnpm(&["--dir", "frontend", "run", "test:browser"])?;
+            }
+            Ok(())
+        }
         Some("fmt") => {
             cargo(&["fmt", "--all"])?;
             pnpm(&["format"])
@@ -145,6 +154,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             ])?;
             cargo(&["test", "--locked", "--workspace"])?;
             cargo(&["test", "--locked", "--package", "domus", "--example", "local_test"])?;
+            cargo(&["test", "--locked", "--package", "domus", "--example", "browser_workflow"])?;
             pnpm(&["format:check"])?;
             pnpm(&["--dir", "frontend", "run", "check"])?;
             Ok(())
@@ -181,7 +191,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             "--ignored",
         ]),
         _ => Err(
-            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|build|smoke|package-windows|installer-windows|package-check|package-linux|package-check-linux|local-test|local-test-build>"
+            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|build|smoke|package-windows|installer-windows|package-check|package-linux|package-check-linux|local-test|local-test-build|browser-build|browser>"
                 .into(),
         ),
     }

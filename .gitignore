@@ -19,5 +19,7 @@ service.local.json
 .impeccable/hook.cache.json
 .impeccable/questions/
 frontend/dist-app/
+frontend/test-results/
+frontend/playwright-report/
 infra/*.local.bicepparam
 infra/*.json.local

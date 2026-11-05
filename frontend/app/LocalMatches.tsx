@@ -39,26 +39,28 @@ function MatchResults({
   return (
     <section className="review-section" aria-label="Possible local matches">
       <h2>Possible local matches</h2>
-      <p>
+      <p className="muted">
         Saved artist and album tags only. These matches do not confirm an exact edition or approve a
         download.
       </p>
-      <label>
-        Match location
-        <select
-          value={location?.id ?? ""}
-          onChange={(event) => setSelected(Number(event.target.value))}
-        >
-          {locations.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.kind} · {item.root}
-            </option>
-          ))}
-        </select>
-      </label>
-      <Button variant="secondary" disabled={result.loading} onClick={result.refresh}>
-        Reload local matches
-      </Button>
+      <div className="local-matches-controls">
+        <label>
+          Match location
+          <select
+            value={location?.id ?? ""}
+            onChange={(event) => setSelected(Number(event.target.value))}
+          >
+            {locations.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.kind} · {item.root}
+              </option>
+            ))}
+          </select>
+        </label>
+        <Button variant="secondary" disabled={result.loading} onClick={result.refresh}>
+          Reload local matches
+        </Button>
+      </div>
       <Alert error={result.error} />
       {result.loading && <p role="status">Reading indexed matches…</p>}
       {Boolean(result.error) && (

@@ -26,6 +26,7 @@ import { Library } from "./Library";
 import { Inbox } from "./Inbox";
 import { Search } from "./Search";
 import { Recovery, recoveryJobFilter } from "./Recovery";
+import { AlbumSelection, AlbumSelectionProvider, useAlbumSelection } from "./AlbumSelection";
 import {
   FocusHeader,
   HomeQueue,
@@ -121,6 +122,15 @@ function ComponentLibrary() {
 }
 
 export function App() {
+  return (
+    <AlbumSelectionProvider>
+      <ConnectedApp />
+    </AlbumSelectionProvider>
+  );
+}
+
+function ConnectedApp() {
+  const selection = useAlbumSelection();
   const route = useRoute();
   const session = useResource(
     (signal) => request<SessionIdentity>("/api/session", { signal }),
@@ -240,6 +250,16 @@ export function App() {
         status={local.error ? undefined : local.data}
         onChanged={changed}
         audioProfiles={setup.data?.settings?.audio_profiles}
+        reviewNext={selection?.items
+          .filter((item) => item.plan && !item.submitted && item.plan.job_id !== Number(routeId))
+          .map((item) => item.plan!)}
+        onStarted={(next) => {
+          const item = selection?.items.find(
+            (item) => item.plan?.job_id === Number(routeId) && item.plan.version === routeVersion,
+          );
+          if (item) selection?.update(item.release.id, { submitted: true });
+          if (next) window.location.hash = `/request/${next.job_id}/${next.version}`;
+        }}
       />
     );
   } else if (route === "/queue") {
@@ -638,6 +658,14 @@ export function App() {
               Sign in with Microsoft
             </a>
           </Card>
+        )}
+        {session.data && (
+          <AlbumSelection
+            settings={setup.data?.settings}
+            locations={locations}
+            blocked={setup.loading || Boolean(setup.error) || selection?.busy === true}
+            onPrepared={onCreated}
+          />
         )}
         {session.data && !locationsComplete && (
           <div className="actions">

@@ -21,6 +21,7 @@ import { ArtistPhoto } from "./ArtistPhoto";
 import { BackendConfiguration, ConfigurationCard } from "./BackendConfiguration";
 import { LocalMatches } from "./LocalMatches";
 import { AudioProfileSelect, audioProfileLabel, outputWithAudioPolicy } from "./audio-profiles";
+import { SelectAlbum } from "./AlbumSelection";
 
 export function ReleaseCard({ release }: { release: CatalogReleaseSummary }) {
   return <AlbumCard release={release} />;
@@ -315,6 +316,7 @@ export function Album({
               <p className="identifier">Exact release · {album.summary.id}</p>
               <div className="actions">
                 <Button onClick={() => drawer.current?.showModal()}>Start Download</Button>
+                <SelectAlbum release={album.summary} />
                 {album.release_group_id && (
                   <Button
                     variant="secondary"

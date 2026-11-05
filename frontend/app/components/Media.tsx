@@ -8,6 +8,7 @@ import { useCommand } from "../hooks";
 import { visibleJobs } from "../state";
 import { Alert, Button, Cover, Empty } from "./ui";
 import { ArtistPhoto } from "../ArtistPhoto";
+import { SelectAlbum } from "../AlbumSelection";
 
 export type IconName =
   | "home"
@@ -130,15 +131,18 @@ export function ArtistCard({ artist }: { artist: CatalogArtist }) {
 
 export function AlbumCard({ release }: { release: CatalogReleaseSummary }) {
   return (
-    <a className="media-card album-card" href={`#/album/${encodeURIComponent(release.id)}`}>
-      <Cover title={release.title} />
-      <strong title={release.title}>{release.title}</strong>
-      <span title={release.artist}>{release.artist}</span>
-      <small title={release.disambiguation ?? undefined}>
-        {[release.date, release.country, release.disambiguation].filter(Boolean).join(" · ") ||
-          "Exact edition"}
-      </small>
-    </a>
+    <article className="album-choice">
+      <a className="media-card album-card" href={`#/album/${encodeURIComponent(release.id)}`}>
+        <Cover title={release.title} />
+        <strong title={release.title}>{release.title}</strong>
+        <span title={release.artist}>{release.artist}</span>
+        <small title={release.disambiguation ?? undefined}>
+          {[release.date, release.country, release.disambiguation].filter(Boolean).join(" · ") ||
+            "Exact edition"}
+        </small>
+      </a>
+      <SelectAlbum release={release} />
+    </article>
   );
 }
 
