@@ -240,6 +240,12 @@ test("an inspected mismatched batch can be removed without creating or retrying 
   await expect(abandon).toBeEnabled();
   await expect(selection.getByRole("button", { name: "Remove Browser Album 2" })).toBeDisabled();
   await selection.getByRole("link", { name: "Inspect the saved queue" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Your download queue", exact: true }),
+  ).toBeVisible();
+  await expect(
+    selection.getByRole("button", { name: "Open selection", exact: true }),
+  ).toBeVisible();
   selection = await openSelection(page);
   await selection.getByRole("button", { name: "Remove inspected batch from selection" }).click();
   await expect(page.getByRole("region", { name: /^Selected albums/ })).toHaveCount(0);
