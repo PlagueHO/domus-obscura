@@ -21,6 +21,14 @@ Do not enable both. Production source discovery is not part of that worker.
 
 ## Artist-photo checks
 
+For connected-app workflow checks, run `.\dev.ps1 browser` on Windows or
+`cargo task browser` on Linux. See the [browser workflow guide](../frontend/app/README.md#connected-browser-workflows).
+The separate host at `127.0.0.1:4174` uses only fresh private temporary state and
+generated media. It does not use this HTTPS configuration or existing libraries.
+Use `pnpm --dir frontend run browser:install` only after approval to install
+Chromium on the host. An existing browser can instead be selected with
+`DOMUS_BROWSER_EXECUTABLE`. Browser setup in CI is explicit.
+
 The separate generated browser harness has an artist-photo view at
 `http://127.0.0.1:4173/?artist-photos=1` when it runs on its default port.
 It uses a generated illustration and sample rights records. It makes no provider,

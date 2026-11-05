@@ -18,6 +18,8 @@
   "include": [
     "src",
     "app",
+    "browser",
+    "playwright.config.ts",
     "local-test/src",
     "vite.config.ts",
     "vite.local-test.config.ts",

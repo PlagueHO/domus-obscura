@@ -361,9 +361,12 @@ pub struct BackendConfigurationResult {
     pub state: Option<BackendConfigurationState>,
 }
 
-/// Startup and HTTP share this service. Its native source and active snapshot
-/// cannot be changed by a caller. All updates are restart-only.
-pub(crate) struct ConfigurationService {
+/// Startup and HTTP share passive configuration inspection and revision-bound writes.
+/// Callers cannot change its native source or active snapshot through a save.
+///
+/// Callers must authorize access before exposing this service to a transport.
+/// Opening it does not start a server, migrate SQLite, or activate saved changes.
+pub struct ConfigurationService {
     path: PathBuf,
     parent: NativeRoot,
     pub(super) active: Configuration,
@@ -390,6 +393,12 @@ enum SaveFailure {
 }
 
 impl ConfigurationService {
+    /// Read and bind a startup configuration without activating its services.
+    /// The caller owns the containing directory and must keep it private.
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::load(path).map(|(service, _, _)| service)
+    }
+
     pub(crate) fn certificate_selection(
         &self,
     ) -> Arc<Mutex<Option<crate::infrastructure::certificates::state::CertificateSelection>>> {
@@ -478,7 +487,8 @@ impl ConfigurationService {
         store.location(id)
     }
 
-    pub(crate) fn require_editable(&self) -> Result<()> {
+    /// Recheck both the startup policy and the current saved editing policy.
+    pub fn require_editable(&self) -> Result<()> {
         let control = self
             .reload
             .lock()
@@ -566,7 +576,8 @@ impl ConfigurationService {
         Ok((file, bytes))
     }
 
-    pub(crate) fn read(&self) -> Result<BackendConfigurationState> {
+    /// Read redacted saved and startup state without activating either document.
+    pub fn read(&self) -> Result<BackendConfigurationState> {
         let (_, bytes) = self.read_file(&self.directory()?)?;
         self.state(&bytes)
     }
@@ -607,7 +618,8 @@ impl ConfigurationService {
         )
     }
 
-    pub(crate) fn validate_sections(
+    /// Validate a revision-bound draft without saving or activating it.
+    pub fn validate_sections(
         &self,
         command: ConfigurationSectionCommand,
     ) -> Result<BackendConfigurationResult> {
@@ -647,7 +659,9 @@ impl ConfigurationService {
         )
     }
 
-    pub(crate) fn save_sections(
+    /// Save a revision-bound draft under the active and saved editing policy.
+    /// The active startup configuration is unchanged.
+    pub fn save_sections(
         &self,
         command: ConfigurationSectionCommand,
     ) -> Result<BackendConfigurationResult> {

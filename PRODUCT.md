@@ -628,7 +628,7 @@ and remaining limits.
 The request page can search Cover Art Archive for the frozen exact release and
 download a selected image through the installed provider service. It retains CAA
 evidence and requires separate permission acknowledgement and exact JPEG approval.
-Local cover upload remains available. This does not complete the approved UI port.
+Local cover upload remains available.
 It is not the complete V1 application. The local setup creates a developer
 certificate but never changes browser trust or enables a live account.
 
@@ -644,6 +644,30 @@ The start click supplies the publication acknowledgement; the extra publication
 checkbox is removed. Each existing album folder needs its own exact skip,
 separate-copy, or replacement decision before work starts. Saved plan, source
 and exact-cover approvals are still independent.
+
+The connected UI keeps up to 25 exact album selections across Search, Artist and
+Album navigation. One batch prepares independent plans atomically; job creation
+remains separate. A lost batch response locks selection until saved plans are
+checked. A lost job-creation response never creates another job automatically.
+Review-next starts only the current album after its own edition, source and exact
+JPEG approvals. Navigation cannot approve another album. Selection lives in
+browser application state; prepared plans and approvals remain in SQLite.
+
+The selection is a bottom tray with cover count and a drawer. Its step rail
+(Choose, Prepare, Approve each, Start) shows where the batch is. The request
+review uses the same step rail for the edition, source, cover and start
+approvals. The steps only show state; each approval stays a separate command.
+
+The retained-screen comparison is recorded in `frontend/app/README.md`.
+The separate generated browser workflow host uses fresh private temporary state,
+not the production router or live providers. Desktop and narrow Chromium cases
+cover search-to-publication, unchanged encoded audio, required tags, the approved
+JPEG, Library reads, revision-bound settings, paused decisions, backup continuation,
+retained restore and irreversible recovery deletion. Failure checks include stale
+previews, atomic batch rejection, lost responses and unavailable metadata.
+Windows/Linux CI is wired separately. Local Windows evidence does not establish
+Linux, production authentication, live-provider, installed-service or complete V1
+acceptance. The edition recommendation star remains deferred to issue #21.
 
 The queue uses only the retained cover approved for its exact current plan.
 Missing covers remain placeholders; image failures have an explicit unavailable

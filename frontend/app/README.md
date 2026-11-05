@@ -63,10 +63,72 @@ filtered page. Missing or failed inventory reads hide those controls.
 
 Lists use bounded provider/database pages. The setup view loads the first 100
 registered roots. The request view loads up to 100 transfer receipts. Source and
-cover candidates have separate 50-record pages. Local continuation is offered only
+cover candidates have separate pages of five and fifty records, respectively.
+Local continuation is offered only
 when the visible receipt set covers every frozen track and all are received.
 
 The owned `components/ui.tsx` primitives follow shadcn/ui composition patterns
 (native semantics, variants and `data-slot` hooks). They use no extra packages,
 runtime style injection or external fonts. The bundled Bebas Neue font retains
 its license in `assets/OFL.txt`.
+
+## Retained-screen comparison
+
+The Component library in `docs/ui-poc/structure.html` and the confirmed interface
+section in `PRODUCT.md` remain the visual authority. The later full-page Artist
+and Album decision replaces the earlier Wall/inspector study. The HTML study is
+unchanged.
+
+| Screen or surface | Approved direction and connected behavior                      | Difference resolution                                                                                                                                                                                                                                        |
+| ----------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Home              | Orbit header, focus search, icon sidebar, Music context        | Retained. Empty queue and future suggestions stay explicit.                                                                                                                                                                                                  |
+| Search            | Separate artist and exact-edition results, shared media cards  | Selection is separate from the navigation link. Loading, failed and empty results remain distinct.                                                                                                                                                           |
+| Artist            | Full page, coral header, edition cards and paging              | Exact selections remain in application state across route and page changes.                                                                                                                                                                                  |
+| Album             | Full page, violet header, exact edition and audio details      | Hero selection and the existing single-album preparation drawer are both available. No provider order becomes a recommendation.                                                                                                                              |
+| Download drawer   | Native dialog, output policy, destinations and coverage        | Retained single-album behavior. Escape, initial focus and return focus use the native dialog.                                                                                                                                                                |
+| Shared selection  | Up to 25 exact editions, selected profiles and visible removal | New bottom tray and drawer with a step rail (Choose, Prepare, Approve each, Start). Prepares independent plans through one atomic batch. Separate job creation is not presented as atomic. Unknown submission locks selection until saved plans are checked. |
+| Request           | Amber review, independent edition/source/JPEG/start controls   | Step rail shows edition, source, cover and start state without approving anything. Added guarded review-next. It starts only the current album and navigates only after success. Source paging now matches the server's five-record bound.                   |
+| Queue             | Shared rows and status, attention/active/finished groups       | Retained. Paused, failed and backup-pending are not complete.                                                                                                                                                                                                |
+| Notifications     | Header panel, text status and explicit navigation              | Retained. No automatic answer, retry or start.                                                                                                                                                                                                               |
+| Decisions         | Saved question, version and separate answer/continuation       | Retained. Answering does not itself run the recovery command.                                                                                                                                                                                                |
+| Library           | Location-bound Artists, Albums and Folders                     | Retained real index APIs. Saved observations, incomplete coverage and unavailable reads are labelled. Browsing cannot mutate media.                                                                                                                          |
+| System settings   | Core application and Music sections, narrow section picker     | Retained real file-backed configuration and SQLite output policy. Revision conflicts, drafts, saved versus active, read-only and redaction remain authoritative.                                                                                             |
+| Recovery          | Version inventory, fresh file preview and exact confirmation   | Retained real restore/deletion/continuation operations. Failed preview hides actions. Recorded bytes are not current disk allocation.                                                                                                                        |
+| Component library | Shared primitives, status rows, spacing and type               | Retained. No new theme, font, external asset or runtime style package.                                                                                                                                                                                       |
+
+The narrow Orbit tools occupy their own header row. They do not cover page content
+when the page scrolls. The sidebar uses that same header height.
+
+Loading and failure text remain visible beside manual refresh. Required Request
+reads and metadata reads do not allow retained data to authorize commands after a
+failed refresh. Library file details can show an explicitly labelled older saved
+response; it is not current file evidence. Protected input and pending recovery
+entries are view-only. Output and backend settings use different save contracts.
+
+Accepted study details are not new acceptance gates. Agent, TV, Movies and
+suggestions remain placeholders. The edition star is deferred to issue #21.
+
+## Connected browser workflows
+
+Use `.\dev.ps1 browser` on Windows or `cargo task browser` on Linux.
+`browser-build` builds the connected app and the separate Rust example.
+`pnpm --dir frontend run test:browser` runs only the browser checks after that build.
+Playwright configuration follows the
+[official test configuration reference](https://playwright.dev/docs/test-configuration).
+
+The fixture host binds `127.0.0.1:4174`. It creates private temporary SQLite,
+configuration, staging and main/backup roots. Its own router does not mount the
+production API. Catalog and transfer input are generated; planning, approval,
+normalization, native publication and recovery use the real Rust implementations.
+The host accepts no library path or provider credential from the browser.
+The sample-data harness at port 4173 remains separate.
+
+Desktop and narrow Chromium cases use the built connected app. The narrow
+project requests reduced motion. Failure traces and screenshots stay in ignored
+`frontend/test-results`. CI installs its own Chromium explicitly. For a permitted
+existing local Chromium-family browser, set `DOMUS_BROWSER_EXECUTABLE` to its
+absolute executable path; this does not install a browser.
+
+These checks supply generated-fixture evidence, not live-provider, production
+authentication, installed-service, other-browser or complete V1 acceptance.
+The production API guard and stale-command integration tests remain separate.

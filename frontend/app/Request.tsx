@@ -16,7 +16,7 @@ import { OutputPreview } from "../src/OutputPreview";
 import { request, type LocalStatus } from "./api";
 import { useCommand, useResource } from "./hooks";
 import { activeStates, canStart } from "./state";
-import { Alert, Badge, Button, Card, Empty, Pager } from "./components/ui";
+import { Alert, Button, Card, Empty, Pager } from "./components/ui";
 import { SourceReview } from "./SourceReview";
 import { WorkerRequests } from "./WorkerRequests";
 import { ArtworkReview } from "./ArtworkReview";
@@ -37,26 +37,44 @@ export function RequestProgress({
   coverApproved: boolean;
   inputsReceived: boolean;
 }) {
+  const steps = [
+    {
+      label: "Edition and outputs",
+      done: planApproved,
+      status: planApproved ? "Plan approved" : "Review the frozen plan",
+    },
+    {
+      label: "Source",
+      done: inputsReceived || sourceApproved,
+      status: inputsReceived
+        ? "Received inputs retained"
+        : sourceApproved
+          ? "Acknowledgement saved"
+          : "Choose and acknowledge exact source",
+    },
+    {
+      label: "Cover",
+      done: coverApproved,
+      status: coverApproved ? "Exact JPEG approved" : "Choose and approve exact preview",
+    },
+    { label: "Start", done: false, status: "After the three approvals" },
+  ];
+  const current = steps.findIndex((step) => !step.done);
   return (
     <ol className="request-progress" aria-label="Separate request approvals">
-      <li>
-        <strong>Edition and outputs</strong>
-        <Badge>{planApproved ? "Plan approved" : "Review the frozen plan"}</Badge>
-      </li>
-      <li>
-        <strong>Source</strong>
-        <Badge>
-          {inputsReceived
-            ? "Received inputs retained"
-            : sourceApproved
-              ? "Acknowledgement saved"
-              : "Choose and acknowledge exact source"}
-        </Badge>
-      </li>
-      <li>
-        <strong>Cover</strong>
-        <Badge>{coverApproved ? "Exact JPEG approved" : "Choose and approve exact preview"}</Badge>
-      </li>
+      {steps.map((step, index) => (
+        <li
+          key={step.label}
+          data-state={step.done ? "done" : index === current ? "current" : "next"}
+          aria-current={index === current ? "step" : undefined}
+        >
+          <span aria-hidden="true">{step.done ? "✓" : index + 1}</span>
+          <div>
+            <strong>{step.label}</strong>
+            <small>{step.status}</small>
+          </div>
+        </li>
+      ))}
     </ol>
   );
 }
@@ -67,12 +85,16 @@ export function RequestPage({
   status,
   onChanged,
   audioProfiles = [],
+  reviewNext = [],
+  onStarted,
 }: {
   id: number;
   version: number;
   status: LocalStatus | undefined;
   onChanged: () => void;
   audioProfiles?: AudioProfileDescriptor[] | undefined;
+  reviewNext?: StoredPlan[] | undefined;
+  onStarted?: ((next?: StoredPlan) => void) | undefined;
 }) {
   const base = `/api/jobs/${id}/plans/${version}`;
   const [poll, setPoll] = useState(false);
@@ -233,6 +255,22 @@ export function RequestPage({
     !submitted &&
     !command.busy,
   );
+  async function start(next?: StoredPlan) {
+    const body: StartLocalDownload = {
+      source_candidate: allReceived ? null : (source?.id ?? null),
+      acknowledge_new_only_publication: true,
+    };
+    await request(`${base}/run`, { body });
+    setSubmitted(true);
+    setNotice(
+      status?.worker
+        ? "The worker request is saved. The saved job state will show the actual result."
+        : "The server accepted the local run. The saved job state will show the actual result.",
+    );
+    setPoll(true);
+    refresh();
+    onStarted?.(next);
+  }
   return (
     <>
       <header className="hero request-hero">
@@ -462,7 +500,7 @@ export function RequestPage({
                         : undefined
                     }
                     next={
-                      sources.data?.length === 50
+                      sources.data?.length === 5
                         ? () => {
                             setSourceId(undefined);
                             setSourcePages([
@@ -599,32 +637,21 @@ export function RequestPage({
                 )}
                 {notice && <p role="status">{notice}</p>}
                 <div className="actions">
-                  <Button
-                    disabled={!canRun}
-                    onClick={() =>
-                      void command.run(async () => {
-                        const body: StartLocalDownload = {
-                          source_candidate: allReceived ? null : (source?.id ?? null),
-                          acknowledge_new_only_publication: true,
-                        };
-                        await request(`${base}/run`, { body });
-                        setSubmitted(true);
-                        setNotice(
-                          status?.worker
-                            ? "The worker request is saved. The saved job state will show the actual result."
-                            : "The server accepted the local run. The saved job state will show the actual result.",
-                        );
-                        setPoll(true);
-                        refresh();
-                      })
-                    }
-                  >
+                  <Button disabled={!canRun} onClick={() => void command.run(() => start())}>
                     {command.busy
                       ? "Sending command…"
                       : allReceived
                         ? "Continue approved local work"
                         : "Start Download"}
                   </Button>
+                  {reviewNext.length > 0 && (
+                    <Button
+                      disabled={!canRun}
+                      onClick={() => void command.run(() => start(reviewNext[0]))}
+                    >
+                      Approve and review next ({reviewNext.length})
+                    </Button>
+                  )}
                   <Button
                     variant="secondary"
                     disabled={
