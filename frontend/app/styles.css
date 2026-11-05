@@ -2266,6 +2266,10 @@ footer {
   .tray-bar h2 {
     font-size: 0.85rem;
   }
+  .tray-bar .button {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
   .step-rail {
     flex: 1 1 0;
     min-width: 0;

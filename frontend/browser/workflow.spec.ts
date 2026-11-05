@@ -10,8 +10,9 @@ const guards = { Origin: origin, "x-domus-csrf": "1" };
 
 async function openSelection(page: Page) {
   const selection = page.getByRole("region", { name: /^Selected albums/ });
-  const open = selection.getByRole("button", { name: "Open selection" });
-  if (await open.isVisible()) await open.click();
+  const toggle = selection.getByRole("button", { name: /^(Open|Hide) selection$/ });
+  await expect(toggle).toBeVisible();
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
   return selection;
 }
 async function control(page: Page, path: string, data = {}) {
