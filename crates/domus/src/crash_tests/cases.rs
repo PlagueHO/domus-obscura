@@ -423,6 +423,14 @@ fn recover(store: &mut Store, descriptor: &Descriptor) -> TestResult {
                     descriptor.location,
                     decision,
                 )?;
+                let preview = crate::application::preview_album_restore(
+                    store,
+                    descriptor.job,
+                    descriptor.version,
+                    descriptor.location,
+                )?;
+                assert!(preview.verified, "{:?}", preview.unavailable_reason);
+                assert_eq!(preview.state, "restored");
                 assert_eq!(
                     approval()?,
                     approved,
