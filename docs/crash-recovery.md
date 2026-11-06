@@ -91,7 +91,7 @@ inferred from a retry.
 | Provider response loss   | The loopback protocol fixture counts queue requests and recovery queries while responses are lost across process death.                                                                                                         | Generated local peer, not a live account or external provider.                                       |
 | TLS rejection            | Existing `oidc_transport_verifies_private_ca_bounds_bodies_and_never_follows_redirects` and TLS material tests use local certificates and listeners. They reject untrusted certificates, wrong hostnames, and invalid material. | Separate transport evidence, not process termination during TLS activation or a live provider check. |
 
-## Recorded results
+## Recorded local results
 
 Local validation on 2026-11-06 used Windows x86_64 MSVC and the pinned Rust
 toolchain. The working tree was based on
@@ -111,9 +111,49 @@ The ignored crash child is a private entry point used by the passing parent
 tests. It is not a missing crash case. The scale tests remain separate and were
 not run because this change does not change indexing or query behavior.
 
-Linux execution and Windows/Linux CI for these changes remain pending.
-Installed-service, reboot, OS/power-loss, physical drive-loss, and physical
-disk-full checks were not performed. No installed service, account, mount, live
-provider, existing library, or host-volume changes were made. Permission changes
-were limited to generated fixture roots. Keep those acceptance limits open on
-#22.
+## Recorded CI results
+
+Evidence review on 2026-11-06 confirmed that
+[PR #56](https://github.com/PlagueHO/domus-obscura/pull/56) merged the harness.
+Its successful [PR workflow](https://github.com/PlagueHO/domus-obscura/actions/runs/42172196630)
+reports head SHA `ea5ad0620c0c7a0f9e37ae270052247c1be720b1`.
+Both checkout logs identify the tested PR merge revision as
+`b34cf22bcf4415041578f236489c282a51786c30`, which merges that head into
+`ea8c6b241997bc2c79eaa52f517f673a402142b0`.
+This is not the final merge commit on `main`.
+
+| Platform     | Evidence                                                                                               | Verified result                                                                                                                                                                                |
+| ------------ | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ubuntu 24.04 | [Check and build](https://github.com/PlagueHO/domus-obscura/actions/runs/42172196630/job/127742491151) | `cargo task check`, build, and smoke passed. All six applicable crash/fault parent tests passed, including the 37-case matrix and both changed-content rejection cases.                        |
+| Windows      | [Check and build](https://github.com/PlagueHO/domus-obscura/actions/runs/42172196630/job/127742491218) | `cargo task check`, build, and smoke passed. All seven crash/fault parent tests passed, including the same matrix and rejection cases, plus the Windows-only sealed-input sharing-denial test. |
+
+Both `cargo task check` logs report 354 passed, zero failed, and two ignored
+library tests. They explicitly report a passing crash matrix, rejection of
+changed approved content, unavailable-backup recovery, simulated disk-full handling,
+SQLite-full atomicity, and database/staging ownership tests. The private
+`crash_child` entry point is ignored in ordinary discovery and selected by its
+parents. Its ignored status is not a missing acceptance case. The separate
+HTTPS suites passed all 37 tests on each platform. These are transport results,
+not forced termination during TLS activation.
+
+The [final merge workflow](https://github.com/PlagueHO/domus-obscura/actions/runs/42175378096)
+targets `40da8c00cc34bfe0d70789bd15eff2f697575cb0`. At evidence review, its
+[Ubuntu check/build job](https://github.com/PlagueHO/domus-obscura/actions/runs/42175378096/job/127752512263)
+and [Windows check/build job](https://github.com/PlagueHO/domus-obscura/actions/runs/42175378096/job/127752512327)
+were still in progress. Both pagination jobs had passed, but they do not prove
+crash recovery. Final merge-commit check/build and crash-test results remain
+unverified. Do not substitute the successful PR workflow for those results.
+
+## Remaining acceptance limits
+
+Windows and Linux process-crash evidence is now verified for the PR merge
+revision above. This does not complete issue #22.
+Installed-service supervision, reboot, OS/power-loss, physical drive-loss, and
+physical disk-full checks were not performed. The controlled faults retain
+their limits in the table above. No installed service, account, mount, live
+provider, existing library, or host-volume changes were made during this
+evidence review. No application behavior or test code changed.
+
+Keep issue #22 open for the remaining evidence. Native deployment work remains
+deferred under #17 and #18. Do not treat package builds or process-crash tests
+as installed-service or power-loss acceptance.
