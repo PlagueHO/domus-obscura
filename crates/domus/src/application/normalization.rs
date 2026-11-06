@@ -39,6 +39,8 @@ pub fn normalize_album(
         Some(run) => run,
         None => store.begin_normalization(claim, cover)?,
     };
+    #[cfg(test)]
+    crate::crash_tests::checkpoint("normalization_intent")?;
     let cover_hash = cover
         .sha256()
         .iter()
@@ -88,6 +90,8 @@ pub fn normalize_album(
             };
             if let Some(evidence) = evidence {
                 store.record_normalized_audio(claim, run.id, item.track_number, &evidence)?;
+                #[cfg(test)]
+                crate::crash_tests::checkpoint("normalization_receipt")?;
             }
             after = i64::from(item.track_number);
         }
@@ -102,6 +106,8 @@ pub fn normalize_album(
         store.record_normalized_cover(claim, run.id, run.cover_bytes, &run.cover_sha256)?;
     }
     store.job_work_boundary(claim)?;
+    #[cfg(test)]
+    crate::crash_tests::checkpoint("normalization_handoff")?;
     store.finish_normalization(claim, run.id)?;
     Ok(run.id)
 }

@@ -20,7 +20,10 @@ impl<T: Read> Read for ProgressIo<'_, T> {
 impl<T: Write> Write for ProgressIo<'_, T> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         (self.heartbeat)()?;
-        self.inner.write(buffer)
+        let count = self.inner.write(buffer)?;
+        #[cfg(test)]
+        crate::crash_tests::checkpoint("normalization_writing")?;
+        Ok(count)
     }
     fn flush(&mut self) -> io::Result<()> {
         (self.heartbeat)()?;

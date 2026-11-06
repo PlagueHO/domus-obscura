@@ -231,6 +231,8 @@ impl Store {
         )?;
         record_job_event(&transaction, claim, "acquisition_prepared")?;
         transaction.commit()?;
+        #[cfg(test)]
+        crate::crash_tests::checkpoint("transfer_intent")?;
         Ok(())
     }
 

@@ -124,6 +124,23 @@ pub struct SoulseekSession {
 }
 
 impl SoulseekSession {
+    #[cfg(test)]
+    pub(crate) fn with_crash_fixture_peer<T>(
+        address: SocketAddrV4,
+        operation: impl FnOnce(&mut PeerControl<'_>) -> Result<T>,
+    ) -> Result<T> {
+        assert!(address.ip().is_loopback());
+        let mut session = Self {
+            stream: None,
+            username: "fixture-user".into(),
+        };
+        let mut peer = session.connect_address(PeerAddress {
+            username: "generated-peer".into(),
+            address,
+        })?;
+        operation(&mut peer)
+    }
+
     pub(crate) fn fork_for_peer(&self, peer: &str) -> Result<Self> {
         self.fork(peer, false)
     }
@@ -426,6 +443,10 @@ impl PeerControl<'_> {
         let mut body = Vec::new();
         string(&mut body, path);
         stream.send(if submit { 43 } else { 51 }, &body)?;
+        #[cfg(test)]
+        if submit {
+            crate::crash_tests::checkpoint("submission_sent")?;
+        }
         let mut queried = Instant::now();
         loop {
             let until = deadline.min(queried + query_interval);

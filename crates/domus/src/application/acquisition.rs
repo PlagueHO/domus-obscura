@@ -359,12 +359,16 @@ pub fn receive_transfer_file(
     };
     let input = staging.receive_with_progress(&transfer, &mut reader, &check)?;
     drop(reader);
+    #[cfg(test)]
+    crate::crash_tests::checkpoint("receive_sealed")?;
     store.receive_transfer(
         claim,
         transfer.id,
         input.byte_length() as i64,
         input.sha256(),
     )?;
+    #[cfg(test)]
+    crate::crash_tests::checkpoint("receive_recorded")?;
     Ok(input)
 }
 

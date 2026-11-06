@@ -117,6 +117,8 @@ pub fn publish_new_album(
         }
     }
     let mut targets = store.begin_publication(claim, run)?;
+    #[cfg(test)]
+    crate::crash_tests::checkpoint("publication_intent")?;
     let reviews = store.album_replacement_reviews(claim.job(), claim.plan_version())?;
     targets.sort_by_key(|target| (target.kind != "main", target.id));
     for target in targets {
@@ -204,6 +206,8 @@ pub fn publish_new_album(
                     check(store, claim, staging, &directory, &target)?;
                 }
                 store.record_publication_file(claim, target.id, file)?;
+                #[cfg(test)]
+                crate::crash_tests::checkpoint("publication_receipt")?;
             }
             let heartbeat = Heartbeat::new();
             check(store, claim, staging, &directory, &target)?;
@@ -211,6 +215,8 @@ pub fn publish_new_album(
                 heartbeat.tick(|| check(store, claim, staging, &directory, &target))
             })?;
             check(store, claim, staging, &directory, &target)?;
+            #[cfg(test)]
+            crate::crash_tests::checkpoint("publication_verified")?;
             directory.publish(store, claim, &target)?;
             let heartbeat = Heartbeat::new();
             directory.verify(&files, &|| {

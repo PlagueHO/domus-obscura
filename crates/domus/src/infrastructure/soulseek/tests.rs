@@ -9,8 +9,7 @@ type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 const PATH: &str = "Peer\\Album\\one.flac";
 
 mod journal;
-#[path = "../../../tests/support/media.rs"]
-mod media;
+use crate::media_fixtures as media;
 
 fn packet(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let mut length = [0; 4];

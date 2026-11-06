@@ -9,6 +9,8 @@ deferred in [#17](https://github.com/PlagueHO/domus-obscura/issues/17) and
 [#18](https://github.com/PlagueHO/domus-obscura/issues/18).
 
 Use this guide for foreground operation, maintenance, backup, and recovery.
+The [process-crash checks](crash-recovery.md) describe generated cross-process
+recovery evidence and its separate OS/power-loss and native-service limits.
 The [Windows guide](windows-services.md) and [Linux guide](linux-services.md)
 retain the optional package and service procedures. Their presence does not
 prove installed-service or reboot acceptance. Windows host checks remain

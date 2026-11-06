@@ -6,6 +6,14 @@ pub mod application;
 pub mod domain;
 pub mod infrastructure;
 
+#[cfg(test)]
+extern crate self as domus;
+#[cfg(test)]
+mod crash_tests;
+#[cfg(test)]
+#[path = "../tests/support/media.rs"]
+mod media_fixtures;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
