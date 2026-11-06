@@ -448,10 +448,109 @@ and exact cover approval remain separate requirements.
 Search may include extension terms such as `mp3`, `flac` or `m4a` as hints.
 They are not typed suffix or bitrate filters in the current protocol request.
 Always filter returned extensions and metadata locally. Group results by peer
-and folder and assess the complete listing before ranking eligible sources.
+and folder and assess the complete listing before ranking eligible sources under
+the Edition Recommendation and Source-Ranking Policy below.
 Missing bitrate or CBR/VBR metadata is unknown, not a match or a mismatch.
 Keep partial searches and peer errors visible; a bounded search cannot prove
 that the preferred quality is unavailable across the network.
+
+## Edition Recommendation and Source-Ranking Policy
+
+Issue #21 defines this V1 policy. The policy is approved; source-ranking runtime
+implementation remains separate delivery work. This decision does not change
+saved plans, approvals or receipts.
+
+### Exact-edition selection
+
+Show no edition recommendation star in V1. The user must select the exact
+MusicBrainz release and review its ordered tracks. No edition is the default
+recommendation. Provider order, release date, country, official status, artwork
+and source availability do not establish a preferred pressing. These facts can
+inform the user's choice, but must not create a star or select another edition.
+
+Complete track mappings, filenames, advertised audio attributes and local-library
+matches do not prove exact-edition identity. Keep source identity, actual encoding
+and permitted-download evidence distinct.
+
+### Source eligibility and order
+
+Rank sources only for the exact edition and audio profile selected in the plan.
+A candidate needs a complete folder listing from one peer and an unambiguous
+mapping of every planned track. Do not rank individual search hits as eligible
+sources before complete-folder assessment.
+
+Known quality mismatches, missing or ambiguous tracks, unexpected audio,
+unsupported files and other blocking assessment problems exclude a candidate
+from the eligible list. Keep the candidate's rejection reasons visible. A failed
+or incomplete folder read leaves eligibility unknown; it is not an eligible
+source or proof that the album is absent. Never assemble an album from several
+peers.
+
+Use the following order for eligible sources:
+
+| Evidence group              | Required evidence                                                                                                |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Matching advertised quality | Every planned track has a complete mapping and all advertised attributes required by the selected profile match. |
+| Unknown advertised quality  | The mapping is complete, no known mismatch exists, and at least one required quality attribute is missing.       |
+
+Missing bitrate or CBR/VBR attributes are unknown only when the selected profile
+requires them. Do not require a fixed bitrate for FLAC. Advertised matches are
+claims, not verified encoding. Neither group verifies the exact edition,
+permission or actual audio quality.
+
+Sources within one evidence group have equal rank. Use ascending peer username,
+then folder identifier, only for stable display order. Do not label the first
+tied source as better. Provider order, queue position, reported transfer speed,
+filenames and local matches do not break a quality tie. Filename evidence can
+support track mapping, but cannot prove a pressing or raise an eligible source's
+rank.
+
+Show partial-search limits and peer errors alongside the results. An empty
+eligible list means no eligible source was found in the assessed results. It
+does not prove network-wide unavailability.
+
+### Audio policy, local matches and approvals
+
+Accepted and preferred audio profiles remain shared administrator policy. Keep
+other accepted profiles outside the selected plan's source ranking. Show them
+in a separate alternatives list. Put the preferred profile first when it is an
+alternative; all remaining accepted profiles have equal preference. Do not
+invent a bitrate or format order among them. Apply the same source evidence
+groups within each alternative profile.
+
+A different selected profile requires a new plan and new approval. Do not change
+the saved plan's selected profile or policy version when settings change. Do not
+switch editions, profiles or approved sources automatically. Ranking or selecting
+a result does not approve or start acquisition.
+
+Local-library matches are informational. Keep the location, observation time,
+coverage and stale or offline state visible. Names, saved MusicBrainz identifiers
+and no-match results do not prove exact-edition identity, ownership, confirmed
+absence or source quality. They do not create an edition star, exclude a remote
+candidate or change its rank.
+
+Keep explicit exact-edition and source selection. Source approval still requires
+the user's exact-edition and permitted-download acknowledgement. Exact-JPEG cover
+approval and the explicit start command remain separate. Artwork-provider edit
+approval, a local match or a high source rank cannot replace any approval.
+
+### Representative decision examples
+
+These are policy cases for future isolated implementation tests, not evidence
+that source ranking is already implemented.
+
+| Case                                                                                               | Required result                                                                                                      |
+| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Complete single-peer MP3 320 CBR mapping; every required advertised attribute matches              | Eligible in the matching-quality group. Encoding and edition remain unverified.                                      |
+| The same mapping has missing bitrate or CBR/VBR evidence, with no known mismatch                   | Eligible in the unknown-quality group. Never label it a confirmed quality match.                                     |
+| The plan selects MP3 320 CBR; one track advertises 256 kbps or VBR                                 | Exclude from eligible ranking. Show the quality mismatch.                                                            |
+| A track is missing, a mapping is ambiguous, extra audio is present, or tracks are split over peers | Exclude from eligible ranking. Keep the assessment reasons; never combine peers.                                     |
+| A folder read fails or returns only part of its listing                                            | Eligibility remains unknown. Show the error or incomplete state.                                                     |
+| Equally ranked sources advertise different transfer speeds                                         | Equal rank. Use stable peer and folder display order only.                                                           |
+| FLAC is preferred, but the saved plan selects accepted MP3 320 CBR                                 | Rank MP3 sources for that plan. Show FLAC separately; switching requires a new plan and approval.                    |
+| Local names or MusicBrainz tags match, but observations are stale or coverage is incomplete        | Show an informational local match. Do not infer identity or absence, show a star, or change source rank.             |
+| A catalog edition has the earliest date, most artwork or first provider position                   | No edition star. The user selects the exact edition.                                                                 |
+| A bounded search finds no eligible source for the preferred profile                                | Report the result and search limits. Do not claim network-wide unavailability or start an alternative automatically. |
 
 ## Provider Throttling and Waiting
 
@@ -570,7 +669,8 @@ This section replaces the earlier "Wall + inspector" direction where they differ
 ### Album and Artist pages
 
 - Shared hero, artist card (`.ac`) and album card (`.bc`).
-- The Album page offers an edition dropdown with a star on the recommended edition.
+- The Album page offers an exact-edition dropdown without a recommendation star
+  in V1. Follow the Edition Recommendation and Source-Ranking Policy.
 - **Start Download** slide-out: no checkbox. The click is the approval.
   It shows live checks and a notice. An early click needs a server-side check.
   Each album is its own approval record, bound to its exact edition, cover and source.
@@ -667,7 +767,8 @@ retained restore and irreversible recovery deletion. Failure checks include stal
 previews, atomic batch rejection, lost responses and unavailable metadata.
 Windows/Linux CI is wired separately. Local Windows evidence does not establish
 Linux, production authentication, live-provider, installed-service or complete V1
-acceptance. The edition recommendation star remains deferred to issue #21.
+acceptance. The approved issue #21 policy excludes an edition recommendation
+star from V1.
 
 The queue uses only the retained cover approved for its exact current plan.
 Missing covers remain placeholders; image failures have an explicit unavailable
@@ -706,8 +807,8 @@ Album pages now offer an exact-edition dropdown backed by release-group browsing
 Each result must belong to the requested group. Pagination uses actual provider
 rows. The current exact edition remains visible on other pages. Unofficial
 editions require an explicit filter. Selection opens the exact release without
-creating or approving work. Recommendation criteria remain undefined; provider
-ordering does not create a recommended edition or a star.
+creating or approving work. The approved Edition Recommendation and Source-Ranking
+Policy shows no edition star in V1; provider ordering is not a recommendation.
 
 The request now keeps the plan, source, cover and explicit start controls in one
 amber review surface. Missing source and cover editors open for review. Approved
@@ -771,16 +872,18 @@ and provider views from showing another resource's saved result as current.
 Discovery shows possible saved-tag matches for one selected location at a time.
 Comparison trims outer whitespace and ignores case, but preserves punctuation.
 Matches, provider IDs and no-match responses do not prove an exact edition,
-ownership or absence. Coverage and observation times remain visible. Edition
-recommendation policy remains issue #21; physical scanning and memory acceptance
-remain issue #23.
+ownership or absence. Coverage and observation times remain visible. Follow the
+approved Edition Recommendation and Source-Ranking Policy for issue #21; physical
+scanning and memory acceptance remain issue #23.
 An explicit root-availability check opens only the configured root through the
 existing no-follow boundary and verifies its saved native binding. It does not
 scan, update coverage or authorize later writes. Missing, inaccessible, unbound
 or replaced roots remain errors; cached browsing remains available.
 
-This remains a partial port: recommendation policy and other retained V1 work
-remain open. The original HTML study is unchanged and remains authoritative.
+This remains a partial port: source-ranking implementation and other retained V1
+work remain open. The original HTML study is unchanged. The confirmed policy above
+supersedes its edition recommendation star for V1; otherwise the study remains
+authoritative.
 
 Generated regression tests cover anonymous HTTPS approval through local MP3
 normalization/publication, exact folders/filenames, all required tags and unchanged
