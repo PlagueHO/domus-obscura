@@ -112,6 +112,7 @@ pub struct ScanClaim {
 /// A capability for one lease generation. A worker name alone cannot prove
 /// ownership after expiry and reclaim, even when the same worker name is used.
 #[derive(Debug)]
+#[cfg_attr(test, derive(Serialize, serde::Deserialize))]
 pub struct JobClaim {
     job: i64,
     owner: String,
@@ -939,6 +940,16 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn limit_crash_fixture_pages(&self) -> Result<()> {
+        let pages: i64 = self
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        self.connection
+            .pragma_update(None, "max_page_count", pages)?;
+        Ok(())
+    }
+
     pub fn job_state(&self, id: i64) -> Result<Option<String>> {
         self.connection
             .query_row("SELECT state FROM jobs WHERE id = ?1", [id], |row| {
@@ -1001,6 +1012,8 @@ impl Store {
             params![job, plan_version],
         )?;
         transaction.commit()?;
+        #[cfg(test)]
+        crate::crash_tests::checkpoint("question_saved")?;
         Ok(id)
     }
 
@@ -1066,6 +1079,8 @@ impl Store {
             params![job, plan_version],
         )?;
         transaction.commit()?;
+        #[cfg(test)]
+        crate::crash_tests::checkpoint("answer_saved")?;
         Ok(())
     }
 }

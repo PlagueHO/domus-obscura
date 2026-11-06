@@ -395,6 +395,8 @@ impl StagingRoot {
             source.read_exact(&mut buffer[..count])?;
             heartbeat()?;
             output.write_all(&buffer[..count])?;
+            #[cfg(test)]
+            crate::crash_tests::checkpoint("receive_writing")?;
             hash.update(&buffer[..count]);
             remaining -= count as u64;
         }
@@ -405,6 +407,8 @@ impl StagingRoot {
         }
         heartbeat()?;
         output.sync_all()?;
+        #[cfg(test)]
+        crate::crash_tests::checkpoint("receive_synced")?;
         sync_directory(&self.directory)?;
         let sha256: [u8; 32] = hash.finalize().into();
         if hash_file_with_progress(&mut output, bytes, heartbeat)? != sha256 {
@@ -727,6 +731,8 @@ impl NormalizationDirectory<'_> {
         heartbeat()?;
         output.sync_all()?;
         sync_directory(&self.directory)?;
+        #[cfg(test)]
+        crate::crash_tests::checkpoint("normalization_synced")?;
         if hex(&hash_file_with_progress(
             &mut output,
             evidence.bytes,

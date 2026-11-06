@@ -129,6 +129,8 @@ pub(crate) fn restore_album_replacement(
         }
         if restore.state == "published" {
             store.approve_album_restore(&restore, &preview)?;
+            #[cfg(test)]
+            crate::crash_tests::checkpoint("restore_intent")?;
             restore.replacement_album_identity = preview.current_album_identity;
             restore.replacement_files = preview.current_files;
             restore.state = "restore_prepared".into();
@@ -358,12 +360,21 @@ fn run_album_restore(store: &mut Store, restore: &AlbumReplacementRestore) -> Re
                     next,
                 )?;
                 state = next;
+                #[cfg(test)]
+                crate::crash_tests::checkpoint(next)?;
                 continue;
             }
             RestoreStep::Complete => return Ok(()),
         };
         rename_no_replace(&parent, rename.0, rename.1)?;
         sync(&parent)?;
+        #[cfg(test)]
+        crate::crash_tests::checkpoint(match state {
+            "restore_prepared" => "restore_current_renamed",
+            "restore_current_moved" => "restore_original_renamed",
+            "restore_original_visible" => "restore_displaced_renamed",
+            _ => return Err(conflict()),
+        })?;
     }
 }
 
@@ -895,6 +906,8 @@ impl PublicationDirectory {
                 drop(original);
                 rename_no_replace(&self.parent, &self.final_name, retained_name)?;
                 sync(&self.parent)?;
+                #[cfg(test)]
+                crate::crash_tests::checkpoint("replacement_retained")?;
             }
             store.record_publication_replacement_state(claim, target.id, "retained")?;
             if open_child_directory(&self.parent, &self.final_name)?.is_some() {
@@ -911,6 +924,8 @@ impl PublicationDirectory {
             sync(&self.parent)?;
             self.directory = self.parent.open_dir_nofollow(&self.final_name)?;
             self.visible = true;
+            #[cfg(test)]
+            crate::crash_tests::checkpoint("replacement_visible")?;
             store.record_publication_replacement_state(claim, target.id, "published")?;
             return self.check(store, target);
         }
@@ -930,6 +945,8 @@ impl PublicationDirectory {
         sync(&self.parent)?;
         self.directory = self.parent.open_dir_nofollow(&self.final_name)?;
         self.visible = true;
+        #[cfg(test)]
+        crate::crash_tests::checkpoint("publication_visible")?;
         self.check(store, target)
     }
 
@@ -1004,6 +1021,10 @@ impl PublicationDirectory {
                 source.read_exact(&mut buffer[..count])?;
                 check()?;
                 file.write_all(&buffer[..count])?;
+                #[cfg(test)]
+                if entry.ordinal > 0 {
+                    crate::crash_tests::checkpoint("publication_writing")?;
+                }
                 remaining -= count as u64;
             }
             if source.read(&mut [0; 1])? != 0 {
@@ -1015,6 +1036,8 @@ impl PublicationDirectory {
         verify(&mut file, entry, check)?;
         sync(&self.directory)?;
         check()?;
+        #[cfg(test)]
+        crate::crash_tests::checkpoint("publication_synced")?;
         Ok(())
     }
 

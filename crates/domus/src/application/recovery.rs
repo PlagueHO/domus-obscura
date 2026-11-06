@@ -152,6 +152,8 @@ pub fn delete_recovery(
         &binding.directory_identity,
     ));
     store.begin_recovery(&entry, &decision.expected_preview_sha256, &binding, &items)?;
+    #[cfg(test)]
+    crate::crash_tests::checkpoint("deletion_intent")?;
     run_operation(store, id, None)
 }
 
@@ -453,11 +455,23 @@ fn run_operation(
                         recovery_files::delete_file(&parent, &item.file)?;
                     }
                     sync_directory(&parent)?;
+                    #[cfg(test)]
+                    if operation.kind != "cleanup" {
+                        crate::crash_tests::checkpoint(if item.directory {
+                            "deletion_directory_removed"
+                        } else {
+                            "deletion_file_removed"
+                        })?;
+                    }
                 }
             }
             store.recovery_item_state(operation.id, item.ordinal, "removing", "removed")?;
         }
         store.recovery_result(operation.id, None)?;
+        #[cfg(test)]
+        if operation.kind != "cleanup" {
+            crate::crash_tests::checkpoint("deletion_complete")?;
+        }
         Ok(())
     })();
     if let Err(error) = result {
