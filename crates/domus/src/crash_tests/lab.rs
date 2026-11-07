@@ -186,8 +186,7 @@ impl Volume {
         Ok(volume)
     }
 
-    fn check(&self) -> TestResult {
-        self.root.check()?;
+    fn check_image(&self) -> TestResult {
         eprintln!(
             "lab image check: path={}, expected={}",
             self.image.display(),
@@ -207,6 +206,12 @@ impl Volume {
             )
             .into());
         }
+        Ok(())
+    }
+
+    fn check(&self) -> TestResult {
+        self.root.check()?;
+        self.check_image()?;
         let observed = with_path_context(
             format!("inspect volume backed by {}", self.image.display()),
             &self.root.path,
@@ -233,6 +238,68 @@ impl Volume {
         }
         Ok(())
     }
+
+    fn check_detached(&self) -> TestResult {
+        self.check_image()?;
+        #[cfg(windows)]
+        if inspect_windows_volume(&self.root.path, &self.image, true)?["detached"] != true {
+            return Err("native inspection did not confirm image detachment".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            let loops = serde_json::from_slice(&output(
+                "losetup",
+                &[
+                    OsStr::new("--json"),
+                    OsStr::new("--list"),
+                    OsStr::new("--associated"),
+                    self.image.as_os_str(),
+                    OsStr::new("--output"),
+                    OsStr::new("NAME,MAJ:MIN"),
+                ],
+            )?)?;
+            let mounts = serde_json::from_slice(&output(
+                "findmnt",
+                &[
+                    OsStr::new("--json"),
+                    OsStr::new("--list"),
+                    OsStr::new("--kernel"),
+                    OsStr::new("--output"),
+                    OsStr::new("MAJ:MIN"),
+                ],
+            )?)?;
+            check_unmounted_loop_devices(&loops, &mounts)?;
+        }
+        self.check_image()
+    }
+}
+
+fn check_unmounted_loop_devices(loops: &serde_json::Value, mounts: &serde_json::Value) -> TestResult {
+    let devices = loops["loopdevices"]
+        .as_array()
+        .ok_or("missing associated loop devices")?;
+    let mounted = mounts["filesystems"]
+        .as_array()
+        .ok_or("missing kernel mount information")?
+        .iter()
+        .map(|entry| {
+            entry["maj:min"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or("missing mounted device identity")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for entry in devices {
+        let device = entry["maj:min"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or("missing associated loop device identity")?;
+        if mounted.contains(&device) {
+            return Err("approved image is still mounted; directory absence is not detachment".into());
+        }
+    }
+    Ok(())
 }
 
 fn validate_observation(observed: &ObservedVolume, capacity: u64) -> TestResult {
@@ -248,12 +315,22 @@ fn validate_observation(observed: &ObservedVolume, capacity: u64) -> TestResult 
 
 #[cfg(windows)]
 fn observe_volume(root: &Path, image: &Path) -> Result<ObservedVolume, Box<dyn std::error::Error>> {
+    Ok(serde_json::from_value(inspect_windows_volume(root, image, false)?)?)
+}
+
+#[cfg(windows)]
+fn inspect_windows_volume(
+    root: &Path,
+    image: &Path,
+    detached: bool,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     // Arguments are passed as environment values, not interpolated into PowerShell code.
     let script = include_str!("windows_volume_inspection.ps1");
     let result = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("DOMUS_INSPECT_ROOT", root)
         .env("DOMUS_INSPECT_IMAGE", image)
+        .env("DOMUS_INSPECT_DETACHED", if detached { "1" } else { "0" })
         .stdin(Stdio::null())
         .output()?;
     if !result.status.success() {
@@ -933,6 +1010,11 @@ fn backup_volume(swap: bool) -> TestResult {
             replacement.capacity,
         )?;
     } else {
+        lab.volume.check_detached()?;
+        lab.record(
+            "detachment.json",
+            &json!({"detached":true,"image_identity":lab.volume.image_identity}),
+        )?;
         // A live original handle identity or an ordinary existing directory is not drive loss.
         if std::fs::symlink_metadata(&lab.volume.root.path).is_ok() {
             return Err(
@@ -1127,6 +1209,27 @@ fn volume_lab_rejects_replaced_roots_and_checkout_paths() -> TestResult {
 }
 
 #[test]
+fn volume_lab_detachment_rejects_directory_rename_on_a_mounted_image() -> TestResult {
+    let parent = tempdir()?;
+    let root = parent.path().join("fixture");
+    std::fs::create_dir(&root)?;
+    std::fs::rename(&root, parent.path().join("renamed"))?;
+    assert!(!root.try_exists()?);
+    let loops = json!({"loopdevices":[{"name":"/dev/loop7","maj:min":"7:7"}]});
+    let mounted = json!({"filesystems":[{"maj:min":"8:1"},{"maj:min":"7:7"}]});
+    assert!(check_unmounted_loop_devices(&loops, &mounted).is_err());
+    check_unmounted_loop_devices(&loops, &json!({"filesystems":[{"maj:min":"8:1"}]}))?;
+    check_unmounted_loop_devices(&json!({"loopdevices":[]}), &mounted)?;
+    for invalid in [json!({}), json!({"filesystems":[{}]})] {
+        assert!(check_unmounted_loop_devices(&loops, &invalid).is_err());
+    }
+    assert!(
+        check_unmounted_loop_devices(&json!({"loopdevices":[{}]}), &mounted).is_err()
+    );
+    Ok(())
+}
+
+#[test]
 #[cfg(windows)]
 fn volume_lab_windows_inspection_rejects_regular_files_without_mutating_them() -> TestResult {
     let directory = tempdir()?;
@@ -1134,15 +1237,17 @@ fn volume_lab_windows_inspection_rejects_regular_files_without_mutating_them() -
     let bytes = b"generated non-VHDX guard fixture";
     std::fs::write(&image, bytes)?;
     let identity = image_identity(&image)?;
-    let error = match observe_volume(directory.path(), &image) {
-        Err(error) => error.to_string(),
-        Ok(_) => return Err("a regular file must not pass VHDX inspection".into()),
-    };
-    assert!(
-        error.contains("OpenVirtualDisk failed")
-            || error.contains("Run application tests without elevation"),
-        "{error}"
-    );
+    for detached in [false, true] {
+        let error = match inspect_windows_volume(directory.path(), &image, detached) {
+            Err(error) => error.to_string(),
+            Ok(_) => return Err("a regular file must not pass VHDX inspection".into()),
+        };
+        assert!(
+            error.contains("OpenVirtualDisk failed")
+                || error.contains("Run application tests without elevation"),
+            "{error}"
+        );
+    }
     assert_eq!(std::fs::read(&image)?, bytes);
     assert_eq!(image_identity(&image)?, identity);
     Ok(())

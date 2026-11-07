@@ -519,6 +519,32 @@ virtual-volume cases now have passing evidence. Ubuntu's six passing cases
 remain separate evidence for its earlier source snapshot. These are not new
 remote CI results and do not prove physical drive or power-loss durability.
 
+## Review guard corrections (2026-11-07)
+
+Follow-up review found that a renamed fixture directory could satisfy the
+detached-backup path check while its image remained mounted. The parent now
+requires read-only native evidence before starting the pending child. Windows
+checks the exact VHDX's `GET_VIRTUAL_DISK_INFO_IS_LOADED` state. Linux compares
+the image's associated loop-device identities with the kernel mount table,
+including mounts at other paths. The bound image identity is checked before
+and after inspection. Successful inspection writes `detachment.json`.
+
+Both wrappers now sync and close a temporary sibling before publishing the
+continuation signal without replacing an earlier signal. This prevents a
+polling parent from reading incomplete content or encountering the Windows
+writer's exclusive sharing mode. Ordinary tests cover mounted-image rejection
+after a directory rename, malformed observations, hidden writes, failed sync,
+and preservation of an existing signal.
+
+The updated local Windows `.\dev.ps1 check` passed with 365 library tests,
+103 ordinary media tests, 37 HTTPS tests, and 266 frontend tests, plus
+contracts, rustfmt, Clippy, harnesses, Prettier, and frontend types.
+Both wrapper safety suites also passed, including all five Python checks.
+
+These corrections postdate the recorded Azure payloads. No new VM or
+real-volume retest was performed. The earlier guest results remain evidence
+for their stated snapshots, not for these later guard changes.
+
 ## Remaining acceptance limits
 
 Windows and Linux process-crash evidence is verified for both the PR merge

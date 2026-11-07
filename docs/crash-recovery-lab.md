@@ -264,10 +264,21 @@ condition before starting a child. An error inspecting a still-present volume
 does not pass the detached-volume case.
 
 The child must persist `backup_pending` and preserve primary and staging data.
+For detached-backup cases, directory absence alone is not enough. The parent
+requires the exact VHDX to report not loaded on Windows. On Linux, it checks
+the image's associated loop-device identities against the kernel mount table,
+including mounts at other paths. A renamed fixture on a mounted image fails.
+The successful native check is saved in `detachment.json` before the child starts.
+
 For `return-original-backup.request.json`, return the exact original volume.
 For a swap, also return the replacement to its original mount. Signal with
 `return-original-backup`. A fresh process must finish with a new returned claim.
 The replacement's sentinel and all unrelated bytes must remain unchanged.
+
+Both wrappers write and sync a temporary sibling before publishing the closed
+continuation file. Publication does not replace an existing signal. The parent
+can observe either no signal or the complete run identity, never an in-progress
+write. Wrapper self-tests cover signal publication without volume operations.
 
 On Windows, verify that both restored drive-letter paths are usable before
 acknowledging the return. Successful mount or drive-letter commands alone do
@@ -316,7 +327,7 @@ Never extend the VM deadline to recover more evidence.
 
 Do not claim volume evidence from wrapper self-tests or the ordinary ignored
 test count. Missing prerequisites are explicit errors when a case is selected.
-The ordinary CI workflow runs only wrapper rejection checks and unprivileged
+The ordinary CI workflow runs only wrapper safety checks and unprivileged
 Rust tests.
 
 After exporting evidence, the separately approved operator cleans up only the

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 CONSENT = "disposable-volume-faults"
 CASES = (
@@ -67,10 +68,7 @@ def main(arguments):
         pending = json.loads(request.read_text(encoding="utf-8"))
         if pending != {"run": lab["run"], "step": args.step}:
             raise ValueError("The operator request does not match this run.")
-        with (directory / f"{args.step}.continue").open("x", encoding="utf-8") as signal:
-            signal.write(lab["run"])
-            signal.flush()
-            os.fsync(signal.fileno())
+        publish_signal(directory, args.step, lab["run"])
         return 0
     env = {name: value for name, value in os.environ.items() if not name.startswith("DOMUS_LAB_")}
     env["DOMUS_LAB_CONSENT"] = args.consent
@@ -93,6 +91,19 @@ def main(arguments):
     if result.returncode:
         print("Lab failed. Retain all fixture evidence.", file=sys.stderr)
     return result.returncode
+
+
+def publish_signal(directory, step, run):
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{step}.", suffix=".pending", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as signal:
+            signal.write(run)
+            signal.flush()
+            os.fsync(signal.fileno())
+        # A same-directory hard link publishes complete bytes without replacing an earlier signal.
+        os.link(temporary, directory / f"{step}.continue")
+    finally:
+        os.unlink(temporary)
 
 
 class WrapperTests(unittest.TestCase):
@@ -136,6 +147,32 @@ class WrapperTests(unittest.TestCase):
             self.assertEqual(signal.read_text(encoding="utf-8"), "generated-case")
             with self.assertRaises(FileExistsError):
                 main(arguments)
+
+    def test_signal_is_invisible_until_synced_and_cannot_replace_existing_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            signal = directory / "detach-backup.continue"
+            fsync = os.fsync
+
+            def check_invisible(descriptor):
+                self.assertFalse(signal.exists())
+                fsync(descriptor)
+
+            with mock.patch.object(os, "fsync", side_effect=check_invisible):
+                publish_signal(directory, "detach-backup", "generated-case")
+            self.assertEqual(signal.read_text(encoding="utf-8"), "generated-case")
+            with self.assertRaises(FileExistsError):
+                publish_signal(directory, "detach-backup", "different-run")
+            self.assertEqual(signal.read_text(encoding="utf-8"), "generated-case")
+            self.assertEqual(list(directory.iterdir()), [signal])
+
+    def test_failed_signal_sync_does_not_publish_or_retain_partial_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with mock.patch.object(os, "fsync", side_effect=OSError("generated sync failure")):
+                with self.assertRaises(OSError):
+                    publish_signal(directory, "detach-backup", "generated-case")
+            self.assertEqual(list(directory.iterdir()), [])
 
 
 if __name__ == "__main__":

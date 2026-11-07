@@ -19,6 +19,20 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Write-ContinuationSignal([string] $Directory, [string] $Step, [string] $Run) {
+    $signal = Join-Path $Directory "$Step.continue"
+    $temporary = Join-Path $Directory ".$Step.$([Guid]::NewGuid().ToString('N')).pending"
+    $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes($Run)
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        } finally { $stream.Dispose() }
+        [IO.File]::Move($temporary, $signal)
+    } finally { [IO.File]::Delete($temporary) }
+}
+
 if ($Action -eq 'self-test') {
     $tokens = $null
     $errors = $null
@@ -45,7 +59,24 @@ if ($Action -eq 'self-test') {
             if ($process.ExitCode -eq 0) { throw 'Unsafe wrapper arguments were accepted.' }
         } finally { $process.Dispose() }
     }
-    Write-Output 'Lab wrapper rejection checks passed. No host changes were made.'
+    $directory = Join-Path ([IO.Path]::GetTempPath()) "domus-signal-$([Guid]::NewGuid().ToString('N'))"
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+    $signal = Join-Path $directory 'detach-backup.continue'
+    try {
+        Write-ContinuationSignal $directory 'detach-backup' 'generated-case'
+        if ([IO.File]::ReadAllText($signal) -cne 'generated-case') { throw 'Signal content was not published.' }
+        $rejected = $false
+        try { Write-ContinuationSignal $directory 'detach-backup' 'different-run' }
+        catch [IO.IOException] { $rejected = $true }
+        if (-not $rejected -or [IO.File]::ReadAllText($signal) -cne 'generated-case') {
+            throw 'An existing signal was replaced.'
+        }
+        if (@(Get-ChildItem -LiteralPath $directory -Force).Count -ne 1) { throw 'A temporary signal was retained.' }
+    } finally {
+        [IO.File]::Delete($signal)
+        [IO.Directory]::Delete($directory)
+    }
+    Write-Output 'Lab wrapper rejection and signal checks passed. No host configuration changes were made.'
     exit 0
 }
 
@@ -71,13 +102,7 @@ if ($Action -eq 'continue') {
     }
     $pending = Get-Content -LiteralPath $request -Raw | ConvertFrom-Json
     if ($pending.run -ne $lab.run -or $pending.step -ne $Step) { throw 'The operator request does not match this run.' }
-    $signal = Join-Path $lab.evidence.path "$Step.continue"
-    $stream = [IO.File]::Open($signal, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-    try {
-        $bytes = [Text.Encoding]::UTF8.GetBytes($lab.run)
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush($true)
-    } finally { $stream.Dispose() }
+    Write-ContinuationSignal $lab.evidence.path $Step $lab.run
     exit 0
 }
 

@@ -93,7 +93,7 @@ public static class DomusLabVolumeInspection
             (ulong)size.EndOfFile < virtualSize || size.AllocationSize < size.EndOfFile)
             throw new InvalidOperationException("Use a fully allocated, nonsparse, regular image.");
     }
-    static ulong FixedLoadedSize(string image) {
+    static ulong FixedSize(string image, bool loaded) {
         var storage = new StorageType {
             DeviceId = 3, VendorId = new Guid("ec984aec-a0f9-47e9-901f-71415a66345b")
         };
@@ -108,7 +108,10 @@ public static class DomusLabVolumeInspection
             info = new DiskInfo { Version = 13 };
             size = 32;
             Check(GetVirtualDiskInformation(disk, ref size, ref info, IntPtr.Zero), "VHDX attachment query");
-            if (info.SubtypeOrLoaded != 1) throw new InvalidOperationException("The exact image is not attached.");
+            if (info.SubtypeOrLoaded != (loaded ? 1u : 0u))
+                throw new InvalidOperationException(loaded
+                    ? "The exact image is not attached."
+                    : "The exact image is still attached; directory absence is not detachment.");
             info = new DiskInfo { Version = 1 };
             size = 32;
             Check(GetVirtualDiskInformation(disk, ref size, ref info, IntPtr.Zero), "VHDX size query");
@@ -177,7 +180,7 @@ public static class DomusLabVolumeInspection
     public static void Validate(string root, string image, ulong capacity) {
         if (new DriveInfo(Path.GetPathRoot(image)).DriveType != DriveType.Fixed)
             throw new InvalidOperationException("The image must be on a fixed local host volume.");
-        ulong virtualSize = FixedLoadedSize(image);
+        ulong virtualSize = FixedSize(image, true);
         if (capacity > virtualSize) throw new InvalidOperationException("Volume exceeds the image size.");
         using (var file = OpenMetadata(image, false)) {
             CheckImageAllocation(file, virtualSize);
@@ -185,11 +188,21 @@ public static class DomusLabVolumeInspection
                 CheckDependency(directory, Identity(file));
         }
     }
+    public static void ValidateDetached(string image) {
+        ulong virtualSize = FixedSize(image, false);
+        using (var file = OpenMetadata(image, false))
+            CheckImageAllocation(file, virtualSize);
+    }
 }
 '@
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run application tests without elevation.'
+}
+if ($env:DOMUS_INSPECT_DETACHED -eq '1') {
+    [DomusLabVolumeInspection]::ValidateDetached($env:DOMUS_INSPECT_IMAGE)
+    @{ detached = $true } | ConvertTo-Json -Compress
+    return
 }
 $root = [IO.Path]::GetPathRoot($env:DOMUS_INSPECT_ROOT)
 if ($root -notmatch '^[A-Za-z]:\\$') { throw 'A local drive-letter lab volume is required.' }
