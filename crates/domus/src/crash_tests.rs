@@ -16,14 +16,15 @@ struct Probe {
     target: String,
     channel: TcpStream,
     fail_write: bool,
+    resume_once: bool,
 }
 
 thread_local! {
     static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
 }
 
-/// A selected probe reports an exact boundary, then waits for its parent to kill
-/// the process. A lost control connection fails the operation instead of resuming it.
+/// A crash probe waits for termination. An opt-in volume probe can resume once
+/// after its parent exhausts the disposable filesystem. Lost control fails closed.
 pub(crate) fn checkpoint(name: &str) -> io::Result<()> {
     PROBE.with_borrow_mut(|probe| {
         let Some(probe) = probe.as_mut().filter(|probe| probe.target == name) else {
@@ -39,6 +40,10 @@ pub(crate) fn checkpoint(name: &str) -> io::Result<()> {
         writeln!(probe.channel, "{name}")?;
         let mut command = [0];
         probe.channel.read_exact(&mut command)?;
+        if probe.resume_once && command == *b"C" {
+            probe.target.clear();
+            return Ok(());
+        }
         Err(io::Error::new(
             io::ErrorKind::ConnectionAborted,
             "crash probe must be terminated, never released",
@@ -51,4 +56,7 @@ mod album {
     include!("../tests/media/fixture.rs");
     include!("crash_tests/cases.rs");
     include!("crash_tests/faults.rs");
+    mod lab {
+        include!("crash_tests/lab.rs");
+    }
 }

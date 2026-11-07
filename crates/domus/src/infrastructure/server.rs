@@ -452,6 +452,8 @@ impl PreparedServer {
                 owner.drain().await?;
             }
             *renewals = None;
+            #[cfg(test)]
+            reload_checkpoint::reach(&host.configuration.database, "preparing").await?;
             let prepared = tokio::time::timeout(
                 Duration::from_secs(30),
                 host.replacement(&revision, &listener),
@@ -465,6 +467,8 @@ impl PreparedServer {
                         revision,
                         Err(Error::Internal("reload preparation failed")),
                     )?;
+                    #[cfg(test)]
+                    reload_checkpoint::reach(&host.configuration.database, "rejected").await?;
                     match renewal_owner(&host).await {
                         Ok(owner) => *renewals = owner,
                         Err(_) => eprintln!(
@@ -474,6 +478,8 @@ impl PreparedServer {
                     continue;
                 }
             };
+            #[cfg(test)]
+            reload_checkpoint::reach(&host.configuration.database, "prepared").await?;
             // Keep a bound copy of the old socket until the new generation is
             // listening. Failed handover can restore the immutable old host.
             host.api.stop_local_operations();
@@ -483,6 +489,8 @@ impl PreparedServer {
                 eprintln!("API listener drain failed during reload: {error}");
             }
             host.api.drain_local_operations().await?;
+            #[cfg(test)]
+            reload_checkpoint::reach(&host.configuration.database, "handover").await?;
             let source = host.source.clone();
             let expected = revision.clone();
             let verified = tokio::task::spawn_blocking(move || source.verify_reload(&expected))
@@ -505,7 +513,11 @@ impl PreparedServer {
                     handle = next_handle;
                     serving = next_serving;
                     shutdown.0 = handle.clone();
+                    #[cfg(test)]
+                    reload_checkpoint::reach(&host.configuration.database, "before_report").await?;
                     host.source.finish_reload(revision, Ok(()))?;
+                    #[cfg(test)]
+                    reload_checkpoint::reach(&host.configuration.database, "reported").await?;
                     eprintln!("API configuration reload activated");
                 }
                 Err(_) => {
@@ -538,6 +550,42 @@ impl PreparedServer {
         eprintln!("API stopped accepting work; waiting for local operations and saved results");
         host.api.drain_local_operations().await?;
         result
+    }
+}
+
+/// Installed only by an exact child test. The database binding keeps the hook
+/// separate from every other host, including hosts on other executor threads.
+#[cfg(test)]
+pub(super) mod reload_checkpoint {
+    use super::*;
+
+    pub struct Checkpoint {
+        pub database: PathBuf,
+        pub directory: PathBuf,
+        pub boundary: String,
+    }
+
+    pub static CHECKPOINT: std::sync::OnceLock<Checkpoint> = std::sync::OnceLock::new();
+
+    pub async fn reach(database: &Path, boundary: &str) -> Result<()> {
+        let Some(checkpoint) = CHECKPOINT.get().filter(|value| {
+            value.database == database && value.boundary.split(',').any(|name| name == boundary)
+        }) else {
+            return Ok(());
+        };
+        std::fs::write(checkpoint.directory.join("checkpoint"), boundary)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while !checkpoint
+            .directory
+            .join(format!("release-{boundary}"))
+            .exists()
+        {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Internal("TLS crash checkpoint timed out"));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok(())
     }
 }
 

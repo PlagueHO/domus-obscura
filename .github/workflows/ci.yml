@@ -41,6 +41,13 @@ jobs:
           key: rust-${{ runner.os }}-1.99.1-${{ hashFiles('Cargo.lock') }}
       - run: cargo task bootstrap
       - run: cargo task check
+      - name: Check Linux fault-lab wrapper without host changes
+        if: runner.os == 'Linux'
+        run: python3 scripts/crash-recovery-lab.py self-test
+      - name: Check Windows fault-lab wrapper without host changes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\crash-recovery-lab.ps1 -Action self-test
       - run: cargo task build
       - run: cargo task smoke
       - name: Install Chromium for generated browser workflows

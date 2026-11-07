@@ -1,5 +1,10 @@
 # Process-crash recovery evidence
 
+The optional [disposable-volume lab](crash-recovery-lab.md) adds explicitly
+selected filesystem-full and detached-volume probes. Its scripts require
+separate execution approval and verified disposable roots. Recorded runs below
+distinguish passing cases from failed or unperformed cases.
+
 ## Boundary and limits
 
 The generated process tests exercise the real Rust application operations in
@@ -160,15 +165,373 @@ These are remote results for the stated final merge revision, not new local
 test results or proof for later commits. The HTTPS results remain separate
 transport evidence, not process termination during TLS activation.
 
+## Follow-up TLS and volume lab
+
+The follow-up working tree is based on
+`44a4c67a6bc59d0577d99d42947f6ffbfdbacd1e`. Its local results are not CI
+evidence or a result for a committed follow-up revision.
+
+`backend_configuration_tls_crash_manual_reload_boundaries` terminates owned
+server children at `preparing`, `prepared`, `handover`, `before_report`, and
+`reported`. Fresh processes use the same saved configuration. Real TLS
+handshakes check the served certificate. Saved and active revisions remain
+separate evidence.
+
+`backend_configuration_tls_crash_invalid_manual_keeps_live_host_but_rejects_restart`
+checks rejected replacement material and rejects startup from invalid saved
+configuration without anonymous fallback.
+`backend_configuration_tls_crash_managed_rejection_preserves_journal_and_generations`
+checks staging and untrusted production candidates before and after restart.
+It preserves journal and immutable generation evidence. These three parent
+tests passed locally on Windows. The ignored TLS child is their private
+entry point.
+
+Successful managed production activation remains unverified. Generated
+certificates cannot replace the independent public trust requirement. Manual
+TLS reload results do not prove managed issuance, ACME or DNS effects.
+
+The opt-in volume lab adds six cases: publication full, receive full,
+normalization full, database filesystem full, detached backup, and wrong
+backup volume. They are ignored in ordinary discovery and require explicit
+selection through the lab wrappers. Adding these cases does not prove they
+passed. The wrappers' no-host-configuration-change checks and the Rust
+ownership rejection tests are distinct from volume acceptance.
+
+Local Windows validation passed `.\dev.ps1 check`, including the existing
+37-case matrix, all three new TLS parents, 359 library tests, the separate
+media and HTTPS suites, and 266 frontend tests. The library suite reported
+10 ignored entry points and opt-in cases. The final lab-only path and filler
+guard refinements then passed `.\dev.ps1 test --lib volume_lab_` with three
+passed and seven explicitly ignored lab entries. Workspace all-target Clippy
+with denied warnings passed after those refinements. Both wrapper safety
+suites and `pnpm format:check` passed. These local runs do not establish
+follow-up release-build, smoke, scale, or remote CI results.
+
+### Azure execution on 2026-11-07
+
+The user separately approved two sequential `Standard_D4s_v5` VMs in East US.
+Each VM had a 60-minute maximum lifetime. The independent Azure Automation
+cleanup control had a 150-minute limit. The total cost ceiling remained USD 10.
+All inbound traffic was denied. Payload and evidence blobs remained private.
+The cleanup identity had access only to the exact task-owned resource groups.
+An actual canary-group deletion verified cleanup before the first VM.
+
+Both guests received the same dirty source snapshot based on
+`44a4c67a6bc59d0577d99d42947f6ffbfdbacd1e`. The 18,499,365-byte payload
+archive had SHA-256
+`528e1cfc1129caab4c7117343f0678c968bef33615b06116c0a2800be5bd2df0`.
+It included the base Git bundle and the source overlay. These are working-tree
+results, not results for a new committed or pushed revision.
+
+The Windows Server 2022 Azure Edition guest used image
+`20348.5773.261025`. Its transferred test host had SHA-256
+`940aa321d31851a610ce7802c5de9f3a78b3e03c64471bb69c0f1b5f2bbd0346`.
+The first native launches failed because `VCRUNTIME140.dll` was missing.
+A Microsoft-signed Visual C++ runtime installation then succeeded without
+reboot, and the test host loaded. The normal local account reached all six
+initialization entry points, but `Get-DiskImage` rejected image inspection
+with `CimJob_BrokenCimSession` and `Access denied`. All six cases stopped
+before fault execution. No Windows volume case passed. The application
+probes were not elevated and the image association guard was not bypassed.
+The Windows resource group was verified absent before Ubuntu admission.
+
+The Ubuntu 24.04 x86_64 guest used image `24.04.202610250`. It compiled the
+snapshot with the pinned tools. `cargo task check` completed contracts,
+rustfmt, Clippy, workspace and harness tests, Prettier, frontend types, and
+all 266 frontend tests. The library suite reported 360 passed, zero failed,
+and 10 ignored, including the passing 37-case matrix and all three TLS
+parents. The media suite reported 104 passed and one ignored installed-service
+entry point. The HTTPS suite passed all 37 tests. A separate targeted TLS
+run passed all three parents, and the Python wrapper self-test passed all
+three checks.
+
+Earlier operator attempts failed before fault execution because of Linux
+script line endings, installer ownership, PATH, Git ownership, test-host
+selection, nonempty evidence, and discarded image allocation. These are
+setup failures, not application recovery failures or passing volume evidence.
+Retries used fresh fixture and evidence roots. The original VM and cleanup
+deadlines were not extended.
+
+All six explicitly selected Ubuntu volume cases then passed as the normal
+local account on ext4 filesystems in fully allocated 128 MiB loop images.
+The successful run lasted from 00:55:19 through 01:10:39 UTC.
+
+| Case                     | Verified result                                                                                                                                                                                                        |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Publication full         | Native `ENOSPC` 28 after an interrupted write. The parent terminated the child. Fresh-process recovery preserved the interrupted output and rejected repair.                                                           |
+| Receive full             | Native `ENOSPC` 28. Forced termination and fresh-process recovery preserved partial input without adopting an unsealed receipt.                                                                                        |
+| Normalization full       | Native `ENOSPC` 28. Forced termination and fresh-process recovery preserved earlier files and completed through a fresh generation-bound run.                                                                          |
+| Database filesystem full | SQLite `SQLITE_FULL` 13 on the full disposable filesystem. Forced termination and fresh-process recovery retained four jobs and 20 events, verified integrity, and admitted new work after space release.              |
+| Detached backup          | The operator unmounted the exact loop volume without force. A child persisted `backup_pending`. A fresh process completed after the same original volume returned. Primary and staging content remained intact.        |
+| Wrong backup volume      | The separately bound replacement occupied the original mount point. Work stayed `backup_pending` without changing replacement content. A fresh process completed after both volumes returned to their original mounts. |
+
+The four full-filesystem result records confirm process termination and recovery
+in a new process. The two backup records confirm fresh-process continuation and
+the same original root; they are not additional forced-termination cases.
+The downloaded evidence includes native errors, descriptors, inventories,
+operator steps, and passing result records. Its archive SHA-256 is
+`d8e30a498991b50b03a1761f818d5c33a016e55e9e9cbc6b236938971b0c0e9a`.
+Generated media, databases, and recovery data remain private and outside Git.
+
+After evidence export, the Ubuntu resource group was deleted. The independent
+guard then deleted the control group. Direct Azure queries verified all four
+exact run-owned resource groups absent, including the earlier Windows and
+canary groups. No lab VM, disk, network, storage account, or Automation account
+remains in those groups. Deallocation was not used as cleanup.
+The priced estimate remained below USD 2. Final provider charges are not yet
+available, so this is not a settled bill or a provider-enforced USD 10 cap.
+No application service was installed, no guest was rebooted, and no existing
+library or live provider was used.
+
+### Additional Windows inspection retry
+
+The user separately approved one additional Windows VM and its cleanup
+resources within the original USD 10 ceiling. This retry used the same East US
+region, `Standard_D4s_v5` size, and Windows Server 2022 image. It created no
+additional Ubuntu VM. A new scoped cleanup identity and actual canary deletion
+proved independent cleanup before VM admission. All inbound access remained
+denied. The Windows group had an unchanged deletion-start deadline of
+02:31:10 UTC. No retry extended that deadline or the approved 60-minute VM limit.
+
+The normal-user CIM blocker was replaced with the test-only read-only native
+inspector described in the [lab procedure](crash-recovery-lab.md). Real guest
+queries exposed two format details: Azure marked the backing disk as removable,
+and the returned host-volume GUID name had no trailing separator. The inspector
+now binds that removable-host exception to the running OS volume's native
+identity and a fixed local drive. It validates the complete GUID before adding
+the separator. Exact 128-bit backing-file identity comparison remains required.
+It declares no disk attach, detach, format, or write API.
+
+The final 19,352,523-byte source archive had SHA-256
+`e7f4af79e09ba70800f011fe46ab20112d113c48ca06e8a230dbbbbf1a7acb82`.
+Its Windows test host had SHA-256
+`5c2aa69cfa4884a8ab43b9a024cfc41984eb5786841966713b113f04743243e6`.
+The base revision remained
+`44a4c67a6bc59d0577d99d42947f6ffbfdbacd1e`.
+These hashes identify a later dirty snapshot, not the earlier Ubuntu payload
+or a new committed revision.
+
+The final parameter-free read-only runner passed both required inspection
+checks through the actual Rust entry point under the normal local account:
+
+| Check           | Verified result                                                                                                                                       |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Correct image   | Initialization accepted the fixed 128 MiB NTFS VHDX and wrote its bound descriptor.                                                                   |
+| Different image | Initialization rejected the other attached VHDX with `The fixture is not on the supplied image.` No descriptor was written for that rejected request. |
+| Authority       | The application process used a normal user token. The result explicitly records `elevated=false`.                                                     |
+
+The downloaded preflight archive had SHA-256
+`137d21de43a4de11d1315e2593d00502355962f43ed34941cfe821eaa75cf9a2`.
+Its result shape, rejection text, and missing rejected descriptor were checked.
+Generated state and recovery data remain private and outside Git.
+
+**The six Windows volume fault cases still did not run.** Earlier inspection
+guards rejected the first native attempts. The full-case user runner then
+stopped before preflight, while Azure reported only a generic `RunAsUser`
+error code 1. Its exact startup failure was not established. The later
+parameter-free preflight runner passed, but that does not prove full-case
+scheduling or recovery. Further fault admission was refused when too little
+bounded VM time remained. No fault was admitted just to use the remaining time.
+No application probe was elevated.
+
+After private evidence export, the VM group and cleanup control were deleted.
+Direct Azure queries verified all three exact retry groups absent at
+02:32:07 UTC, including the already deleted canary group. No retry VM, disk,
+network, storage account, or Automation account remains. The combined priced
+estimate stayed below USD 3. Final provider charges are not yet available.
+
+For the final native-inspector source, `.\dev.ps1 test --lib volume_lab_` passed
+four ordinary tests and left seven explicit lab entries ignored.
+`.\dev.ps1 check` passed with 361 library tests, 103 ordinary media tests,
+37 HTTPS tests, and 266 frontend tests, plus contracts, rustfmt, Clippy,
+harnesses, Prettier, and frontend types. The library suite included the
+37-case process-crash matrix and all three TLS crash parents.
+These are local Windows results, not remote CI or six-case volume acceptance.
+A superseded full-check attempt was stopped during the native path correction.
+The complete final run passed afterward.
+
+## Approved Windows volume run (2026-11-07)
+
+The user separately approved one more Windows Server 2022 VM in East US:
+`Standard_D4s_v5`, a maximum 30-minute VM lifetime, and a maximum 60-minute
+cleanup-control lifetime. The additional estimate was below USD 1 within the
+unchanged USD 10 total ceiling. A fresh canary deletion verified the independent
+cleanup guard before VM admission. All inbound traffic remained blocked.
+
+This run used the same dirty source archive and Windows test host identified
+in the inspection retry above. Both payload hashes were checked in the guest.
+Normal-user initialization and wrong-image rejection passed before faults.
+The application probes were not elevated. Each case used fresh generated roots
+and fixed, fully allocated 128 MiB NTFS VHDX images.
+
+| Case                | Verified Windows result                                                                                                                                             |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Publication full    | Passed. Native storage-full code `112`; the owned child was terminated and recovery ran in a fresh process.                                                         |
+| Receive full        | Passed. Native storage-full code `112`; the owned child was terminated and recovery ran in a fresh process.                                                         |
+| Normalization full  | Passed. Native storage-full code `112`; the owned child was terminated and recovery ran in a fresh process.                                                         |
+| Database full       | Passed. `SQLITE_FULL` code `13`; the owned child was terminated and recovery ran in a fresh process. The saved job count was `6` and the last event ID was `22`.    |
+| Backup detached     | Passed. Actual detachment retained `backup_pending`. A fresh process completed after the same original root returned. This case does not add a forced termination.  |
+| Backup wrong volume | Failed. Both operator steps were acknowledged, but the parent returned native path-not-found code `3` after the original volume returned. No passing result exists. |
+
+The five passing result records, native codes, and fresh-process flags were
+checked after download. The database recovery child checks the saved job count
+and last event ID before a new admission. These values depend on where actual
+filesystem exhaustion occurs; they are not fixed fixture counts.
+The six-case evidence archive has SHA-256
+`3000fea0264da79cbf0ddd6e4c5c643c547a4a8dc67b1998c1c2a1c24764e18e`.
+It preserves the failed wrong-volume case as well as the five passes.
+Generated state and recovery data remain private and outside Git.
+
+A separate, fresh-root wrong-volume retry ran within the same VM deadline.
+Its operator waited for drive-letter paths before acknowledging changes.
+The user command failed with exit `1`. The operator also failed: its evidence
+compression attempted to read an in-use `state.db`. No retry archive was
+exported. The ARM command outcomes were retained locally. A drive-letter
+readiness race remains a hypothesis, not a verified cause or fix.
+The original six-case archive was already downloaded and was not overwritten.
+No assertion or native identity guard was removed.
+
+VM deletion started before the unchanged deletion-start deadline of
+03:53:23 UTC. Direct Azure queries verified all three exact task-owned groups
+absent at 03:55:49 UTC, including cleanup control and the previously deleted
+canary. No VM, disk, network, storage account, or Automation account remains
+from this run. The combined priced estimate remains below USD 4; final provider
+charges are not yet available. No additional VM was created and no deadline
+was extended.
+
+The Windows wrong-volume case remains incomplete. The broader combined fault
+criterion and issue #22 remain open. These are working-tree results, not new
+remote CI evidence. Changes remain local and uncommitted. Nothing was pushed
+and no follow-up PR was created.
+
+## Local wrong-volume diagnostics (2026-11-07)
+
+Read-only inspection of the saved Windows archive found a passing
+`backup_pending` child log and one job still in `backup_pending`.
+The archived database passed SQLite integrity and foreign-key checks.
+Both operator continuation signals exist. No completion-child log was
+preserved. These facts narrow the failure to the parent checks after volume
+return or completion-child startup. They do not identify the missing path
+or prove a production recovery defect.
+
+A later test-only change adds operation and path context while preserving
+the original error source and native code. Restored-volume validation logs
+the expected native identities before opening roots and images, then the
+observed identities when available. Inventory failures identify the affected
+directory or file. Completion-child diagnostics distinguish log creation,
+handle duplication, executable lookup, and process creation. Parent logs
+separate volume validation, backup inventory, child startup, and completion
+verification.
+
+Ordinary regression tests cover nested native-error preservation, a missing
+inventory directory, and a missing child-log parent. The root-binding guard
+also checks that identity-conflict errors include the expected and observed
+identities. These tests use fresh temporary directories without mounting,
+detaching, or filling a workstation volume.
+
+The updated `.\dev.ps1 check` passed with 364 library tests, 103 ordinary
+media tests, 37 HTTPS tests, and 266 frontend tests, plus contracts, rustfmt,
+Clippy, harnesses, Prettier, and frontend types. The library run included
+all seven ordinary volume-lab tests, the 37-case process-crash matrix, and
+the three TLS crash parents. The seven explicit volume-lab entries remained
+ignored. These are local results, not a new Windows volume acceptance run.
+
+The saved Azure source and test-host hashes above predate these diagnostics.
+No new Azure VM or real-volume retest was performed. A future approved guest
+run must rebuild and hash its payload. Production recovery behavior and all
+identity, content, and approval checks remain unchanged. The Windows
+wrong-volume case remains unresolved.
+
+## Targeted Windows diagnosis and recovery (2026-11-07)
+
+The user approved one more temporary Windows Server 2022 `Standard_D4s_v5`
+VM in East US, with a maximum 30-minute VM lifetime, maximum 60-minute
+cleanup-control lifetime, and an additional estimate below USD 1 within the
+unchanged USD 10 ceiling. The current Windows consumption rate was verified
+as USD 0.376 per hour. Actual canary deletion verified a fresh independent
+cleanup guard before VM admission. Inbound access remained blocked.
+Only the wrong-volume case was selected.
+
+The 19,368,247-byte diagnostic source archive, based on the same dirty
+`44a4c67a6bc59d0577d99d42947f6ffbfdbacd1e` checkout, had SHA-256
+`6a42ceb59b93477fe496c111a642a76b3a90f76fccc1dfe802c19b705f1f5299`.
+The rebuilt Windows test-host SHA-256 was
+`004bd682815f3024f0014ab72b571ea04682336ea667745eacfcafa520f27f04`.
+The guest verified both hashes. Normal-user positive initialization and exact
+wrong-image rejection passed.
+
+### Confirmed cause
+
+The failure was in the privileged lab operator procedure, not application
+recovery. Its return step selected partitions with
+`Where-Object Type -eq Basic`. The original fixture partition reported `IFS`.
+The filter selected no partition, so the operator did not restore `V:`.
+Recorded mount evidence showed the original at `E:`, the replacement at `W:`,
+and `V:\fixture` absent. This was not a path-readiness delay.
+
+The operator now retains the original partition number after verifying its
+association with the exact approved image. On return, it queries that same
+image's current disk and selects the recorded partition number without a
+partition-type filter. Boot/system disk, occupied-letter, fixture-path,
+native identity, and content checks remain active.
+
+### Verified results
+
+The first diagnostic attempt refused to acknowledge the incorrect return.
+Its separate operator archive was downloaded with SHA-256
+`5f49a6a05ce11ec000001da698b599e7bf9383ca371855522a8c36b09eba6cd4`.
+After the exact recorded partition was returned from `E:` to `V:` within the
+parent's existing wait, the normal-user test completed successfully.
+That user archive has SHA-256
+`53f4c06e7cc0cd073c78e7ae797c3c951858177371c321aa9e8e21ea436571a3`.
+The original operator failure remains recorded as a failure.
+
+A second attempt used fresh roots, fresh images, a fresh descriptor, and a
+separate run identity in the same VM. With the corrected operator procedure,
+both Azure commands finished `Succeeded` with exit `0`. No manual repair was
+used in this repeat. Its result explicitly records `status=passed`,
+`fresh_process_continuation=true`, and `same_original_root=true`.
+It checked the original and replacement native identities, preserved
+`backup_pending` while the wrong volume was present, completed in a fresh
+process after return, preserved replacement content, and checked database
+integrity. The application token was not elevated.
+
+The independent user and operator archives for the automated repeat contained
+the same bounded evidence and both had SHA-256
+`13061b5f1440fdf977f5c822123dedf8110d41afe298e9919339784d22753f29`.
+The exporter excludes database and media files. Its local safety test proved
+that an exclusively locked generated database does not block log export.
+No application recovery code or approval rule changed. The full local check
+for the diagnostic source remains the 364-library-test result recorded above.
+Later repository edits are documentation-only.
+
+After both repeat archives were downloaded and their result shapes were
+checked, VM deletion started at 04:53 UTC, before the unchanged 05:06:33 UTC
+deletion-start deadline. Direct Azure queries verified all three exact
+task-owned groups absent at 04:56:53 UTC. This includes the VM, disks,
+network, private storage, cleanup control, and the already deleted canary.
+No deadline was extended and no second VM was created for the repeat.
+The combined priced estimate remains below USD 5 within the original USD 10
+ceiling. Final provider charges are not yet available.
+
+Together with the five earlier passing Windows cases, all six Windows
+virtual-volume cases now have passing evidence. Ubuntu's six passing cases
+remain separate evidence for its earlier source snapshot. These are not new
+remote CI results and do not prove physical drive or power-loss durability.
+
 ## Remaining acceptance limits
 
 Windows and Linux process-crash evidence is verified for both the PR merge
 revision and the final merge revision above. This does not complete issue #22.
 Installed-service supervision, reboot, OS/power-loss, physical drive-loss, and
-physical disk-full checks were not performed. The controlled faults retain
-their limits in the table above. No installed service, account, mount, live
-provider, existing library, or host-volume changes were made during this
-evidence review. No application behavior or test code changed.
+physical host-volume-full checks were not performed. The controlled faults
+retain their limits in the table above. The earlier CI evidence-only review
+changed no application behavior or test code. The follow-up adds test-only
+probes and lab procedures, with Ubuntu volume evidence recorded above.
+Windows normal-user image inspection and all six virtual-volume fault cases
+are now verified across the approved runs. The wrong-volume failure was
+resolved by correcting the lab operator's partition selection.
+Successful managed production TLS activation remains unverified.
 
 Keep issue #22 open for the remaining evidence. Native deployment work remains
 deferred under #17 and #18. Do not treat package builds or process-crash tests

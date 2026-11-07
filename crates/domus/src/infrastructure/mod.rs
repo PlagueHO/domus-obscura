@@ -20,6 +20,8 @@ pub mod media;
 pub mod mp3;
 mod permissions;
 #[cfg(test)]
+pub(crate) use permissions::FilePermissions;
+#[cfg(test)]
 pub(crate) use permissions::private_fixture;
 pub mod production_worker;
 pub(crate) mod publication;
