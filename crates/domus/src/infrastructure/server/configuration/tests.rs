@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 mod artist_images;
 mod managed_tls;
 mod sharing;
+mod tls_crash;
 mod worker;
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;

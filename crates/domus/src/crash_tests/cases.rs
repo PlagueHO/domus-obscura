@@ -15,6 +15,33 @@ const CHILD: &str = "crash_tests::album::crash_child";
 const START_LIMIT: Duration = Duration::from_secs(30);
 const RECOVERY_LIMIT: Duration = Duration::from_secs(360);
 
+#[derive(Debug, thiserror::Error)]
+#[error("{operation} at {path}: {source}")]
+struct ProbeError {
+    operation: String,
+    path: PathBuf,
+    #[source]
+    source: Box<dyn std::error::Error>,
+}
+
+fn with_path_context<T, E>(
+    operation: impl Into<String>,
+    path: &Path,
+    result: Result<T, E>,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    E: Into<Box<dyn std::error::Error>>,
+{
+    result.map_err(|source| {
+        ProbeError {
+            operation: operation.into(),
+            path: path.to_owned(),
+            source: source.into(),
+        }
+        .into()
+    })
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 enum Action {
     Intent,
@@ -59,22 +86,46 @@ impl OwnedChild {
         address: Option<std::net::SocketAddr>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let log = descriptor.with_extension(format!("{mode}.log"));
-        let output = OpenOptions::new().write(true).create_new(true).open(&log)?;
-        let mut command = Command::new(std::env::current_exe()?);
+        let output = with_path_context(
+            format!("create {mode} child log"),
+            &log,
+            OpenOptions::new().write(true).create_new(true).open(&log),
+        )?;
+        let executable = with_path_context(
+            format!("resolve {mode} child executable"),
+            descriptor,
+            std::env::current_exe(),
+        )?;
+        let mut command = Command::new(&executable);
         command
             .args(["--exact", CHILD, "--ignored", "--nocapture"])
             .env("DOMUS_CRASH_DESCRIPTOR", descriptor)
             .env("DOMUS_CRASH_MODE", mode)
             .stdin(Stdio::null())
-            .stdout(Stdio::from(output.try_clone()?))
+            .stdout(Stdio::from(with_path_context(
+                format!("clone {mode} child log handle"),
+                &log,
+                output.try_clone(),
+            )?))
             .stderr(Stdio::from(output));
         if let Some(address) = address {
             command.env("DOMUS_CRASH_CHANNEL", address.to_string());
         } else {
             command.env_remove("DOMUS_CRASH_CHANNEL");
         }
+        let child = with_path_context(
+            format!("spawn {mode} child"),
+            &executable,
+            command.spawn(),
+        )?;
+        eprintln!(
+            "crash probe child started: mode={mode}, pid={}, descriptor={}, log={}",
+            child.id(),
+            descriptor.display(),
+            log.display()
+        );
         Ok(Self {
-            child: command.spawn()?,
+            child,
             log,
             deadline: Instant::now() + RECOVERY_LIMIT,
         })
@@ -611,6 +662,15 @@ fn crash_child() -> TestResult {
     let descriptor: Descriptor = serde_json::from_slice(&std::fs::read(descriptor)?)?;
     let mut store = Store::open_current_existing(&descriptor.database)?;
     let mode = std::env::var("DOMUS_CRASH_MODE")?;
+    if mode == "volume_fault" {
+        return lab::fault_child(&mut store, &descriptor);
+    }
+    if mode == "volume_database" {
+        return lab::database_child(&mut store, &descriptor);
+    }
+    if mode == "volume_database_recover" {
+        return lab::database_recover(&mut store, &descriptor);
+    }
     if mode == "recover" {
         return recover(&mut store, &descriptor);
     }
@@ -689,6 +749,7 @@ fn crash_child() -> TestResult {
         target: descriptor.point.clone(),
         channel,
         fail_write: mode == "disk_full",
+        resume_once: false,
     }));
     if mode == "hold_database" {
         let raw = Connection::open(&descriptor.database)?;
@@ -725,7 +786,7 @@ fn crash_child() -> TestResult {
     Err(format!("operation returned without reaching {}", descriptor.point).into())
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct FileEvidence {
     path: PathBuf,
     bytes: u64,
@@ -736,20 +797,41 @@ fn inventory(root: &Path) -> Result<BTreeMap<String, FileEvidence>, Box<dyn std:
     let mut result = BTreeMap::new();
     let mut directories = vec![root.to_owned()];
     while let Some(directory) = directories.pop() {
-        for entry in std::fs::read_dir(directory)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
+        for entry in with_path_context(
+            "read inventory directory",
+            &directory,
+            std::fs::read_dir(&directory),
+        )? {
+            let entry = with_path_context("read inventory entry", &directory, entry)?;
+            let path = entry.path();
+            let kind = with_path_context("read inventory entry type", &path, entry.file_type())?;
             assert!(!kind.is_symlink(), "fixture contains a link");
             if kind.is_dir() {
-                directories.push(entry.path());
+                directories.push(path);
             } else {
-                let file = File::open(entry.path())?;
+                let file = with_path_context("open inventory file", &path, File::open(&path))?;
                 result.insert(
-                    native_file_identity(&file)?,
+                    with_path_context(
+                        "read inventory file identity",
+                        &path,
+                        native_file_identity(&file),
+                    )?,
                     FileEvidence {
-                        path: entry.path().strip_prefix(root)?.to_owned(),
-                        bytes: file.metadata()?.len(),
-                        sha256: format!("{:x}", Sha256::digest(std::fs::read(entry.path())?)),
+                        path: path.strip_prefix(root)?.to_owned(),
+                        bytes: with_path_context(
+                            "read inventory file metadata",
+                            &path,
+                            file.metadata(),
+                        )?
+                        .len(),
+                        sha256: format!(
+                            "{:x}",
+                            Sha256::digest(with_path_context(
+                                "read inventory file bytes",
+                                &path,
+                                std::fs::read(&path),
+                            )?)
+                        ),
                     },
                 );
             }
