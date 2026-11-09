@@ -93,6 +93,51 @@ Use the normal checkout and launcher inside the guest. Keep build artifacts,
 SQLite state for media tests, and evidence outside the disposable fault volume.
 Do not install tools without the approved guest-setup scope.
 
+Provide real Git checkout metadata and a Git executable in the guest. An empty
+`.git` directory does not satisfy the case's revision and clean-tree checks.
+Record the source archive, checkout metadata, test host, and corrected inline
+script hashes separately. Preserve earlier payloads and failed attempts.
+
+On Windows, give the normal probe account a private `TEMP` and `TMP` directory.
+PowerShell `Add-Type` must not inherit an inaccessible system temporary path.
+Capture native diagnostic stderr without turning it into a terminating
+PowerShell error. Check the actual test-host exit code. For the expected
+wrong-image failure, compare the exact error after removing display-only
+whitespace wrapping. An unrelated error is not a passing rejection.
+
+Managed Windows Run Command `RunAsUser` requires the Secondary Logon service.
+Check that it is running before submitting a normal-user command. The run 1109
+VM reported that this service was running but still returned `Incorrect
+function`, so the service check alone does not resolve that failure. Starting
+or configuring a guest service needs separate approval. Never run the
+application probe as the administrator to bypass a failed user launch.
+
+Run 1110 confirmed that `RunAsUser` still returned `Incorrect function`.
+Task Scheduler S4U registration returned `Access is denied`. A separate
+diagnostic used `LogonUser` with batch logon and
+[`CreateProcessWithTokenW`](https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-createprocesswithtokenw)
+to launch `cmd.exe` and list the test host's lab entry. The child ran as
+`domus-windows\domusprobe` with `elevated=false` and exit code `0`. This
+verified process launch only. It did not initialize a lab, access a fixture,
+or run a recovery case. Treat this as a candidate launch path. In a separately
+approved retest, verify the full normal-user preflight and fixture bindings
+before admitting any fault case.
+
+Use LF line endings for Linux scripts. Named Linux managed Run Command
+parameters become environment values; use an empty parameter name when the
+script reads a positional argument. See the
+[managed Run Command parameter rules](https://learn.microsoft.com/en-us/azure/virtual-machines/linux/run-command-managed#powershell).
+
+Reserve time for guest setup, saved-lease expiry, export, and deletion. The
+current Windows full-volume cases took about five minutes each. Do not shorten
+leases or change the clock to fit a deadline. Parallel cases need separate
+normal-user processes, environments, fixture roots, images, and databases.
+Keep privileged mount operations in one operator. Complete preflight before
+admitting the fault cases.
+
+`DOMUS_LAB_RUN` accepts only ASCII letters, digits, and hyphens. A Rust test
+name with underscores is not a valid run identifier.
+
 The operator must provide:
 
 - A fresh fixed, nonsparse VHDX on Windows, or a preallocated loop image on Linux.
@@ -105,6 +150,9 @@ The operator must provide:
 
 Use a fresh descriptor and fresh fixture roots for each case. The runner creates
 `case-started.json` with create-new semantics. A retry must not reuse it.
+After a case has started, retain its failed evidence and use newly created
+images, fixture roots, and an evidence directory for any retry. Do not clear
+or reuse the old volume to make initialization pass.
 Keep operator output and test-host logs outside the case evidence directory
 until initialization finishes. A log created there before initialization makes
 that directory nonempty and must be rejected.
@@ -152,7 +200,8 @@ A subsequent [targeted Windows run](crash-recovery.md#targeted-windows-diagnosis
 identified the operator's partition-type filter defect. The corrected
 procedure passed an automated repeat with fresh roots and images. All six
 Windows virtual-volume cases now have passing evidence across the approved
-runs. This does not complete the broader acceptance boundary.
+runs. The accepted scope still requires a repeat with the current guards on
+both platforms.
 
 On Linux, preallocate an image with actual writes, format only that image as
 ext4 with `-m 0 -E nodiscard,lazy_itable_init=0,lazy_journal_init=0`, and
@@ -278,7 +327,10 @@ The replacement's sentinel and all unrelated bytes must remain unchanged.
 Both wrappers write and sync a temporary sibling before publishing the closed
 continuation file. Publication does not replace an existing signal. The parent
 can observe either no signal or the complete run identity, never an in-progress
-write. Wrapper self-tests cover signal publication without volume operations.
+write. On Linux, the operator creates the signal as root, so it sets the file
+mode to `0644`; the containing evidence directory remains private to the probe
+account. Wrapper self-tests cover signal publication and this read boundary
+without volume operations.
 
 On Windows, verify that both restored drive-letter paths are usable before
 acknowledging the return. Successful mount or drive-letter commands alone do
@@ -308,6 +360,9 @@ Keep generated databases, media, and recovery files private. Export only a
 redacted summary to GitHub. Include the exact tested commit and dirty status,
 guest OS and filesystem, selected test command, native error code, process
 termination, recovery assertions, and cleanup result.
+The acceptance verifier requires `dirty=false` for every case. A passing case
+from a dirty checkout is run evidence, not acceptance evidence. Check Git status
+before guest setup and stop before fault execution if the checkout is dirty.
 
 Backup recovery logs identify restored-volume validation, original-backup
 inventory, completion-child startup, and completion verification separately.
@@ -324,6 +379,11 @@ results. A failed operator must still preserve immutable logs and result files
 separately. Export database state only after the exact owned processes release
 it, using the approved cleanup window. Record an export failure explicitly.
 Never extend the VM deadline to recover more evidence.
+
+Do not wait for new resource approval while a guest holds the only evidence.
+Export the active run's results and cleanup records first. If a fixed deadline
+expires before export, report the missing results as unverified. Do not infer
+a pass from setup, command admission, or resource deletion.
 
 Do not claim volume evidence from wrapper self-tests or the ordinary ignored
 test count. Missing prerequisites are explicit errors when a case is selected.
@@ -346,5 +406,9 @@ Confirm deletion of the recorded disks and network resources. Report failures
 immediately. A stopped or deallocated VM can still incur disk and other costs.
 Do not start the second platform until cleanup of the first has been verified.
 
-Issue #22 stays open for unperformed physical, managed-production-TLS,
-installed-service, reboot, and power-loss acceptance.
+Issue #22 stays open until all six cases pass on both platforms with the current
+guards and their evidence is recorded. Physical faults, managed production
+success, OS crashes, and power loss are excluded from its accepted scope.
+Installed-service and reboot acceptance remain under #17 and #18. These
+exclusions remain unverified limits. See the
+[accepted scope](crash-recovery.md#accepted-scope-for-issue-22-2026-11-08).
