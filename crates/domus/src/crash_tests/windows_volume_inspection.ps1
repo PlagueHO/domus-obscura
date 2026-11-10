@@ -1,4 +1,6 @@
 $ErrorActionPreference = 'Stop'
+[Console]::Error.WriteLine('volume inspector: stage=script-started')
+try {
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -63,9 +65,12 @@ public static class DomusLabVolumeInspection
         uint size, IntPtr info, out uint used);
 
     static void Check(uint error, string operation) {
-        if (error != 0) throw new Win32Exception((int)error, operation + " failed: " + error);
+        if (error != 0) throw new Win32Exception((int)error, String.Format(
+            "{0} failed: native={1} (0x{1:X8}); {2}", operation, error,
+            new Win32Exception((int)error).Message));
     }
     static SafeFileHandle OpenMetadata(string path, bool directory) {
+        Console.Error.WriteLine("volume inspector: stage=metadata-open; directory={0}", directory);
         // Existing objects only. No write, attach, detach, or volume-management access.
         var file = CreateFileW(path, directory ? 0x80000000u : 0x80u, 7,
             IntPtr.Zero, 3, 0x00200000u | (directory ? 0x02000000u : 0u), IntPtr.Zero);
@@ -77,6 +82,7 @@ public static class DomusLabVolumeInspection
         return file;
     }
     static FileId Identity(SafeFileHandle file) {
+        Console.Error.WriteLine("volume inspector: stage=file-identity");
         FileId result;
         if (!GetFileInformationByHandleEx(file, 18, out result, 24))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "128-bit file identity query failed");
@@ -94,6 +100,7 @@ public static class DomusLabVolumeInspection
             throw new InvalidOperationException("Use a fully allocated, nonsparse, regular image.");
     }
     static ulong FixedSize(string image, bool loaded) {
+        Console.Error.WriteLine("volume inspector: stage=virtual-disk-open; expected-attached={0}", loaded);
         var storage = new StorageType {
             DeviceId = 3, VendorId = new Guid("ec984aec-a0f9-47e9-901f-71415a66345b")
         };
@@ -101,6 +108,7 @@ public static class DomusLabVolumeInspection
         SafeFileHandle disk;
         Check(OpenVirtualDisk(ref storage, image, 0, 0, ref parameters, out disk), "OpenVirtualDisk");
         using (disk) {
+            Console.Error.WriteLine("volume inspector: stage=virtual-disk-information");
             var info = new DiskInfo { Version = 7 };
             uint size = 32;
             Check(GetVirtualDiskInformation(disk, ref size, ref info, IntPtr.Zero), "VHDX subtype query");
@@ -131,6 +139,7 @@ public static class DomusLabVolumeInspection
         throw new InvalidOperationException("Unterminated dependency string.");
     }
     static void CheckDependency(SafeFileHandle root, FileId expected) {
+        Console.Error.WriteLine("volume inspector: stage=storage-dependency");
         int size = 4096;
         for (int attempt = 0; attempt < 2; attempt++) {
             IntPtr buffer = Marshal.AllocHGlobal(size);
@@ -195,11 +204,13 @@ public static class DomusLabVolumeInspection
     }
 }
 '@
+[Console]::Error.WriteLine('volume inspector: stage=add-type-completed')
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run application tests without elevation.'
 }
 if ($env:DOMUS_INSPECT_DETACHED -eq '1') {
+    [Console]::Error.WriteLine('volume inspector: stage=validate-detached')
     [DomusLabVolumeInspection]::ValidateDetached($env:DOMUS_INSPECT_IMAGE)
     @{ detached = $true } | ConvertTo-Json -Compress
     return
@@ -208,9 +219,16 @@ $root = [IO.Path]::GetPathRoot($env:DOMUS_INSPECT_ROOT)
 if ($root -notmatch '^[A-Za-z]:\\$') { throw 'A local drive-letter lab volume is required.' }
 $volume = [IO.DriveInfo]::new($root)
 $hostVolume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($env:DOMUS_INSPECT_IMAGE))
+[Console]::Error.WriteLine('volume inspector: stage=validate-attached')
 [DomusLabVolumeInspection]::Validate($root, $env:DOMUS_INSPECT_IMAGE, [uint64]$volume.TotalSize)
 @{
     capacity = [uint64]$volume.TotalSize
     filesystem = [string]$volume.DriveFormat
     host_available = [uint64]$hostVolume.AvailableFreeSpace
 } | ConvertTo-Json -Compress
+} catch {
+    [Console]::Error.WriteLine('volume inspector: stage=failed; error-id={0}; category={1}', $_.FullyQualifiedErrorId, $_.CategoryInfo)
+    [Console]::Error.WriteLine($_.Exception.ToString())
+    [Console]::Error.WriteLine($_.ScriptStackTrace)
+    throw
+}

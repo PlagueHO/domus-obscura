@@ -99,6 +99,8 @@ def publish_signal(directory, step, run):
         with os.fdopen(descriptor, "w", encoding="utf-8") as signal:
             signal.write(run)
             signal.flush()
+            if os.name == "posix":
+                os.fchmod(signal.fileno(), 0o644)
             os.fsync(signal.fileno())
         # A same-directory hard link publishes complete bytes without replacing an earlier signal.
         os.link(temporary, directory / f"{step}.continue")
@@ -145,6 +147,9 @@ class WrapperTests(unittest.TestCase):
             request.write_text(json.dumps({"run": "generated-case", "step": "detach-backup"}), encoding="utf-8")
             self.assertEqual(main(arguments), 0)
             self.assertEqual(signal.read_text(encoding="utf-8"), "generated-case")
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode) & 0o077, 0)
+                self.assertEqual(stat.S_IMODE(signal.stat().st_mode), 0o644)
             with self.assertRaises(FileExistsError):
                 main(arguments)
 
