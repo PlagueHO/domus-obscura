@@ -230,9 +230,12 @@ inspection or operator acknowledgments as a passing recovery case.
 A subsequent [targeted Windows run](crash-recovery.md#targeted-windows-diagnosis-and-recovery-2026-11-07)
 identified the operator's partition-type filter defect. The corrected
 procedure passed an automated repeat with fresh roots and images. All six
-Windows virtual-volume cases now have passing evidence across the approved
-runs. The accepted scope still requires a repeat with the current guards on
-both platforms.
+Windows virtual-volume cases had passing evidence across those historical
+runs. The required current-guard repeat is now complete: Ubuntu run 1112 and
+Windows run 1114 passed all six cases with verified clean-source evidence.
+See the [acceptance record](crash-recovery.md#acceptance-map-for-issue-22).
+No additional cloud retest is required to close #22; any further run still
+needs separate resource and cost approval.
 
 On Linux, preallocate an image with actual writes, format only that image as
 ext4 with `-m 0 -E nodiscard,lazy_itable_init=0,lazy_journal_init=0`, and
