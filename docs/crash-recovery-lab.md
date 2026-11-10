@@ -123,6 +123,31 @@ or run a recovery case. Treat this as a candidate launch path. In a separately
 approved retest, verify the full normal-user preflight and fixture bindings
 before admitting any fault case.
 
+Run 1114 narrowed this launch limit: the test host could start, but its
+PowerShell child returned `0xC0000142` before the inspector script began.
+An isolated Rust probe reproduced the failure with an absolute executable
+path, alternate console flags, inherited/file/pipe output handles, and a
+`cmd.exe` wrapper. `CREATE_NO_WINDOW` did not resolve it.
+
+On that same disposable guest, a password-backed Task Scheduler task with
+`RunLevel Limited` ran the normal-user test host and its inspector successfully.
+This differs from the earlier failed S4U registration. If this approved lab
+launch method is needed, register only a uniquely named task for the approved
+standard account. Pass its password through protected parameters. Set a task
+execution limit within the unchanged VM deadline. Check the actual child SID
+and reject an administrator token before source checks or probes. Capture the
+task result and logs, then remove that exact task. No production service
+installation or service-manager acceptance is implied.
+
+Start the probe after fixture readiness, while the operator remains active.
+Storage-full recovery can wait approximately five minutes for a persisted
+claim to expire. A four-minute command-capture wait is insufficient. A
+`Running` response is not success: keep waiting for the same command within
+its deadline, and do not admit the next case merely because a local wait ended.
+Run 1114's first storage-full cases overlapped on separate disposable volumes
+after this local wait ended. Their final command states and all six case
+results were subsequently captured and verified.
+
 Use LF line endings for Linux scripts. Named Linux managed Run Command
 parameters become environment values; use an empty parameter name when the
 script reads a positional argument. See the
