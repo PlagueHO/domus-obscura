@@ -319,6 +319,33 @@ fn observe_volume(root: &Path, image: &Path) -> Result<ObservedVolume, Box<dyn s
 }
 
 #[cfg(windows)]
+fn inspection_stream(mut stream: impl io::Read) -> io::Result<Vec<u8>> {
+    let mut retained = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(retained);
+        }
+        let available = (16 * 1024_usize).saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..count.min(available)]);
+    }
+}
+
+#[cfg(windows)]
+fn inspection_failure(status: std::process::ExitStatus, stdout: &[u8], stderr: &[u8]) -> String {
+    let code = status.code().map_or_else(
+        || status.to_string(),
+        |code| format!("{code} (0x{:08X})", code.cast_unsigned()),
+    );
+    format!(
+        "volume inspection failed: exit={code}; stdout (first 16384 bytes)={:?}; stderr (first 16384 bytes)={:?}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    )
+}
+
+#[cfg(windows)]
 fn inspect_windows_volume(
     root: &Path,
     image: &Path,
@@ -326,21 +353,53 @@ fn inspect_windows_volume(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     // Arguments are passed as environment values, not interpolated into PowerShell code.
     let script = include_str!("windows_volume_inspection.ps1");
-    let result = Command::new("powershell.exe")
+    let mut child = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("DOMUS_INSPECT_ROOT", root)
         .env("DOMUS_INSPECT_IMAGE", image)
         .env("DOMUS_INSPECT_DETACHED", if detached { "1" } else { "0" })
         .stdin(Stdio::null())
-        .output()?;
-    if !result.status.success() {
-        return Err(format!(
-            "volume inspection failed: {}",
-            String::from_utf8_lossy(&result.stderr)
-        )
-        .into());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot start PowerShell volume inspector: {error}"))?;
+    let stdout = child.stdout.take().ok_or("inspector stdout pipe is missing")?;
+    let stderr = child.stderr.take().ok_or("inspector stderr pipe is missing")?;
+    let captured = std::thread::scope(|scope| {
+        let stdout = scope.spawn(|| inspection_stream(stdout));
+        let stderr = scope.spawn(|| inspection_stream(stderr));
+        let stdout = stdout.join().map_err(|_| "inspector stdout reader panicked")?;
+        let stderr = stderr.join().map_err(|_| "inspector stderr reader panicked")?;
+        Ok::<_, Box<dyn std::error::Error>>((stdout?, stderr?))
+    });
+    let status = child.wait()?;
+    let (stdout, stderr) = captured?;
+    if !status.success() {
+        return Err(inspection_failure(status, &stdout, &stderr).into());
     }
-    Ok(serde_json::from_slice(&result.stdout)?)
+    serde_json::from_slice(&stdout).map_err(|error| {
+        format!("volume inspector returned invalid JSON: {error}; {}", inspection_failure(status, &stdout, &stderr)).into()
+    })
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_inspection_diagnostics_preserve_status_and_bound_output() -> TestResult {
+    use std::os::windows::process::ExitStatusExt;
+    let bytes = vec![b'x'; 32 * 1024];
+    let mut input = io::Cursor::new(bytes);
+    let retained = inspection_stream(&mut input)?;
+    assert_eq!(retained.len(), 16 * 1024);
+    assert_eq!(input.position(), 32 * 1024);
+    let failure = inspection_failure(
+        std::process::ExitStatus::from_raw(0xC0000142),
+        b"",
+        b"stage=script-started",
+    );
+    assert!(failure.contains("-1073741502 (0xC0000142)"), "{failure}");
+    assert!(failure.contains("stage=script-started"), "{failure}");
+    assert!(failure.contains("stdout (first 16384 bytes)=\"\""), "{failure}");
+    Ok(())
 }
 
 #[cfg(unix)]

@@ -174,6 +174,12 @@ identity with the dependency returned for the fixture volume. It rejects
 administrator tokens, dynamic or sparse images, remote dependencies, unsafe
 volume names, and a different backing image.
 
+Inspector failures report the PowerShell exit status in decimal and hexadecimal
+and retain the first 16 KiB of each output stream. Both streams are drained
+concurrently. Stage markers and exception details go to stderr; stdout remains
+the JSON result. A missing `script-started` marker separates a process startup
+failure from a later script failure. Preserve both streams when a probe fails.
+
 Azure reported dependency flags `0x442` for a fixed image on the running OS
 volume. The
 [`REMOVABLE` flag](https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/ne-virtdisk-dependent_disk_flag)

@@ -784,16 +784,60 @@ was operator cleanup, not a successful cleanup-job completion. Keep issue #22
 open. A future acceptance run must use a clean, pinned source revision and pass
 all six cases on both platforms.
 
+## Clean-source retest runs 1112 and 1113 (2026-11-10)
+
+Run 1112 used clean source revision
+`73d75922da51794b225b70e1afaa6b7f4b16c75b`. Ubuntu ext4 preflight and all six
+normal-user recovery cases passed. The exported evidence verifier returned
+`passed` and checked the source revision, clean checkout, filesystem, native
+storage-full errors, recovery assertions, and backup continuation evidence.
+The Ubuntu evidence archive SHA-256 is
+`2d56d495db3ce033891bcead4a7bb9f9e764f57eb559ad8f128b770b6e3d4e19`.
+This supplies the required Ubuntu current-guard volume evidence. All four
+run 1112 resource groups were verified absent after cleanup.
+
+Windows run 1112 failed normal-user preflight before any recovery case started.
+The PowerShell volume inspector returned `0xC0000142` without output. Adding
+the Windows PowerShell directory to the probe's executable search path did not
+resolve that failure.
+
+The separately approved Windows-only run 1113 used the same pinned source.
+The standard-user runner included the PowerShell search path and signed child
+exit reporting. Fixture preparation completed, but the fixture operator
+reached its 35-minute deadline without probe completion. The subsequent
+normal-user preflight failed during exact-image initialization. Its test host
+returned exit code 101 and reported `volume inspection failed:` without
+diagnostic text. That host exit does not establish the inspector's exit status
+or prove that the earlier inspector startup failure was resolved.
+No Windows recovery case ran, and this run supplies no Windows acceptance
+evidence. The diagnostic archive was exported and downloaded before VM
+deletion. Its SHA-256 is
+`c88f92669d8f601a26e572c83ee9595774715775172b38528374b4cfd6c9f14c`.
+
+The first bounded Windows group-deletion check timed out. A direct Azure
+check then confirmed that the VM was absent and only the network security
+group remained. The repeated deletion completed. After guest-group absence
+was verified, the operator deleted the exact owned control group. Direct
+Azure checks confirmed all four run 1113 resource groups absent. No additional
+VM was admitted.
+
+The Windows inspection blocker remains unresolved. A future runner must check
+fixture readiness while the bounded operator is active, then run preflight
+before admitting recovery cases. Do not wait for the operator to finish before
+starting the probe. Preserve the normal-user boundary and record the
+inspector's exit status as well as its output on failure. Another cloud run
+requires separate resource and cost approval.
+
 ## Acceptance map for issue #22
 
-| Issue criterion                                  | Evidence                                                               | State and limit                                                                                                                                                                                                                                       |
-| ------------------------------------------------ | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Terminate/restart at acquisition boundaries      | 37-case matrix in both final merge check/build jobs                    | Verified for process termination, including MP3 and FLAC normalization.                                                                                                                                                                               |
-| No duplicate work, stale mutation, lost question | Matrix checks of submissions, claims, and durable questions            | Verified with generated state and a loopback peer, not a live provider.                                                                                                                                                                               |
-| Unavailable drives, full storage, locks, DB/TLS  | Controlled faults, historical volume runs, run 1111 results, TLS tests | Open: run 1111's Ubuntu cases used a dirty checkout, and no Windows case ran. A clean-source six-case retest is still required on both platforms. Controlled provider/TLS failures are in scope; production success and physical faults are excluded. |
-| Preserve replacement/restore/deletion content    | Matrix plus both changed-approved-content rejection cases              | Verified for process termination. Current, retained, and changed content remain distinct.                                                                                                                                                             |
-| Separate process from OS/power-loss evidence     | Explicit boundaries in this record                                     | Verified reporting distinction. No OS/power-loss result is claimed.                                                                                                                                                                                   |
-| Record both platforms and privileged limits      | Exact final merge job links and historical guest records               | Verified reporting on Windows and Ubuntu. Unperformed host checks remain explicit.                                                                                                                                                                    |
+| Issue criterion                                  | Evidence                                                                           | State and limit                                                                                                                                                                                                                                      |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Terminate/restart at acquisition boundaries      | 37-case matrix in both final merge check/build jobs                                | Verified for process termination, including MP3 and FLAC normalization.                                                                                                                                                                              |
+| No duplicate work, stale mutation, lost question | Matrix checks of submissions, claims, and durable questions                        | Verified with generated state and a loopback peer, not a live provider.                                                                                                                                                                              |
+| Unavailable drives, full storage, locks, DB/TLS  | Controlled faults, historical volume runs, clean-source Ubuntu run 1112, TLS tests | Open: all six Ubuntu cases passed with verified clean-source evidence. Windows preflight still fails, and all six Windows cases remain required. Controlled provider/TLS failures are in scope; production success and physical faults are excluded. |
+| Preserve replacement/restore/deletion content    | Matrix plus both changed-approved-content rejection cases                          | Verified for process termination. Current, retained, and changed content remain distinct.                                                                                                                                                            |
+| Separate process from OS/power-loss evidence     | Explicit boundaries in this record                                                 | Verified reporting distinction. No OS/power-loss result is claimed.                                                                                                                                                                                  |
+| Record both platforms and privileged limits      | Exact final merge job links and historical guest records                           | Verified reporting on Windows and Ubuntu. Unperformed host checks remain explicit.                                                                                                                                                                   |
 
 ## Required follow-up and excluded checks
 
@@ -806,7 +850,7 @@ databases, and recovery evidence outside Git and public issue text.
 
 | Check                         | Fault and observations if separately approved                                                                                                                                                                                                                                                                                              | Platform and approval boundary                                                                                                                              |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Current-guard volume retest   | Run all six cases with fresh images using the final merge guards. Record actual native full errors and detachment evidence. Check fresh-process recovery, original root identity, unchanged partial/replacement bytes, and SQLite integrity.                                                                                               | Windows NTFS and Ubuntu ext4. Separate bounded disposable-VM and volume-operation approval. Historical passes remain valid only for their snapshots.        |
+| Current-guard volume retest   | Run all six Windows cases with fresh images using the final merge guards. Record actual native full errors and detachment evidence. Check fresh-process recovery, original root identity, unchanged partial/replacement bytes, and SQLite integrity. Ubuntu run 1112 supplies the corresponding verified ext4 evidence.                    | Windows NTFS remains required. Separate bounded disposable-VM and volume-operation approval. Historical passes remain valid only for their snapshots.       |
 | Managed production TLS        | Use an exact-hostname publicly trusted production generation without replacing the trust policy. Terminate owned hosts at documented activation transitions. After restart, compare saved journal and immutable generations with the certificate from a fresh guarded TLS handshake. Reject invalid candidates without anonymous fallback. | Windows and Ubuntu. Separate hostname, certificate, identity, provider, and resource approval as needed. Generated manual certificates are insufficient.    |
 | Physical drive loss           | Remove an approved disposable physical media/backup device during a documented operation. Record native absence and pending/error state. Return the exact original device and verify fresh-process continuation, root identity, receipts, and unchanged unrelated content.                                                                 | Native Windows and Linux lab hosts. Separate hardware and host-change approval; no existing library or shared disk.                                         |
 | Physical host-volume full     | Exhaust an approved isolated physical local filesystem, not a SQLite page limit or virtual image. Record native storage-full/SQLite errors. Restore capacity explicitly and verify rollback, saved jobs/events, partial bytes, receipts, and fresh-process recovery. Keep control and evidence storage healthy.                            | Native Windows and Linux lab hosts. Separate storage and host-change approval with explicit capacity and cleanup bounds.                                    |
@@ -830,9 +874,10 @@ physical host-volume-full checks were not performed. The controlled faults
 retain their limits in the table above. The earlier CI evidence-only review
 changed no application behavior or test code. The follow-up adds test-only
 probes and lab procedures, with Ubuntu volume evidence recorded above.
-Windows normal-user image inspection and all six virtual-volume fault cases
-are now verified across the approved runs. The wrong-volume failure was
-resolved by correcting the lab operator's partition selection.
+Historical Windows normal-user image inspection and all six virtual-volume
+fault cases passed on their recorded snapshots. Those results do not replace
+the required current-guard Windows evidence. The historical wrong-volume
+failure was resolved by correcting the lab operator's partition selection.
 Successful managed production TLS activation remains unverified.
 
 Keep issue #22 open until the current-guard volume retest passes on both
