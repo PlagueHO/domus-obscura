@@ -51,8 +51,8 @@ impl Account {
         let credentials =
             crate::infrastructure::worker::read_credentials(&configuration.credentials_file)?;
         let lock = crate::infrastructure::worker::account_lock(database, &credentials)?;
-        let socket = TcpStream::connect_timeout(&configuration.server.into(), IO_TIMEOUT)
-            .map_err(Error::SoulseekTransport)?;
+        let socket =
+            super::connect(configuration.server, IO_TIMEOUT).map_err(Error::SoulseekTransport)?;
         let session = SoulseekSession::login(socket, &credentials.username, &credentials.password)?;
         Ok(Arc::new(Self {
             session: Mutex::new(session),
@@ -163,7 +163,7 @@ impl Account {
                 "sharing account changed during reconnect".into(),
             ));
         }
-        let socket = TcpStream::connect_timeout(&self.configuration.server.into(), IO_TIMEOUT)
+        let socket = super::connect(self.configuration.server, IO_TIMEOUT)
             .map_err(Error::SoulseekTransport)?;
         let replacement =
             SoulseekSession::login(socket, &credentials.username, &credentials.password)?;
@@ -529,7 +529,7 @@ fn serve(
                         tasks.push(std::thread::spawn(move || {
                             let mut session = context.account.fork(&username)?;
                             let address = session.peer_address(&username)?.address();
-                            let socket = TcpStream::connect_timeout(&address.into(), IO_TIMEOUT)
+                            let socket = super::connect(address, IO_TIMEOUT)
                                 .map_err(Error::SoulseekTransport)?;
                             let channel = context.account.peer_channel(socket, &username)?;
                             channel.init(1, &init_body(&context.account.username, "P"))?;
@@ -551,7 +551,7 @@ fn serve(
                         requests += 1;
                         let context = context.clone();
                         tasks.push(std::thread::spawn(move || {
-                            let socket = TcpStream::connect_timeout(&address.into(), IO_TIMEOUT)
+                            let socket = super::connect(address, IO_TIMEOUT)
                                 .map_err(Error::SoulseekTransport)?;
                             let channel = context.account.peer_channel(socket, &username)?;
                             channel.init(0, &token.to_le_bytes())?;
@@ -819,6 +819,7 @@ fn serve_peer(
                 }
                 if context.policy.allows(&username) {
                     search(&context, &channel, token, &query)?;
+                    activity = Instant::now();
                 }
             }
             for index in (0..uploads.len()).rev() {
@@ -882,9 +883,13 @@ fn serve_peer(
                     return Err(super::protocol());
                 }
                 match event {
-                    Event::Peer(PeerEvent::ShareList) => browse(&context, &channel, None)?,
+                    Event::Peer(PeerEvent::ShareList) => {
+                        browse(&context, &channel, None)?;
+                        activity = Instant::now();
+                    }
                     Event::Peer(PeerEvent::FolderRequest { token, folder }) => {
-                        browse(&context, &channel, Some((token, &folder)))?
+                        browse(&context, &channel, Some((token, &folder)))?;
+                        activity = Instant::now();
                     }
                     Event::Peer(PeerEvent::Queue { path }) => {
                         enqueue(&context, &channel, &username, &path)?
@@ -962,7 +967,7 @@ fn upload(
         return Err(Error::Remote("sharing peer is not authorized"));
     }
     let input = context.catalog()?.open(file)?;
-    let mut socket = match TcpStream::connect_timeout(&address.into(), IO_TIMEOUT) {
+    let mut socket = match super::connect(address, IO_TIMEOUT) {
         Ok(mut socket) => {
             init(&mut socket, &context.account.username, "F")?;
             socket

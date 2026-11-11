@@ -108,6 +108,37 @@ jobs:
         shell: pwsh
         run: .\dev.ps1 package-check
 
+  physical-scale:
+    name: Small physical scan evidence (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: physical-scale-${{ runner.os }}-1.99.1-${{ hashFiles('Cargo.lock') }}
+      - run: cargo task scale-physical
+      - name: Retain small-profile evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: physical-scale-small-${{ runner.os }}-${{ github.sha }}
+          path: |
+            target/physical-scale/*/report.json
+            target/physical-scale/*/samples.ndjson
+          if-no-files-found: warn
+
   scale:
     name: Million-record pagination (${{ matrix.os }})
     strategy:

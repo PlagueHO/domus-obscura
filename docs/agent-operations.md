@@ -127,6 +127,12 @@ remain indexed files with diagnostics. Do not reuse browsing header evidence as
 full-stream validation or exact-edition proof. Migration leaves legacy metadata
 unobserved until an explicit scan.
 
+Physical scale and memory checks are separate from `scale` query fixtures.
+Read [the scale evidence runbook](physical-scan-scale.md) before running them.
+Keep local generated checks within 4,096 files and 1 GiB of run storage.
+Full-size datasets are Azure-only and require separate resource/cost approval.
+Private test-process transport injection must remain absent from normal builds.
+
 Artists, albums, members and assets use location-scoped keyset pages. Conservative
 matches accept at most 24 queries for one location and return at most 50 folders
 per album. Compare stored normalized keys, not filenames, fuzzy aliases or live

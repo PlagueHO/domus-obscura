@@ -14,6 +14,16 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const QUEUE_POLL: Duration = Duration::from_secs(60);
 
+pub(crate) fn connect(address: SocketAddrV4, timeout: Duration) -> std::io::Result<TcpStream> {
+    #[cfg(test)]
+    let address = crate::scale_tests::integrated::endpoint(address)?;
+    TcpStream::connect_timeout(&address.into(), timeout)
+}
+
+#[cfg(test)]
+#[path = "../scale_tests/peers.rs"]
+pub(crate) mod scale_fixture;
+
 mod folder;
 mod messages;
 mod protocol;
@@ -235,7 +245,7 @@ impl SoulseekSession {
         {
             return self.control_from_channel(address, stream, None);
         }
-        let socket = match TcpStream::connect_timeout(&address.address.into(), IO_TIMEOUT) {
+        let socket = match connect(address.address, IO_TIMEOUT) {
             Ok(socket) => (socket, None),
             Err(error) => {
                 let server = self
@@ -265,8 +275,7 @@ impl SoulseekSession {
                     {
                         server.check()?;
                         (
-                            TcpStream::connect_timeout(&reverse.into(), IO_TIMEOUT)
-                                .map_err(Error::SoulseekTransport)?,
+                            connect(reverse, IO_TIMEOUT).map_err(Error::SoulseekTransport)?,
                             Some(token),
                         )
                     }
@@ -283,8 +292,7 @@ impl SoulseekSession {
 
     #[cfg(test)]
     fn connect_address(&mut self, peer: PeerAddress) -> Result<PeerControl<'_>> {
-        let socket = TcpStream::connect_timeout(&peer.address.into(), IO_TIMEOUT)
-            .map_err(Error::SoulseekTransport)?;
+        let socket = connect(peer.address, IO_TIMEOUT).map_err(Error::SoulseekTransport)?;
         self.control_from_socket(peer, socket, None)
     }
 
@@ -591,11 +599,8 @@ impl PeerControl<'_> {
                 let remaining = deadline
                     .checked_duration_since(Instant::now())
                     .ok_or(Error::Remote("Soulseek operation exceeded its time limit"))?;
-                let mut stream = TcpStream::connect_timeout(
-                    &self.peer.address.into(),
-                    remaining.min(IO_TIMEOUT),
-                )
-                .map_err(Error::SoulseekTransport)?;
+                let mut stream = connect(self.peer.address, remaining.min(IO_TIMEOUT))
+                    .map_err(Error::SoulseekTransport)?;
                 check()?;
                 stream.set_write_timeout(Some(IO_TIMEOUT))?;
                 send_init(&mut stream, 0, &indirect_token.to_le_bytes()).map_err(network_error)?;

@@ -6,6 +6,7 @@ use std::process::{Command, ExitCode};
 mod linux_package;
 mod native_jpeg;
 mod package;
+mod physical_scale;
 use package as windows_package;
 
 fn execute(program: &str, args: &[&str]) -> Result<(), Box<dyn Error>> {
@@ -190,8 +191,10 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             "--",
             "--ignored",
         ]),
+        Some("scale-physical") => physical_scale::run(false),
+        Some("scale-physical-full") => physical_scale::run(true),
         _ => Err(
-            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|build|smoke|package-windows|installer-windows|package-check|package-linux|package-check-linux|local-test|local-test-build|browser-build|browser>"
+            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|scale-physical|scale-physical-full|build|smoke|package-windows|installer-windows|package-check|package-linux|package-check-linux|local-test|local-test-build|browser-build|browser>"
                 .into(),
         ),
     }

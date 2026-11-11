@@ -1549,6 +1549,12 @@ cargo task scale
 
 Use the Windows launcher instead of the Cargo task prefix on Windows. The scale task checks one million generated indexed records and pagination. It does not prove physical scan performance, service behavior, transfer performance, or the combined 512 MiB memory target.
 
+The separate opt-in `scale-physical` task uses a bounded generated local fixture.
+See [physical scan and process-memory evidence](docs/physical-scan-scale.md) for
+the read-only inventory, private test-process boundary and separately approved
+Azure full-profile procedure. Small-profile results do not prove full-size
+Windows/Linux acceptance.
+
 ## Local command boundary
 
 The executable provides version, contract export, database initialization, versioned output settings, job/plan records, location registration/details, read-only scanning, paginated browsing, and a loopback HTTPS API preview. Run it without arguments to see its required arguments; that exits with an explicit usage error.

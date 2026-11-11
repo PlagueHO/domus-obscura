@@ -395,7 +395,8 @@ impl PreparedProductionWorker {
             if lifecycle.stopping() {
                 stop.store(true, Ordering::Release);
             }
-            if let Some(sharing) = &sharing
+            if !stop.load(Ordering::Acquire)
+                && let Some(sharing) = &sharing
                 && let Err(error) = sharing.check()
             {
                 failure.get_or_insert(error);
