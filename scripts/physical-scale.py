@@ -107,7 +107,13 @@ class Inventory:
         self.errors[key] += 1
 
 
-def inventory_posix(root, result):
+def _expected_churn(error):
+    return isinstance(error, (FileNotFoundError, NotADirectoryError)) or getattr(
+        error, "winerror", None
+    ) in (2, 3, 267)
+
+
+def inventory_posix(root, result, tolerate_churn=False):
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     require(root.is_absolute(), "inventory root must be absolute")
     with contextlib.ExitStack() as parents:
@@ -116,10 +122,10 @@ def inventory_posix(root, result):
         for component in root.parts[1:]:
             fd = os.open(component, flags, dir_fd=fd)
             parents.callback(os.close, fd)
-        _inventory_posix_directory(fd, 0, flags, result)
+        _inventory_posix_directory(fd, 0, flags, result, tolerate_churn)
 
 
-def _inventory_posix_directory(fd, depth, flags, result):
+def _inventory_posix_directory(fd, depth, flags, result, tolerate_churn):
     require(depth <= MAX_DEPTH, "inventory depth limit exceeded")
     count = 0
     result.directories += 1
@@ -136,7 +142,8 @@ def _inventory_posix_directory(fd, depth, flags, result):
                         actual = os.fstat(child)
                         require((actual.st_dev, actual.st_ino) == (info.st_dev, info.st_ino),
                                 "inventory directory identity changed")
-                        _inventory_posix_directory(child, depth + 1, flags, result)
+                        _inventory_posix_directory(
+                            child, depth + 1, flags, result, tolerate_churn)
                     finally:
                         os.close(child)
                 elif stat.S_ISREG(info.st_mode):
@@ -145,7 +152,8 @@ def _inventory_posix_directory(fd, depth, flags, result):
                 else:
                     result.other += 1
             except (OSError, ValueError) as error:
-                result.error(error)
+                if not tolerate_churn or not _expected_churn(error):
+                    result.error(error)
     result.widths[group(count)] += 1
 
 
@@ -211,12 +219,13 @@ class Windows:
         if not success:
             raise ctypes.WinError(ctypes.get_last_error())
 
-    def directory(self, path):
+    def directory(self, path, allow_delete=False):
         text = str(path)
         if not text.startswith("\\\\?\\"):
             text = "\\\\?\\UNC\\" + text[2:] if text.startswith("\\\\") else "\\\\?\\" + text
-        # No FILE_SHARE_DELETE: retained ancestors cannot be renamed underneath us.
-        handle = self.kernel.CreateFileW(text, 0x1 | 0x80, 0x1 | 0x2, None, 3,
+        share = 0x1 | 0x2 | (0x4 if allow_delete else 0)
+        # Live storage samples allow renames; source inventories pin their ancestors.
+        handle = self.kernel.CreateFileW(text, 0x1 | 0x80, share, None, 3,
                                         0x02000000 | 0x00200000, None)
         self.check(handle != ctypes.c_void_p(-1).value)
         try:
@@ -255,19 +264,19 @@ class Windows:
                         "invalid directory response offset")
                 offset += item.next
 
-    def inventory(self, root, result):
+    def inventory(self, root, result, tolerate_churn=False):
         require(root.is_absolute(), "inventory root must be absolute")
         with contextlib.ExitStack() as parents:
             path = Path(root.anchor)
-            handle = self.directory(path)
+            handle = self.directory(path, allow_delete=tolerate_churn)
             parents.callback(self.kernel.CloseHandle, handle)
             for component in root.parts[1:]:
                 path /= component
-                handle = self.directory(path)
+                handle = self.directory(path, allow_delete=tolerate_churn)
                 parents.callback(self.kernel.CloseHandle, handle)
-            self._inventory_directory(handle, path, 0, result)
+            self._inventory_directory(handle, path, 0, result, tolerate_churn)
 
-    def _inventory_directory(self, handle, path, depth, result):
+    def _inventory_directory(self, handle, path, depth, result, tolerate_churn):
         require(depth <= MAX_DEPTH, "inventory depth limit exceeded")
         result.directories += 1
         result.depths[str(depth)] += 1
@@ -277,9 +286,10 @@ class Windows:
                 if info.attributes & self.REPARSE:
                     result.links += 1
                 elif info.attributes & self.DIRECTORY:
-                    child = self.directory(path / name)
+                    child = self.directory(path / name, allow_delete=tolerate_churn)
                     try:
-                        self._inventory_directory(child, path / name, depth + 1, result)
+                        self._inventory_directory(
+                            child, path / name, depth + 1, result, tolerate_churn)
                     finally:
                         self.kernel.CloseHandle(child)
                 else:
@@ -287,7 +297,8 @@ class Windows:
                     result.file(name, info.size, info.allocated)
                     count += 1
             except (OSError, ValueError) as error:
-                result.error(error)
+                if not tolerate_churn or not _expected_churn(error):
+                    result.error(error)
         result.widths[group(count)] += 1
 
     def process(self, pid):
@@ -377,6 +388,8 @@ def memory_summary(samples, peaks, complete, active_window):
     sampled_peak = max(totals, default=None)
     conservative = sum(peaks.values()) if set(peaks) == {"api", "worker"} else None
     if sampled_peak is not None and sampled_peak > LIMIT_BYTES:
+        verdict = "failed"
+    elif any(peak > LIMIT_BYTES for peak in peaks.values()):
         verdict = "failed"
     elif (complete and active_window and steady and conservative is not None
           and conservative <= LIMIT_BYTES):
@@ -488,9 +501,9 @@ def verify_azure_vm(expected):
 def storage(root, maximum_files=None):
     observed = Inventory()
     if os.name == "nt":
-        Windows().inventory(root, observed)
+        Windows().inventory(root, observed, tolerate_churn=True)
     else:
-        inventory_posix(root, observed)
+        inventory_posix(root, observed, tolerate_churn=True)
     require(not observed.errors, "cannot verify generated run storage")
     if maximum_files is not None:
         require(observed.files <= maximum_files, "generated file-count bound exceeded")
@@ -799,11 +812,21 @@ def poll_message(children, timeout=1):
     return role, children[role].receive()
 
 
+def _same_native_path(left, right):
+    paths = [os.fspath(left), os.fspath(right)]
+    if os.name == "nt":
+        # Python may return an extended-length spelling for a long Windows path.
+        paths = [path.removeprefix("\\\\?\\") for path in paths]
+    return os.path.normcase(os.path.normpath(paths[0])) == os.path.normcase(
+        os.path.normpath(paths[1])
+    )
+
+
 def remove_fixture(output, root):
     owner = json.loads((output / "ownership.json").read_text(encoding="utf-8"))
     require(owner == {"schema": 1, "run": output.name}
             and root.name == "fixture" and root.parent == output
-            and root.resolve() == root.absolute(),
+            and _same_native_path(root.resolve(), root.absolute()),
             "generated fixture cleanup ownership does not match")
     target = str(root.absolute())
     if os.name == "nt" and not target.startswith("\\\\?\\"):

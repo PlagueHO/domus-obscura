@@ -321,7 +321,7 @@ fn sharing(state: Arc<State>, listener: TcpListener, album: Album) -> Result<()>
         .channel
         .send(&json!({"event":"upload_started","at_ms":start,"bytes":album.file_bytes}))?;
     let mut left = album.file_bytes;
-    let mut buffer = [0; 1024];
+    let mut buffer = [0; 16 * 1024];
     let mut hash = Sha256::new();
     let mut last_poll = Instant::now();
     let poll_queue = |control: &mut TcpStream| -> Result<()> {

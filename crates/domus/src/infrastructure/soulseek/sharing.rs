@@ -407,30 +407,43 @@ impl SharingRuntime {
         }))
     }
 
-    pub(crate) fn check(&self) -> Result<()> {
-        if self
-            .thread
-            .as_ref()
-            .is_some_and(|thread| thread.is_finished())
-        {
+    pub(crate) fn check(&mut self) -> Result<()> {
+        if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+            let thread = self
+                .thread
+                .take()
+                .ok_or(Error::Internal("Soulseek sharing owner disappeared"))?;
+            join_owner(thread, false)?;
             return Err(Error::Remote(
                 "Soulseek sharing stopped; restart the worker after review",
             ));
         }
         Ok(())
     }
+
+    pub(crate) fn stop_and_join(&mut self) -> Result<()> {
+        self.context.stop.store(true, Ordering::Release);
+        match self.thread.take() {
+            Some(thread) => join_owner(thread, true),
+            None => Ok(()),
+        }
+    }
+}
+
+fn join_owner(thread: JoinHandle<Result<()>>, stopping: bool) -> Result<()> {
+    let result = thread
+        .join()
+        .map_err(|_| Error::Internal("Soulseek sharing owner panicked"))?;
+    match result {
+        Err(Error::WorkerStopping) if stopping => Ok(()),
+        result => result,
+    }
 }
 
 impl Drop for SharingRuntime {
     fn drop(&mut self) {
-        self.context.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            match thread.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(Error::WorkerStopping)) => {}
-                Ok(Err(error)) => eprintln!("Soulseek sharing stopped: {error}"),
-                Err(_) => eprintln!("Soulseek sharing owner panicked"),
-            }
+        if let Err(error) = self.stop_and_join() {
+            eprintln!("Soulseek sharing stopped: {error}");
         }
     }
 }
@@ -1461,6 +1474,26 @@ fn search(context: &Context, channel: &Channel, token: u32, query: &str) -> Resu
 mod tests {
     use super::*;
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn sharing_owner_error_is_propagated_after_join() {
+        let owner = std::thread::spawn(|| Err(Error::Remote("injected sharing failure")));
+        assert!(matches!(
+            join_owner(owner, false),
+            Err(Error::Remote("injected sharing failure"))
+        ));
+    }
+
+    #[test]
+    fn expected_sharing_stop_is_ignored_only_while_draining() {
+        let owner = std::thread::spawn(|| Err(Error::WorkerStopping));
+        assert!(matches!(
+            join_owner(owner, false),
+            Err(Error::WorkerStopping)
+        ));
+        let owner = std::thread::spawn(|| Err(Error::WorkerStopping));
+        assert!(join_owner(owner, true).is_ok());
+    }
 
     fn pair() -> std::io::Result<(TcpStream, TcpStream)> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;

@@ -100,7 +100,10 @@ The catalog body budget is 16 MiB and 64 entries. Inspection records occupied
 catalog body bytes and entries. It does not measure each SQLite connection's
 page-cache occupancy. Total generated storage includes the database, WAL,
 spools, output files, logs and evidence. Spool high-water occupancy is not
-reported separately.
+reported separately. Live storage samples allow expected entry deletions and
+renames; other access errors fail the measurement. Windows storage handles allow
+delete sharing, and the final total is checked after child processes stop. Live
+samples are traversals, not atomic filesystem snapshots.
 
 ## Memory interpretation
 
@@ -117,7 +120,8 @@ Pair current API/worker readings and keep raw timestamps. Paired reads are
 sequential, not an atomic snapshot. Shared resident pages count in both processes.
 Report a sampled combined maximum separately from the sum of per-process peaks.
 Those peaks can occur at different times. Their sum is a conservative bound,
-not an observed simultaneous peak.
+not an observed simultaneous peak. A single process peak above the limit proves
+failure; a larger sum of noncoincident peaks alone remains inconclusive.
 
 Sequential worker restarts do not overlap. The conservative bound uses the
 largest worker-segment peak plus the API lifetime peak, not the sum of all

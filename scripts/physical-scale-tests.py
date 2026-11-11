@@ -52,6 +52,71 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(result.report()["excluded_links_or_reparse_points"], 1)
             self.assertEqual(result.files, 1)
 
+    @unittest.skipIf(os.name == "nt", "POSIX directory-entry race")
+    def test_live_storage_ignores_only_disappearing_entries(self):
+        class Entry:
+            name = "removed.mp3"
+
+            def __init__(self, error):
+                self.error = error
+
+            def stat(self, follow_symlinks):
+                raise self.error
+
+        class Entries:
+            def __init__(self, error):
+                self.error = error
+
+            def __enter__(self):
+                return iter((Entry(self.error),))
+
+            def __exit__(self, *_):
+                return False
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original_scandir = scale.os.scandir
+
+            def changing_scandir(path, error):
+                if isinstance(path, int):
+                    return Entries(error)
+                return original_scandir(path)
+
+            with mock.patch.object(
+                scale.os, "scandir",
+                side_effect=lambda path: changing_scandir(
+                    path, FileNotFoundError(2, "entry disappeared")
+                ),
+            ):
+                self.assertEqual(scale.storage(root), 4096)
+            with mock.patch.object(
+                scale.os, "scandir",
+                side_effect=lambda path: changing_scandir(
+                    path, PermissionError(13, "access denied")
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "cannot verify"):
+                    scale.storage(root)
+
+    @unittest.skipUnless(os.name == "nt", "Windows directory handle sharing")
+    def test_live_storage_directory_handles_allow_delete_sharing(self):
+        windows = scale.Windows.__new__(scale.Windows)
+        windows.kernel = mock.Mock()
+        windows.kernel.CreateFileW.return_value = 1
+
+        def directory_info(_handle, _kind, buffer, _length):
+            info = scale.ctypes.cast(
+                buffer, scale.ctypes.POINTER(scale.Windows.AttributeTag)
+            ).contents
+            info.attributes = scale.Windows.DIRECTORY
+            return True
+
+        windows.kernel.GetFileInformationByHandleEx.side_effect = directory_info
+        path = Path(tempfile.gettempdir())
+        handle = windows.directory(path, allow_delete=True)
+        self.assertEqual(windows.kernel.CreateFileW.call_args.args[2], 0x7)
+        windows.kernel.CloseHandle(handle)
+
     @unittest.skipUnless(os.name == "nt", "Windows junction handle check")
     def test_windows_inventory_excludes_a_junction_and_rejects_it_as_root(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -143,6 +208,13 @@ class EvidenceTests(unittest.TestCase):
         peaks = {"api": scale.LIMIT_BYTES, "worker": 600}
         self.assertEqual(scale.memory_summary(samples, peaks, True, True)["verdict"],
                          "inconclusive")
+
+    def test_process_peak_above_limit_fails_without_a_paired_sample(self):
+        samples = [{"api_bytes": 100, "worker_bytes": 200, "phase": "active"}]
+        peaks = {"api": scale.LIMIT_BYTES + 1, "worker": 200}
+        result = scale.memory_summary(samples, peaks, True, True)
+        self.assertEqual(result["sampled_combined_peak_bytes"], 300)
+        self.assertEqual(result["verdict"], "failed")
 
     def test_missing_phase_or_samples_never_pass(self):
         peaks = {"api": 10, "worker": 20}
@@ -352,6 +424,8 @@ class EvidenceTests(unittest.TestCase):
             scale.write_new(output / "ownership.json", {"schema": 1, "run": output.name})
             root = output / "fixture"
             root.mkdir()
+            self.assertTrue(scale._same_native_path(
+                Path("\\\\?\\" + str(root.resolve())), root.absolute()))
             extended = Path("\\\\?\\" + str(root))
             (extended / ("generated-lock-" + "0" * 120)).write_bytes(b"generated")
             outside = Path(temporary) / "outside"
