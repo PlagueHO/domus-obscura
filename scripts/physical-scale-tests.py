@@ -425,11 +425,11 @@ class EvidenceTests(unittest.TestCase):
             scale.write_new(output / "ownership.json", {"schema": 1, "run": output.name})
             root = output / "fixture"
             root.mkdir()
-            resolved = str(root.resolve())
-            if resolved.startswith("\\\\?\\"):
-                resolved = resolved[4:]
+            absolute = str(root.absolute())
+            if absolute.startswith("\\\\?\\"):
+                absolute = absolute[4:]
             self.assertTrue(scale._same_native_path(
-                Path("\\\\?\\" + resolved), root.absolute()))
+                Path("\\\\?\\" + absolute), root.absolute()))
             extended = Path("\\\\?\\" + str(root))
             (extended / ("generated-lock-" + "0" * 120)).write_bytes(b"generated")
             outside = Path(temporary) / "outside"
