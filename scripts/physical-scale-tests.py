@@ -252,8 +252,9 @@ class EvidenceTests(unittest.TestCase):
         process = scale.Windows().process(os.getpid()) if os.name == "nt" else (
             scale.LinuxProcess(os.getpid()))
         try:
-            self.assertGreater(process.sample(), 0)
-            self.assertGreaterEqual(process.peak, process.sample())
+            sample = process.sample()
+            self.assertGreater(sample, 0)
+            self.assertGreaterEqual(process.peak, sample)
         finally:
             process.close()
 
@@ -424,8 +425,11 @@ class EvidenceTests(unittest.TestCase):
             scale.write_new(output / "ownership.json", {"schema": 1, "run": output.name})
             root = output / "fixture"
             root.mkdir()
+            resolved = str(root.resolve())
+            if resolved.startswith("\\\\?\\"):
+                resolved = resolved[4:]
             self.assertTrue(scale._same_native_path(
-                Path("\\\\?\\" + str(root.resolve())), root.absolute()))
+                Path("\\\\?\\" + resolved), root.absolute()))
             extended = Path("\\\\?\\" + str(root))
             (extended / ("generated-lock-" + "0" * 120)).write_bytes(b"generated")
             outside = Path(temporary) / "outside"
