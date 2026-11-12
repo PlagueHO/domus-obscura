@@ -419,7 +419,8 @@ class EvidenceTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows long-path cleanup")
     def test_cleanup_removes_long_lock_paths_without_following_a_junction(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        with tempfile.TemporaryDirectory(dir=temp_root) as temporary:
             output = Path(temporary) / ("a" * 120)
             output.mkdir()
             scale.write_new(output / "ownership.json", {"schema": 1, "run": output.name})
