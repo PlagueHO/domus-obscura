@@ -7,6 +7,9 @@ use std::time::{Duration, SystemTime};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+// On Linux, a forked test child temporarily inherits open flock descriptors.
+static CATALOG_PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[path = "catalog/filters.rs"]
 mod filters;
 #[path = "catalog/ownership.rs"]
@@ -73,6 +76,9 @@ fn release() -> Value {
 fn shared_service_cli_uses_cached_provider_data_without_job_or_approval_effects() -> TestResult {
     use sha2::{Digest, Sha256};
     use std::process::Command;
+    let _process_test_lock = CATALOG_PROCESS_TEST_LOCK
+        .lock()
+        .map_err(|_| "catalog process test lock was poisoned")?;
     let state = tempfile::tempdir()?;
     let database = state.path().join("state.db");
     let configuration = state.path().join("host.json");
@@ -170,6 +176,9 @@ fn catalog_plan_cli_uses_only_fresh_verified_cache_and_never_approves_or_starts_
 {
     use sha2::{Digest, Sha256};
     use std::process::Command;
+    let _process_test_lock = CATALOG_PROCESS_TEST_LOCK
+        .lock()
+        .map_err(|_| "catalog process test lock was poisoned")?;
     let directory = tempfile::tempdir()?;
     let media = tempfile::tempdir()?;
     let database = directory.path().join("state.db");
@@ -484,6 +493,9 @@ fn catalog_incomplete_mappings_and_invalid_dates_are_not_silently_used() -> Test
 
 #[test]
 fn catalog_rate_lease_is_durable_fenced_and_cannot_be_skipped_on_restart() -> TestResult {
+    let _process_test_lock = CATALOG_PROCESS_TEST_LOCK
+        .lock()
+        .map_err(|_| "catalog process test lock was poisoned")?;
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("state.db");
     let mut first = Store::open(&database)?;
@@ -526,6 +538,9 @@ fn catalog_rate_lease_is_durable_fenced_and_cannot_be_skipped_on_restart() -> Te
 
 #[test]
 fn catalog_concurrent_connections_receive_one_network_permit() -> TestResult {
+    let _process_test_lock = CATALOG_PROCESS_TEST_LOCK
+        .lock()
+        .map_err(|_| "catalog process test lock was poisoned")?;
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("state.db");
     Store::open(&database)?;
