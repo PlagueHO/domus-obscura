@@ -358,7 +358,7 @@ impl PreparedProductionWorker {
         if lifecycle.stopping() || stop.load(Ordering::Acquire) {
             return Ok(());
         }
-        let sharing = self
+        let mut sharing = self
             .configuration
             .sharing
             .as_ref()
@@ -395,7 +395,8 @@ impl PreparedProductionWorker {
             if lifecycle.stopping() {
                 stop.store(true, Ordering::Release);
             }
-            if let Some(sharing) = &sharing
+            if !lifecycle.stopping()
+                && let Some(sharing) = sharing.as_mut()
                 && let Err(error) = sharing.check()
             {
                 failure.get_or_insert(error);
@@ -491,6 +492,11 @@ impl PreparedProductionWorker {
                 break;
             }
             std::thread::sleep(Duration::from_secs(1));
+        }
+        if let Some(sharing) = sharing.as_mut()
+            && let Err(error) = sharing.stop_and_join()
+        {
+            failure.get_or_insert(error);
         }
         let stopped = store.stop_worker_host(&host);
         match failure {

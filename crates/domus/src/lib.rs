@@ -13,6 +13,8 @@ mod crash_tests;
 #[cfg(test)]
 #[path = "../tests/support/media.rs"]
 mod media_fixtures;
+#[cfg(test)]
+mod scale_tests;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

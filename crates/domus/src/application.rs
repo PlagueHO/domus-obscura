@@ -192,6 +192,8 @@ fn observe(store: &mut Store, claim: &ScanClaim, root: &Path) -> Result<()> {
         }
         flush(store, claim, &mut batch)?;
         store.complete_directory(claim, &directory)?;
+        #[cfg(test)]
+        crate::scale_tests::directory_completed(claim)?;
     }
     Ok(())
 }

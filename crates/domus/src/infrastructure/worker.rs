@@ -930,7 +930,7 @@ impl PreparedWorker {
             if let Some(account) = &shared {
                 return account.session(&peer, server, username);
             }
-            let socket = TcpStream::connect_timeout(&server.into(), Duration::from_secs(10))
+            let socket = super::soulseek::connect(server, Duration::from_secs(10))
                 .map_err(Error::SoulseekTransport)?;
             SoulseekSession::login(socket, username, password)
         })

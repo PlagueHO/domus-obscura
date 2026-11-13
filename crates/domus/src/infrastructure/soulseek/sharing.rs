@@ -51,8 +51,8 @@ impl Account {
         let credentials =
             crate::infrastructure::worker::read_credentials(&configuration.credentials_file)?;
         let lock = crate::infrastructure::worker::account_lock(database, &credentials)?;
-        let socket = TcpStream::connect_timeout(&configuration.server.into(), IO_TIMEOUT)
-            .map_err(Error::SoulseekTransport)?;
+        let socket =
+            super::connect(configuration.server, IO_TIMEOUT).map_err(Error::SoulseekTransport)?;
         let session = SoulseekSession::login(socket, &credentials.username, &credentials.password)?;
         Ok(Arc::new(Self {
             session: Mutex::new(session),
@@ -163,7 +163,7 @@ impl Account {
                 "sharing account changed during reconnect".into(),
             ));
         }
-        let socket = TcpStream::connect_timeout(&self.configuration.server.into(), IO_TIMEOUT)
+        let socket = super::connect(self.configuration.server, IO_TIMEOUT)
             .map_err(Error::SoulseekTransport)?;
         let replacement =
             SoulseekSession::login(socket, &credentials.username, &credentials.password)?;
@@ -407,30 +407,43 @@ impl SharingRuntime {
         }))
     }
 
-    pub(crate) fn check(&self) -> Result<()> {
-        if self
-            .thread
-            .as_ref()
-            .is_some_and(|thread| thread.is_finished())
-        {
+    pub(crate) fn check(&mut self) -> Result<()> {
+        if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+            let thread = self
+                .thread
+                .take()
+                .ok_or(Error::Internal("Soulseek sharing owner disappeared"))?;
+            join_owner(thread, false)?;
             return Err(Error::Remote(
                 "Soulseek sharing stopped; restart the worker after review",
             ));
         }
         Ok(())
     }
+
+    pub(crate) fn stop_and_join(&mut self) -> Result<()> {
+        self.context.stop.store(true, Ordering::Release);
+        match self.thread.take() {
+            Some(thread) => join_owner(thread, true),
+            None => Ok(()),
+        }
+    }
+}
+
+fn join_owner(thread: JoinHandle<Result<()>>, stopping: bool) -> Result<()> {
+    let result = thread
+        .join()
+        .map_err(|_| Error::Internal("Soulseek sharing owner panicked"))?;
+    match result {
+        Err(Error::WorkerStopping) if stopping => Ok(()),
+        result => result,
+    }
 }
 
 impl Drop for SharingRuntime {
     fn drop(&mut self) {
-        self.context.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            match thread.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(Error::WorkerStopping)) => {}
-                Ok(Err(error)) => eprintln!("Soulseek sharing stopped: {error}"),
-                Err(_) => eprintln!("Soulseek sharing owner panicked"),
-            }
+        if let Err(error) = self.stop_and_join() {
+            eprintln!("Soulseek sharing stopped: {error}");
         }
     }
 }
@@ -529,7 +542,7 @@ fn serve(
                         tasks.push(std::thread::spawn(move || {
                             let mut session = context.account.fork(&username)?;
                             let address = session.peer_address(&username)?.address();
-                            let socket = TcpStream::connect_timeout(&address.into(), IO_TIMEOUT)
+                            let socket = super::connect(address, IO_TIMEOUT)
                                 .map_err(Error::SoulseekTransport)?;
                             let channel = context.account.peer_channel(socket, &username)?;
                             channel.init(1, &init_body(&context.account.username, "P"))?;
@@ -551,7 +564,7 @@ fn serve(
                         requests += 1;
                         let context = context.clone();
                         tasks.push(std::thread::spawn(move || {
-                            let socket = TcpStream::connect_timeout(&address.into(), IO_TIMEOUT)
+                            let socket = super::connect(address, IO_TIMEOUT)
                                 .map_err(Error::SoulseekTransport)?;
                             let channel = context.account.peer_channel(socket, &username)?;
                             channel.init(0, &token.to_le_bytes())?;
@@ -819,6 +832,7 @@ fn serve_peer(
                 }
                 if context.policy.allows(&username) {
                     search(&context, &channel, token, &query)?;
+                    activity = Instant::now();
                 }
             }
             for index in (0..uploads.len()).rev() {
@@ -882,9 +896,13 @@ fn serve_peer(
                     return Err(super::protocol());
                 }
                 match event {
-                    Event::Peer(PeerEvent::ShareList) => browse(&context, &channel, None)?,
+                    Event::Peer(PeerEvent::ShareList) => {
+                        browse(&context, &channel, None)?;
+                        activity = Instant::now();
+                    }
                     Event::Peer(PeerEvent::FolderRequest { token, folder }) => {
-                        browse(&context, &channel, Some((token, &folder)))?
+                        browse(&context, &channel, Some((token, &folder)))?;
+                        activity = Instant::now();
                     }
                     Event::Peer(PeerEvent::Queue { path }) => {
                         enqueue(&context, &channel, &username, &path)?
@@ -962,7 +980,7 @@ fn upload(
         return Err(Error::Remote("sharing peer is not authorized"));
     }
     let input = context.catalog()?.open(file)?;
-    let mut socket = match TcpStream::connect_timeout(&address.into(), IO_TIMEOUT) {
+    let mut socket = match super::connect(address, IO_TIMEOUT) {
         Ok(mut socket) => {
             init(&mut socket, &context.account.username, "F")?;
             socket
@@ -1456,6 +1474,26 @@ fn search(context: &Context, channel: &Channel, token: u32, query: &str) -> Resu
 mod tests {
     use super::*;
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn sharing_owner_error_is_propagated_after_join() {
+        let owner = std::thread::spawn(|| Err(Error::Remote("injected sharing failure")));
+        assert!(matches!(
+            join_owner(owner, false),
+            Err(Error::Remote("injected sharing failure"))
+        ));
+    }
+
+    #[test]
+    fn expected_sharing_stop_is_ignored_only_while_draining() {
+        let owner = std::thread::spawn(|| Err(Error::WorkerStopping));
+        assert!(matches!(
+            join_owner(owner, false),
+            Err(Error::WorkerStopping)
+        ));
+        let owner = std::thread::spawn(|| Err(Error::WorkerStopping));
+        assert!(join_owner(owner, true).is_ok());
+    }
 
     fn pair() -> std::io::Result<(TcpStream, TcpStream)> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
