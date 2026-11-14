@@ -115,6 +115,9 @@ suggestions remain placeholders. The edition star is deferred to issue #21.
 
 ## Connected browser workflows
 
+The [V1 acceptance matrix](../../docs/v1-acceptance.md) separates these generated
+workflows from production-router, live-provider, and native service evidence.
+
 Use `.\dev.ps1 browser` on Windows or `cargo task browser` on Linux.
 `browser-build` builds the connected app and the separate Rust example.
 `pnpm --dir frontend run test:browser` runs only the browser checks after that build.
@@ -133,9 +136,23 @@ The sample-data harness at port 4173 remains separate.
 
 Desktop and narrow Chromium cases use the built connected app. The narrow
 project requests reduced motion. Failure traces and screenshots stay in ignored
-`frontend/test-results`. CI installs its own Chromium explicitly. For a permitted
+`frontend/test-results`. The same directory contains `browser-results.json`
+for successful and failed runs. It records the source revision, dirty state,
+platform, fixture boundary, test results, and actual browser-version annotations.
+CI retains this evidence for each Windows and Ubuntu job. A missing report or an
+interrupted run is not a passing result.
+CI installs its own Chromium explicitly. For a permitted
 existing local Chromium-family browser, set `DOMUS_BROWSER_EXECUTABLE` to its
 absolute executable path; this does not install a browser.
+
+Generated complete-album cases select MP3 320 CBR or FLAC through the UI and
+publish three tracks across two discs. The tracks use generated silent audio;
+they do not represent real recordings. Independent readers check each file's
+tags, encoded bytes, and embedded approved JPEG. The verifier also checks the
+exact album file set, sidecar JPEG, saved state, and destination set. Pending
+backup verification is explicit and cannot be reported as complete publication.
+Separate cases check stale pause answers, explicit continuation, and changed
+cover approval without starting media effects.
 
 These checks supply generated-fixture evidence, not live-provider, production
 authentication, installed-service, other-browser or complete V1 acceptance.

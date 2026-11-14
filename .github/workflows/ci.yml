@@ -53,14 +53,15 @@ jobs:
       - name: Install Chromium for generated browser workflows
         run: pnpm --dir frontend exec playwright install --with-deps chromium
       - name: Check connected browser workflows
+        id: browser
         run: cargo task browser
-      - name: Retain browser failure evidence
-        if: failure()
+      - name: Retain browser results and failure evidence
+        if: always() && steps.browser.outcome != 'skipped'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: browser-failures-${{ runner.os }}
+          name: browser-results-${{ runner.os }}-${{ github.sha }}
           path: frontend/test-results
-          if-no-files-found: ignore
+          if-no-files-found: error
       - name: Check Linux packaging helpers and unit syntax
         if: runner.os == 'Linux'
         run: python3 packaging/linux/package-check.py --self-test

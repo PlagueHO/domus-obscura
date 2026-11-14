@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 
 export default defineConfig({
   testDir: "./browser",
@@ -6,6 +7,15 @@ export default defineConfig({
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
+  reporter: [["list"], ["json", { outputFile: "test-results/browser-results.json" }]],
+  metadata: {
+    source_revision: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim().length > 0,
+    platform: process.platform,
+    architecture: process.arch,
+    fixtures:
+      "Private temporary SQLite and roots; generated MP3/FLAC, catalog and cover; no live providers",
+  },
   globalTeardown: "./browser/teardown.ts",
   timeout: 45000,
   globalTimeout: 600000,

@@ -423,6 +423,9 @@ has finished, then refresh the browser's library view.
 
 ## Repeatable evidence without live credentials
 
+Use the [V1 acceptance matrix](v1-acceptance.md) to keep exact-revision results,
+generated browser evidence, and unperformed live or host checks separate.
+
 ```powershell
 .\dev.ps1 test anonymous_https_approves_exact_album
 .\dev.ps1 test anonymous_https_resumes_retained_publication

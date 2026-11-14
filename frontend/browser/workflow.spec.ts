@@ -4,6 +4,10 @@ import type { SettingsVersion } from "../src/generated/SettingsVersion";
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
 import type { CatalogBatchPlanRequest } from "../src/generated/CatalogBatchPlanRequest";
 import type { RecoveryEntry } from "../src/generated/RecoveryEntry";
+import type { PublicationDestination } from "../src/generated/PublicationDestination";
+import type { QuestionDetails } from "../src/generated/QuestionDetails";
+import type { ApproveArtwork } from "../src/generated/ApproveArtwork";
+import type { AudioProfile } from "../src/generated/AudioProfile";
 
 const origin = "http://127.0.0.1:4174";
 const guards = { Origin: origin, "x-domus-csrf": "1" };
@@ -20,14 +24,15 @@ async function control(page: Page, path: string, data = {}) {
   expect(response.ok(), await response.text()).toBe(true);
 }
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, browser }) => {
+  test.info().annotations.push({ type: "browser-version", description: browser.version() });
   await control(page, "/__fixture/reset");
   await page.route("**/*", (route) =>
     new URL(route.request().url()).origin === origin ? route.continue() : route.abort(),
   );
 });
 
-async function selectAlbums(page: Page, count = 1, backup = false) {
+async function selectAlbums(page: Page, count = 1, backup = false, profile?: AudioProfile) {
   await page.goto("/");
   await page.getByRole("searchbox").fill("Browser");
   await page.getByRole("searchbox").press("Enter");
@@ -41,6 +46,8 @@ async function selectAlbums(page: Page, count = 1, backup = false) {
   await expect(page.getByRole("heading", { name: "Browser Album 1", exact: true })).toBeVisible();
   const selection = await openSelection(page);
   await expect(selection).toContainText(`${count} / 25`);
+  if (profile)
+    await selection.getByLabel("Audio profile for Browser Album 1").selectOption(profile);
   await selection.getByRole("checkbox", { name: /^main/ }).check();
   if (backup) await selection.getByRole("checkbox", { name: /^backup/ }).check();
   await page.locator(".tray").screenshot({ path: test.info().outputPath("selection.png") });
@@ -84,16 +91,89 @@ async function approveAlbum(page: Page, collision = false) {
     await expect(page.getByRole("button", { name: "Start Download", exact: true })).toBeEnabled();
 }
 
-async function verifyOutput(page: Page, job = 1) {
-  const response = await page.request.get(`/__fixture/verify/${job}/2`);
+async function verifyOutput(
+  page: Page,
+  job = 1,
+  {
+    multiDisc = false,
+    format = "mp3",
+    backup = false,
+    pending = false,
+  }: { multiDisc?: boolean; format?: "mp3" | "flac"; backup?: boolean; pending?: boolean } = {},
+) {
+  const response = await page.request.get(`/__fixture/verify/${job}/2?backup_pending=${pending}`);
   expect(response.ok(), await response.text()).toBe(true);
-  const evidence = await response.json();
+  const evidence: {
+    audio_unchanged: boolean;
+    tags_verified: boolean;
+    exact_jpeg: boolean;
+    state: string;
+    files: string[];
+    destinations: PublicationDestination[];
+  } = await response.json();
   expect(evidence.audio_unchanged).toBe(true);
   expect(evidence.tags_verified).toBe(true);
   expect(evidence.exact_jpeg).toBe(true);
-  expect(evidence.files).toEqual([
-    `B/BROWSER ARTIST/BROWSER ALBUM ${job}/Browser Artist - Browser Album ${job} - 01 - Generated Track.mp3`,
-  ]);
+  expect(evidence.state).toBe(pending ? "backup_pending" : "complete");
+  expect(evidence.destinations.map((destination) => destination.location_id).sort()).toEqual(
+    backup ? [1, 2] : [1],
+  );
+  const verified = evidence.destinations.filter((destination) => destination.verified_at !== null);
+  expect(verified.map((destination) => destination.location_id).sort()).toEqual(
+    backup && !pending ? [1, 2] : [1],
+  );
+  const titles = multiDisc ? ["First Light", "Second Signal", "Third Return"] : ["Generated Track"];
+  const files = titles.map(
+    (title, track) =>
+      `B/BROWSER ARTIST/BROWSER ALBUM ${job}/Browser Artist - Browser Album ${job} - ${String(track + 1).padStart(2, "0")} - ${title}.${format}`,
+  );
+  expect(evidence.files.sort()).toEqual(verified.flatMap(() => files).sort());
+  return evidence;
+}
+
+for (const format of ["mp3", "flac"] as const) {
+  for (const backup of [false, true]) {
+    test(`complete two-disc ${format} album verifies exact output in ${backup ? "main and backup" : "main"}`, async ({
+      page,
+    }) => {
+      await control(page, "/__fixture/reset", { format, multi_disc: true });
+      await selectAlbums(page, 1, backup, format === "mp3" ? "mp3_cbr320" : "flac_lossless");
+      await approveAlbum(page);
+      if (backup) await control(page, "/__fixture/backup", { offline: true });
+      await page.getByRole("button", { name: "Start Download", exact: true }).click();
+      if (backup) {
+        await expect(
+          page.getByText("The primary is verified. The backup is not complete.", { exact: false }),
+        ).toBeVisible();
+        await verifyOutput(page, 1, { multiDisc: true, format, backup, pending: true });
+        const premature = await page.request.get("/__fixture/verify/1/2");
+        expect(premature.status()).toBe(409);
+        await control(page, "/__fixture/backup", { offline: false });
+        await page
+          .getByRole("button", { name: "Review publication recovery", exact: true })
+          .click();
+        await page
+          .getByRole("button", { name: "Confirm publication recovery", exact: true })
+          .click();
+      }
+      await expect(
+        page.getByText("The server reports this request complete.", { exact: false }),
+      ).toBeVisible();
+      await verifyOutput(page, 1, { multiDisc: true, format, backup });
+      await control(page, "/__fixture/scan");
+      await page.goto("/#/library?location=1&view=artists");
+      await page.getByRole("link", { name: "Browser Artist", exact: true }).click();
+      await page.locator(".library-list a").filter({ hasText: "Browser Album 1" }).click();
+      for (const title of ["First Light", "Second Signal", "Third Return"])
+        await expect(
+          page.getByRole("link", { name: new RegExp(`${title}\\.${format}$`) }),
+        ).toBeVisible();
+      await page.getByRole("link", { name: new RegExp(`Third Return\\.${format}$`) }).click();
+      await expect(page.getByRole("heading", { name: "Library file", exact: true })).toBeVisible();
+      await expect(page.getByText("Third Return", { exact: true })).toBeVisible();
+      await verifyOutput(page, 1, { multiDisc: true, format, backup });
+    });
+  }
 }
 
 test("search, persistent multi-selection and separate approvals publish generated albums", async ({
@@ -270,7 +350,7 @@ test("backup pending keeps the verified main separate and resumes retained publi
   await expect(
     page.getByText("The primary is verified. The backup is not complete.", { exact: false }),
   ).toBeVisible();
-  await verifyOutput(page);
+  await verifyOutput(page, 1, { backup: true, pending: true });
   await control(page, "/__fixture/backup", { offline: false });
   await page.getByRole("button", { name: "Review publication recovery", exact: true }).click();
   await page.getByRole("button", { name: "Confirm publication recovery", exact: true }).click();
@@ -448,12 +528,83 @@ test("loading, failed and empty metadata never appear as current evidence", asyn
 
 test("paused questions keep answer and recovery separate", async ({ page }) => {
   await selectAlbums(page);
+  await approveAlbum(page);
   await page.getByRole("button", { name: "Pause at a safe boundary", exact: true }).click();
   await page.getByRole("button", { name: "Refresh request", exact: true }).click();
   await expect(page.getByText("Action required:", { exact: false })).toBeVisible();
   await page.getByRole("link", { name: "Open the saved decision", exact: true }).click();
   await expect(page.getByRole("heading", { name: /Decision #/ })).toBeVisible();
   await expect(page.getByText("Nothing is", { exact: false }).first()).toBeVisible();
+  const questionId = page.url().split("/").at(-1);
+  const details: QuestionDetails = await (
+    await page.request.get(`/api/questions/${questionId}`)
+  ).json();
+  expect(details.recovery.kind).toBe("job_control");
+  expect(details.question.answer).toBeNull();
+  const stale = await page.request.post(`/api/questions/${questionId}/answer`, {
+    headers: guards,
+    data: { plan_version: 1, choice: "Resume" },
+  });
+  expect(stale.status()).toBe(409);
+  expect(
+    (await (await page.request.get(`/api/questions/${questionId}`)).json()).question.answer,
+  ).toBeNull();
+  await page.getByLabel("Your answer").selectOption("Resume");
+  await page.getByRole("button", { name: "Save answer", exact: true }).click();
+  await expect(page.getByText("Saved answer:", { exact: true })).toBeVisible();
+  const answered: QuestionDetails = await (
+    await page.request.get(`/api/questions/${questionId}`)
+  ).json();
+  expect(answered.job_state).toBe("awaiting_input");
+  expect(answered.question.answer).toBe("Resume");
+  if (answered.recovery.kind !== "job_control") throw new Error("Expected saved pause recovery");
+  expect(answered.recovery.control.continued_at).toBeNull();
+  expect(await (await page.request.get("/api/jobs/1/plans/2/transfers")).json()).toEqual([]);
+  const staleContinuation = await page.request.post(
+    `/api/job-controls/${answered.recovery.control.id}/continue`,
+    {
+      headers: guards,
+      data: { plan_version: 1 },
+    },
+  );
+  expect(staleContinuation.status()).toBe(409);
+  await page.getByRole("button", { name: "Apply saved pause answer", exact: true }).click();
+  await expect(
+    page.getByText("This decision is no longer active.", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Apply saved pause answer", exact: true }),
+  ).toHaveCount(0);
+  const resumed: QuestionDetails = await (
+    await page.request.get(`/api/questions/${questionId}`)
+  ).json();
+  expect(resumed.job_state).toBe("queued");
+  if (resumed.recovery.kind !== "job_control") throw new Error("Expected saved pause recovery");
+  expect(resumed.recovery.control.continued_at).not.toBeNull();
+  expect(await (await page.request.get("/api/jobs/1/plans/2/transfers")).json()).toEqual([]);
+  expect(await (await page.request.get("/api/jobs/1/plans/2/publication")).json()).toEqual([]);
+});
+
+test("a changed cover approval is rejected without transfers or publication", async ({ page }) => {
+  await selectAlbums(page);
+  await page.route("**/api/jobs/1/plans/2/artwork/approve", (route) => {
+    const approval: ApproveArtwork = route.request().postDataJSON();
+    approval.sha256 = "0".repeat(64);
+    return route.continue({ postData: JSON.stringify(approval) });
+  });
+  await approveAlbum(page, true);
+  await expect(page.getByRole("alert")).toBeVisible();
+  const artwork: { approved_at: number | null }[] = await (
+    await page.request.get("/api/jobs/1/plans/2/artwork")
+  ).json();
+  expect(artwork).toHaveLength(1);
+  expect(artwork[0]!.approved_at).toBeNull();
+  expect(await (await page.request.get("/api/jobs/1/plans/2/transfers")).json()).toEqual([]);
+  expect(await (await page.request.get("/api/jobs/1/plans/2/publication")).json()).toEqual([]);
+  await page.unroute("**/api/jobs/1/plans/2/artwork/approve");
+  await page.getByRole("button", { name: "Approve this exact cover", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Start Download", exact: true })).toBeEnabled();
+  expect(await (await page.request.get("/api/jobs/1/plans/2/transfers")).json()).toEqual([]);
 });
 
 test("settings policy is version-bound and read-only; keyboard and reduced motion remain usable", async ({

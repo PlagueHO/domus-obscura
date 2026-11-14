@@ -6,7 +6,7 @@ use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use domus::application::{add_location, normalize_album, publish_new_album, scan_location};
-use domus::domain::{JobState, LibraryPath, OutputSettings, Page};
+use domus::domain::{AudioFormat, JobState, LibraryPath, OutputSettings, Page};
 use domus::infrastructure::api::{
     ApproveArtwork, ApproveSourceCandidate, CatalogBatchPlanRequest, CatalogPlanRequest,
 };
@@ -17,7 +17,7 @@ use domus::infrastructure::server::configuration::{
     ConfigurationService,
 };
 use domus::infrastructure::staging::StagingRoot;
-use domus::infrastructure::store::{PlanRequest, Store};
+use domus::infrastructure::store::{PlanRequest, PublicationDestination, Store};
 use domus::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -49,24 +49,54 @@ struct Fixture {
     staging: StagingRoot,
     assets: BrowserAssets,
     source: Vec<u8>,
+    format: AudioFormat,
+    multi_disc: bool,
     cover: Vec<u8>,
     root: TempDir,
     read_only: bool,
     runs: BTreeMap<i64, (i64, i64)>,
 }
 
-fn release_body(index: usize) -> Result<Vec<u8>> {
+fn fixture_tracks(multi_disc: bool) -> Vec<(u16, u16, &'static str)> {
+    if multi_disc {
+        vec![
+            (1, 1, "First Light"),
+            (1, 2, "Second Signal"),
+            (2, 1, "Third Return"),
+        ]
+    } else {
+        vec![(1, 1, "Generated Track")]
+    }
+}
+
+fn release_body(index: usize, multi_disc: bool) -> Result<Vec<u8>> {
+    let tracks = fixture_tracks(multi_disc);
+    let mut media = Vec::new();
+    for disc in 1..=if multi_disc { 2 } else { 1 } {
+        let tracks = tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, (number, _, _))| *number == disc)
+            .map(|(track, (_, position, title))| {
+                let id = if multi_disc { index * 3 + track + 1 } else { index + 1 };
+                json!({
+                    "id":format!("40000000-0000-4000-8000-{id:012}"),
+                    "position":position,"number":position.to_string(),"title":title,
+                    "artist-credit":[{"artist":{"id":ARTIST,"name":"Browser Artist"},"name":"Browser Artist","joinphrase":""}],
+                    "recording":{"id":format!("50000000-0000-4000-8000-{id:012}"),"video":false}
+                })
+            })
+            .collect::<Vec<_>>();
+        media.push(
+            json!({"position":disc,"format":"CD","track-count":tracks.len(),"tracks":tracks}),
+        );
+    }
     Ok(serde_json::to_vec(&json!({
         "id": RELEASES[index], "title": format!("Browser Album {}", index + 1),
         "date": "2026-01-02", "country": "NZ", "status": "Official",
         "artist-credit": [{"artist":{"id":ARTIST,"name":"Browser Artist"},"name":"Browser Artist","joinphrase":""}],
         "release-group": {"id":format!("30000000-0000-4000-8000-{:012}",index+1)},
-        "media": [{"position":1,"format":"CD","track-count":1,"tracks":[{
-            "id":format!("40000000-0000-4000-8000-{:012}",index+1),
-            "position":1,"number":"1","title":"Generated Track",
-            "artist-credit": [{"artist":{"id":ARTIST,"name":"Browser Artist"},"name":"Browser Artist","joinphrase":""}],
-            "recording":{"id":format!("50000000-0000-4000-8000-{:012}",index+1),"video":false}
-        }]}]
+        "media": media
     }))?)
 }
 
@@ -78,6 +108,8 @@ impl Fixture {
             staging,
             assets,
             source,
+            format: _,
+            multi_disc: _,
             cover,
             root,
             read_only: _,
@@ -89,6 +121,10 @@ impl Fixture {
     }
 
     fn new() -> Result<Self> {
+        Self::with_audio(AudioFormat::Mp3, false)
+    }
+
+    fn with_audio(format: AudioFormat, multi_disc: bool) -> Result<Self> {
         let root = private::tempdir().map_err(|error| Error::InvalidInput(error.to_string()))?;
         for folder in ["main", "backup", "staging", "state"] {
             let path = root.path().join(folder);
@@ -104,7 +140,7 @@ impl Fixture {
         let connection = rusqlite::Connection::open(store.database_path())?;
         for (index, id) in RELEASES.iter().enumerate() {
             let query = CatalogQuery::release(id)?;
-            let body = release_body(index)?;
+            let body = release_body(index, multi_disc)?;
             connection.execute(
                 "INSERT INTO catalog_cache(source,body,payload_sha256,fetched_at,expires_at,accessed_at_ms)
                  VALUES (?1,?2,?3,unixepoch(),unixepoch()+86400,unixepoch()*1000)",
@@ -138,7 +174,14 @@ impl Fixture {
             configuration,
             staging,
             assets: BrowserAssets::load(&assets)?,
-            source: media::mp3().map_err(|error| Error::InvalidInput(error.to_string()))?,
+            source: match format {
+                AudioFormat::Mp3 => {
+                    media::mp3().map_err(|error| Error::InvalidInput(error.to_string()))?
+                }
+                AudioFormat::Flac => media::flac(),
+            },
+            format,
+            multi_disc,
             cover: media::cover_source().map_err(|error| Error::InvalidInput(error.to_string()))?,
             root,
             read_only: false,
@@ -151,7 +194,7 @@ impl Fixture {
             .iter()
             .position(|release| *release == id)
             .ok_or_else(|| Error::InvalidInput("unknown generated release".into()))?;
-        let body = release_body(index)?;
+        let body = release_body(index, self.multi_disc)?;
         let query = CatalogQuery::release(id)?;
         let cached = self
             .store
@@ -214,14 +257,73 @@ impl Fixture {
         Ok(())
     }
 
-    fn verify(&self, job: i64, version: i64) -> Result<Value> {
-        use id3::TagLike;
+    fn verify(&self, job: i64, version: i64, backup_pending: bool) -> Result<Value> {
+        let destinations = self.store.publication_destinations(job, version)?;
+        self.verify_publication(job, version, backup_pending, &destinations)
+    }
+
+    fn verify_publication(
+        &self,
+        job: i64,
+        version: i64,
+        backup_pending: bool,
+        destinations: &[PublicationDestination],
+    ) -> Result<Value> {
         let plan = self.store.plan(job, version)?;
         let cover = self.store.approved_artwork(job, version)?;
-        let before = domus::infrastructure::mp3::inspect_mp3_320(&mut Cursor::new(&self.source))?;
-        let destinations = self.store.publication_destinations(job, version)?;
+        let state = self.store.job_state(job)?;
+        let tracks = fixture_tracks(self.multi_disc);
+        if state.as_deref()
+            != Some(if backup_pending {
+                "backup_pending"
+            } else {
+                "complete"
+            })
+            || plan.plan.outputs.len() != tracks.len()
+            || destinations.len() != plan.plan.destinations.len()
+            || destinations.is_empty()
+            || destinations.iter().any(|destination| {
+                plan.plan
+                    .destinations
+                    .iter()
+                    .filter(|expected| {
+                        expected.location_id == destination.location_id
+                            && expected.root == destination.root
+                            && expected.kind == destination.kind
+                    })
+                    .count()
+                    != 1
+                    || destinations
+                        .iter()
+                        .filter(|other| other.location_id == destination.location_id)
+                        .count()
+                        != 1
+                    || (destination.verified_at.is_none()
+                        && (!backup_pending
+                            || destination.kind != "backup"
+                            || destination.last_error.is_none()))
+            })
+            || (backup_pending
+                && (destinations.len() != 2
+                    || destinations
+                        .iter()
+                        .filter(|destination| destination.verified_at.is_some())
+                        .count()
+                        != 1
+                    || !destinations.iter().any(|destination| {
+                        destination.kind == "main" && destination.verified_at.is_some()
+                    })))
+        {
+            return Err(Error::Conflict(
+                "generated publication state or destinations differ".into(),
+            ));
+        }
+        let index = RELEASES
+            .iter()
+            .position(|id| *id == plan.plan.edition.release_id)
+            .ok_or(Error::Internal("generated release is missing"))?;
         let mut files = Vec::new();
-        for destination in &destinations {
+        for destination in destinations {
             if destination.verified_at.is_none() {
                 continue;
             }
@@ -233,64 +335,38 @@ impl Fixture {
             if std::fs::read(folder.join("folder.jpg"))? != cover.bytes() {
                 return Err(Error::Conflict("folder JPEG differs from approval".into()));
             }
-            for output in &plan.plan.outputs {
+            let mut expected_files = plan
+                .plan
+                .outputs
+                .iter()
+                .map(|output| output.filename.clone())
+                .collect::<Vec<_>>();
+            expected_files.push("folder.jpg".into());
+            expected_files.sort();
+            let mut actual_files = std::fs::read_dir(&folder)?
+                .map(|entry| {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_file() {
+                        return Err(Error::Conflict(
+                            "unexpected generated output directory".into(),
+                        ));
+                    }
+                    entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| Error::Conflict("non-UTF8 generated filename".into()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            actual_files.sort();
+            if actual_files != expected_files {
+                return Err(Error::Conflict("generated album file set differs".into()));
+            }
+            for (track, output) in plan.plan.outputs.iter().enumerate() {
                 let relative = format!("{}/{}", output.relative_folder, output.filename);
                 let path = PathBuf::from(&destination.root)
                     .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
                 let bytes = std::fs::read(&path)?;
-                let after = domus::infrastructure::mp3::inspect_mp3_320(&mut Cursor::new(&bytes))?;
-                let tag = id3::Tag::read_from2(Cursor::new(&bytes))
-                    .map_err(|_| Error::Internal("independent generated tag read failed"))?;
-                let index = RELEASES
-                    .iter()
-                    .position(|id| *id == plan.plan.edition.release_id)
-                    .ok_or(Error::Internal("generated release is missing"))?;
-                let text = tag
-                    .extended_texts()
-                    .map(|text| (text.description.as_str(), text.value.as_str()))
-                    .collect::<BTreeMap<_, _>>();
-                for (name, expected) in [
-                    ("DATE", "2026-01-02".to_owned()),
-                    ("MusicBrainz Album Id", RELEASES[index].to_owned()),
-                    (
-                        "MusicBrainz Release Group Id",
-                        format!("30000000-0000-4000-8000-{:012}", index + 1),
-                    ),
-                    (
-                        "MusicBrainz Release Track Id",
-                        format!("40000000-0000-4000-8000-{:012}", index + 1),
-                    ),
-                    ("MusicBrainz Artist Id", ARTIST.to_owned()),
-                    ("MusicBrainz Album Artist Id", ARTIST.to_owned()),
-                ] {
-                    if text.get(name).copied() != Some(expected.as_str()) {
-                        return Err(Error::Conflict(format!(
-                            "generated output tag differs: {name}"
-                        )));
-                    }
-                }
-                let recording = format!("50000000-0000-4000-8000-{:012}", index + 1);
-                if before.mpeg_sha256 != after.mpeg_sha256
-                    || tag.title() != Some("Generated Track")
-                    || tag.album() != Some(plan.plan.edition.album.as_str())
-                    || tag.album_artist() != Some("Browser Artist")
-                    || tag.track() != Some(1)
-                    || tag.artist() != Some("Browser Artist")
-                    || tag.total_tracks() != Some(1)
-                    || tag.disc() != Some(1)
-                    || tag.total_discs() != Some(1)
-                    || tag
-                        .unique_file_identifiers()
-                        .find(|frame| frame.owner_identifier == "http://musicbrainz.org")
-                        .map(|frame| frame.identifier.as_slice())
-                        != Some(recording.as_bytes())
-                    || tag.pictures().next().map(|picture| picture.data.as_slice())
-                        != Some(cover.bytes())
-                {
-                    return Err(Error::Conflict(
-                        "independent generated output verification failed".into(),
-                    ));
-                }
+                self.verify_audio(&bytes, index, track, cover.bytes())?;
                 files.push(relative);
             }
         }
@@ -300,8 +376,135 @@ impl Fixture {
             ));
         }
         Ok(
-            json!({"files":files,"destinations":destinations,"audio_unchanged":true,"tags_verified":true,"exact_jpeg":true}),
+            json!({"files":files,"destinations":destinations,"state":state,"audio_unchanged":true,"tags_verified":true,"exact_jpeg":true}),
         )
+    }
+
+    fn verify_audio(&self, bytes: &[u8], album: usize, track: usize, cover: &[u8]) -> Result<()> {
+        use id3::TagLike;
+        let tracks = fixture_tracks(self.multi_disc);
+        let (disc, original_track, title) = tracks[track];
+        let id = if self.multi_disc {
+            album * 3 + track + 1
+        } else {
+            album + 1
+        };
+        let album_title = format!("Browser Album {}", album + 1);
+        let group = format!("30000000-0000-4000-8000-{:012}", album + 1);
+        let release_track = format!("40000000-0000-4000-8000-{id:012}");
+        let recording = format!("50000000-0000-4000-8000-{id:012}");
+        let discs = if self.multi_disc { 2 } else { 1 };
+        match self.format {
+            AudioFormat::Mp3 => {
+                let before =
+                    domus::infrastructure::mp3::inspect_mp3_320(&mut Cursor::new(&self.source))?;
+                let after = domus::infrastructure::mp3::inspect_mp3_320(&mut Cursor::new(bytes))?;
+                let tag = id3::Tag::read_from2(Cursor::new(bytes))
+                    .map_err(|_| Error::Internal("independent generated ID3 read failed"))?;
+                let text = tag
+                    .extended_texts()
+                    .map(|text| (text.description.as_str(), text.value.as_str()))
+                    .collect::<BTreeMap<_, _>>();
+                for (name, expected) in [
+                    ("DATE", "2026-01-02".to_owned()),
+                    ("ORIGINALTRACKNUMBER", original_track.to_string()),
+                    ("MusicBrainz Album Id", RELEASES[album].to_owned()),
+                    ("MusicBrainz Release Group Id", group),
+                    ("MusicBrainz Release Track Id", release_track),
+                    ("MusicBrainz Artist Id", ARTIST.to_owned()),
+                    ("MusicBrainz Album Artist Id", ARTIST.to_owned()),
+                ] {
+                    if text.get(name).copied() != Some(expected.as_str()) {
+                        return Err(Error::Conflict(format!(
+                            "generated ID3 tag differs: {name}"
+                        )));
+                    }
+                }
+                let pictures = tag.pictures().collect::<Vec<_>>();
+                if self.source[before.mpeg_range.start as usize..before.mpeg_range.end as usize]
+                    != bytes[after.mpeg_range.start as usize..after.mpeg_range.end as usize]
+                    || tag.version() != id3::Version::Id3v23
+                    || tag.title() != Some(title)
+                    || tag.album() != Some(album_title.as_str())
+                    || tag.album_artist() != Some("Browser Artist")
+                    || tag.artist() != Some("Browser Artist")
+                    || tag.track() != Some(track as u32 + 1)
+                    || tag.total_tracks() != Some(tracks.len() as u32)
+                    || tag.disc() != Some(u32::from(disc))
+                    || tag.total_discs() != Some(discs)
+                    || tag.year() != Some(2026)
+                    || tag.get("TDAT").and_then(|frame| frame.content().text()) != Some("0201")
+                    || tag.genre().is_some()
+                    || tag.get("COMM").is_some()
+                    || text.contains_key("REPLAYGAIN_TRACK_GAIN")
+                    || tag
+                        .unique_file_identifiers()
+                        .find(|frame| frame.owner_identifier == "http://musicbrainz.org")
+                        .map(|frame| frame.identifier.as_slice())
+                        != Some(recording.as_bytes())
+                    || pictures.len() != 1
+                    || pictures[0].data != cover
+                    || pictures[0].mime_type != "image/jpeg"
+                    || pictures[0].picture_type != id3::frame::PictureType::CoverFront
+                {
+                    return Err(Error::Conflict(
+                        "independent generated MP3 verification failed".into(),
+                    ));
+                }
+            }
+            AudioFormat::Flac => {
+                let before =
+                    domus::infrastructure::flac::inspect_flac(&mut Cursor::new(&self.source))?;
+                let after = domus::infrastructure::flac::inspect_flac(&mut Cursor::new(bytes))?;
+                let tag = metaflac::Tag::read_from(&mut Cursor::new(bytes))
+                    .map_err(|_| Error::Internal("independent generated FLAC tag read failed"))?;
+                for (name, expected) in [
+                    ("TITLE", title.to_owned()),
+                    ("ALBUM", album_title),
+                    ("ARTIST", "Browser Artist".to_owned()),
+                    ("ALBUMARTIST", "Browser Artist".to_owned()),
+                    ("TRACKNUMBER", (track + 1).to_string()),
+                    ("TRACKTOTAL", tracks.len().to_string()),
+                    ("DISCNUMBER", disc.to_string()),
+                    ("DISCTOTAL", discs.to_string()),
+                    ("ORIGINALTRACKNUMBER", original_track.to_string()),
+                    ("DATE", "2026-01-02".to_owned()),
+                    ("MUSICBRAINZ_ALBUMID", RELEASES[album].to_owned()),
+                    ("MUSICBRAINZ_RELEASEGROUPID", group),
+                    ("MUSICBRAINZ_RELEASETRACKID", release_track),
+                    ("MUSICBRAINZ_TRACKID", recording),
+                    ("MUSICBRAINZ_ARTISTID", ARTIST.to_owned()),
+                    ("MUSICBRAINZ_ALBUMARTISTID", ARTIST.to_owned()),
+                ] {
+                    if tag
+                        .get_vorbis(name)
+                        .map(|values| values.collect::<Vec<_>>())
+                        != Some(vec![expected.as_str()])
+                    {
+                        return Err(Error::Conflict(format!(
+                            "generated FLAC tag differs: {name}"
+                        )));
+                    }
+                }
+                let pictures = tag.pictures().collect::<Vec<_>>();
+                if before.stream_info != after.stream_info
+                    || !after.md5_verified
+                    || self.source[before.audio_range.start as usize..]
+                        != bytes[after.audio_range.start as usize..]
+                    || tag.blocks().count() != 3
+                    || tag.get_vorbis("COMMENT").is_some()
+                    || pictures.len() != 1
+                    || pictures[0].data != cover
+                    || pictures[0].mime_type != "image/jpeg"
+                    || pictures[0].picture_type != metaflac::block::PictureType::CoverFront
+                {
+                    return Err(Error::Conflict(
+                        "independent generated FLAC verification failed".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn configuration_command(&self, body: &[u8]) -> Result<ConfigurationSectionCommand> {
@@ -364,17 +567,31 @@ impl Fixture {
         )?;
         let command = method == Method::POST || method == Method::PUT;
         if path == "/__fixture/reset" && command {
-            std::mem::replace(self, Self::new()?).dispose()?;
+            let options = if body.is_empty() {
+                FixtureOptions::default()
+            } else {
+                decode::<FixtureOptions>(body)?
+            };
+            std::mem::replace(self, Self::with_audio(options.format, options.multi_disc)?)
+                .dispose()?;
             return empty();
         }
         if path == "/__fixture/cover" && !command {
             return Ok(([(header::CONTENT_TYPE, "image/png")], self.cover.clone()).into_response());
         }
         if path == "/__fixture/listing" && !command {
+            let extension = match self.format {
+                AudioFormat::Mp3 => "mp3",
+                AudioFormat::Flac => "flac",
+            };
+            let files = fixture_tracks(self.multi_disc).iter().enumerate().map(|(track, (_, _, title))| json!({
+                "remote_path":format!("Generated\\{:02} {title}.{extension}",track+1),"expected_bytes":self.source.len(),
+                "extension":extension,"bitrate_kbps":if self.format == AudioFormat::Mp3 { Some(320) } else { None },
+                "vbr":false,"duration_seconds":null,"sample_rate":44100,"bit_depth":if self.format == AudioFormat::Flac { Some(16) } else { None }
+            })).collect::<Vec<_>>();
             return json_response(json!({
                 "peer":"generated-peer","folder":"Generated","directories":1,
-                "files":[{"remote_path":"Generated\\01 Generated Track.mp3","expected_bytes":self.source.len(),
-                    "extension":"mp3","bitrate_kbps":320,"vbr":false,"duration_seconds":null,"sample_rate":44100,"bit_depth":null}]
+                "files":files
             }));
         }
         if path == "/__fixture/read-only" && command {
@@ -616,7 +833,12 @@ impl Fixture {
                 )?);
             }
             ["__fixture", "verify", job, version] if !command => {
-                return json_response(self.verify(parse(job)?, parse(version)?)?);
+                let pending = match query.get("backup_pending").map(String::as_str) {
+                    None | Some("false") => false,
+                    Some("true") => true,
+                    _ => return Err(Error::InvalidInput("invalid backup_pending flag".into())),
+                };
+                return json_response(self.verify(parse(job)?, parse(version)?, pending)?);
             }
             ["__fixture", "existing", job, version] if command => {
                 let plan = self.store.plan(parse(job)?, parse(version)?)?;
@@ -844,6 +1066,20 @@ struct FixtureSettings {
     expected_version: Option<i64>,
     settings: OutputSettings,
 }
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FixtureOptions {
+    format: AudioFormat,
+    multi_disc: bool,
+}
+impl Default for FixtureOptions {
+    fn default() -> Self {
+        Self {
+            format: AudioFormat::Mp3,
+            multi_disc: false,
+        }
+    }
+}
 fn integer(query: &BTreeMap<String, String>, name: &str, default: i64) -> Result<i64> {
     query.get(name).map_or(Ok(default), |value| parse(value))
 }
@@ -956,6 +1192,192 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_reset_preserves_empty_body_and_rejects_invalid_options() -> Result<()> {
+        let mut fixture = Fixture::new()?;
+        fixture.store.enqueue(1)?;
+        fixture.dispatch(&Method::POST, "/__fixture/reset", &BTreeMap::new(), &[])?;
+        assert!(fixture.store.jobs(Page::new(0, 25)?)?.is_empty());
+        for body in [
+            br#"{"format":"wav"}"#.as_slice(),
+            br#"{"root":"existing-library"}"#.as_slice(),
+        ] {
+            assert!(
+                fixture
+                    .dispatch(&Method::POST, "/__fixture/reset", &BTreeMap::new(), body)
+                    .is_err()
+            );
+        }
+        fixture.dispose()
+    }
+
+    async fn published_fixture(
+        format: AudioFormat,
+        backup: bool,
+        offline: bool,
+    ) -> Result<Fixture> {
+        let mut fixture = Fixture::with_audio(format, true)?;
+        let job = fixture.store.enqueue(1)?;
+        let settings = fixture
+            .store
+            .settings()?
+            .ok_or(Error::Internal("generated settings missing"))?;
+        let request = decode(&serde_json::to_vec(&json!({
+            "job_id":job,"expected_version":1,"settings_version":settings.version,
+            "format":format,"audio_profile":null,"locations":if backup { vec![1,2] } else { vec![1] },
+            "accepts_incomplete_coverage":false,"bucket":null
+        }))?)?;
+        let (request, catalog) = fixture.plan_request(RELEASES[0], request)?;
+        let plan = fixture.store.prepare_catalog_plan(request, catalog)?;
+        fixture.store.approve_plan(job, plan.version)?;
+        let listing =
+            fixture.dispatch(&Method::GET, "/__fixture/listing", &BTreeMap::new(), &[])?;
+        let listing = to_bytes(listing.into_body(), 1_048_576)
+            .await
+            .map_err(|_| Error::Internal("generated listing read failed"))?;
+        let source =
+            fixture
+                .store
+                .prepare_source_candidate(job, plan.version, decode(&listing)?)?;
+        fixture.store.approve_source_candidate(
+            source.id,
+            plan.version,
+            &source.review_sha256,
+            true,
+        )?;
+        let artwork = fixture.store.prepare_uploaded_artwork_or_ask(
+            job,
+            plan.version,
+            &fixture.cover,
+            None,
+            true,
+        )?;
+        fixture
+            .store
+            .approve_artwork(job, plan.version, artwork.id, &artwork.sha256)?;
+        if offline {
+            fixture.dispatch(
+                &Method::POST,
+                "/__fixture/backup",
+                &BTreeMap::new(),
+                br#"{"offline":true}"#,
+            )?;
+        }
+        fixture.run(job, plan.version, source.id)?;
+        Ok(fixture)
+    }
+
+    #[tokio::test]
+    async fn generated_verifier_rejects_missing_extra_and_changed_outputs() -> Result<()> {
+        for format in [AudioFormat::Mp3, AudioFormat::Flac] {
+            let fixture = published_fixture(format, false, false).await?;
+            assert_eq!(
+                fixture.verify(1, 2, false)?["files"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(3)
+            );
+            let plan = fixture.store.plan(1, 2)?;
+            let output = &plan.plan.outputs[0];
+            let folder = fixture.root.path().join("main").join(
+                output
+                    .relative_folder
+                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+            );
+            let path = folder.join(&output.filename);
+            let original = std::fs::read(&path)?;
+            std::fs::remove_file(&path)?;
+            assert!(fixture.verify(1, 2, false).is_err());
+            std::fs::write(&path, &original)?;
+            let extra = folder.join("unexpected.txt");
+            std::fs::write(&extra, b"generated extra output")?;
+            assert!(fixture.verify(1, 2, false).is_err());
+            std::fs::remove_file(&extra)?;
+            let mut changed = original.clone();
+            match format {
+                AudioFormat::Mp3 => {
+                    let audio =
+                        domus::infrastructure::mp3::inspect_mp3_320(&mut Cursor::new(&changed))?;
+                    changed
+                        .drain(audio.mpeg_range.end as usize - 1044..audio.mpeg_range.end as usize);
+                    domus::infrastructure::mp3::inspect_mp3_320(&mut Cursor::new(&changed))?;
+                }
+                AudioFormat::Flac => {
+                    changed.pop();
+                }
+            }
+            std::fs::write(&path, &changed)?;
+            assert!(fixture.verify(1, 2, false).is_err());
+            std::fs::write(&path, &original)?;
+            let mut release =
+                CatalogQuery::release(RELEASES[0])?.parse_release(&release_body(0, true)?)?;
+            release.media[0].tracks[0].title = "Changed generated title".into();
+            let tags = release.track_tags(1)?;
+            let cover = fixture.store.approved_artwork(1, 2)?;
+            let mut changed_tags = Cursor::new(Vec::new());
+            domus::infrastructure::media::normalize_audio(
+                &mut Cursor::new(&fixture.source),
+                &mut changed_tags,
+                format,
+                &tags,
+                &cover,
+            )?;
+            std::fs::write(&path, changed_tags.into_inner())?;
+            assert!(fixture.verify(1, 2, false).is_err());
+            std::fs::write(&path, &original)?;
+            let jpeg = folder.join("folder.jpg");
+            let approved = std::fs::read(&jpeg)?;
+            std::fs::write(&jpeg, b"not the approved JPEG")?;
+            assert!(fixture.verify(1, 2, false).is_err());
+            std::fs::write(&jpeg, &approved)?;
+            fixture.verify(1, 2, false)?;
+            fixture.dispose()?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generated_verifier_requires_every_exact_destination() -> Result<()> {
+        let fixture = published_fixture(AudioFormat::Flac, true, false).await?;
+        let evidence = fixture.verify(1, 2, false)?;
+        assert_eq!(evidence["files"].as_array().map(Vec::len), Some(6));
+        let mut destinations = fixture.store.publication_destinations(1, 2)?;
+        destinations[1].verified_at = None;
+        destinations[1].last_error = Some("generated pending".into());
+        assert!(
+            fixture
+                .verify_publication(1, 2, false, &destinations)
+                .is_err()
+        );
+        assert!(
+            fixture
+                .verify_publication(1, 2, true, &destinations)
+                .is_err()
+        );
+        fixture.dispose()?;
+        let fixture = published_fixture(AudioFormat::Flac, true, true).await?;
+        assert_eq!(
+            fixture.verify(1, 2, true)?["files"]
+                .as_array()
+                .map(Vec::len),
+            Some(3)
+        );
+        let mut destinations = fixture.store.publication_destinations(1, 2)?;
+        destinations[1].location_id = 99;
+        assert!(
+            fixture
+                .verify_publication(1, 2, true, &destinations)
+                .is_err()
+        );
+        destinations.pop();
+        assert!(
+            fixture
+                .verify_publication(1, 2, true, &destinations)
+                .is_err()
+        );
+        fixture.dispose()
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1080,7 +1502,7 @@ mod tests {
         assert_eq!(state.active.origin, ORIGIN);
         assert_eq!(state.active_revision, state.saved_revision);
         assert!(!state.restart_required);
-        assert!(fixture.verify(1, 2).is_err());
+        assert!(fixture.verify(1, 2, false).is_err());
         assert!(
             fixture
                 .dispatch(&Method::GET, "/unsupported", &BTreeMap::new(), &[])
