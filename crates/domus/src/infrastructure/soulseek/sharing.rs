@@ -794,6 +794,7 @@ fn serve_peer(
     let result = (|| {
         if let Some((token, query)) = initial_search {
             search(&context, &channel, token, &query)?;
+            activity = Instant::now();
         }
         while !context.stop.load(Ordering::Acquire) {
             context.check_generation(generation)?;
@@ -1501,6 +1502,148 @@ mod tests {
         Ok((socket, listener.accept()?.0))
     }
 
+    fn generated_test_password() -> String {
+        format!("fixture-{}", std::process::id())
+    }
+
+    #[test]
+    fn sharing_initial_search_processing_is_not_idle_but_keeps_operation_limit() -> TestResult {
+        use super::super::protocol::{read_frame, send};
+        for operation_seconds in [1, 5] {
+            let password = generated_test_password();
+            let server_password = password.clone();
+            let directory = crate::infrastructure::permissions::private_fixture::tempdir()?;
+            let database = directory.path().join("state.sqlite");
+            let _store = crate::infrastructure::store::Store::open(&database)?;
+            let (client, mut server) = pair()?;
+            server.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let (finish, finished) = mpsc::sync_channel(1);
+            let account_server = std::thread::spawn(move || -> Result<()> {
+                assert_eq!(
+                    read_frame(|bytes| {
+                        server.read_exact(bytes)?;
+                        Ok(())
+                    })?
+                    .0,
+                    1
+                );
+                let mut reply = vec![1];
+                string(&mut reply, "generated fixture");
+                reply.extend_from_slice(&0u32.to_le_bytes());
+                string(
+                    &mut reply,
+                    &super::super::md5(&[server_password.as_bytes()]),
+                );
+                reply.push(0);
+                send(&mut server, 1, &reply)?;
+                finished
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|_| Error::Remote("sharing fixture did not finish"))?;
+                Ok(())
+            });
+            let session = SoulseekSession::login(client, "generated-user", &password)?;
+            let account = Arc::new(Account {
+                session: Mutex::new(session),
+                configuration: SharingAccount {
+                    credentials_file: directory.path().join("unused.json"),
+                    server: "127.0.0.1:2234".parse()?,
+                    acknowledge_plaintext_login: true,
+                },
+                database: database.clone(),
+                username: "generated-user".into(),
+                _lock: ProcessLock::acquire(&database, "test-account")?,
+                reconnect: Mutex::new(super::super::ReconnectBudget::default()),
+                advertisement: Mutex::new((0, 0, None)),
+            });
+            let policy = SharePolicy {
+                limits: ShareLimits {
+                    idle_seconds: 1,
+                    operation_seconds,
+                    ..ShareLimits::default()
+                },
+                ..SharePolicy::default()
+            };
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let context = Arc::new(Context {
+                account,
+                catalog: Mutex::new(ShareCatalog::build(&database, &policy, stop.clone())?),
+                policy,
+                stop,
+                queue: Mutex::new(Queue {
+                    waiting: VecDeque::new(),
+                    active: BTreeSet::new(),
+                    last_peer: None,
+                }),
+                pending: Mutex::new(BTreeMap::new()),
+                peers: Mutex::new(BTreeMap::new()),
+                handshakes: AtomicUsize::new(0),
+                browses: AtomicUsize::new(0),
+                can_receive: false,
+                searches: Mutex::new(BTreeMap::new()),
+            });
+            let (socket, mut remote) = pair()?;
+            remote.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let channel = context.account.peer_channel(socket, "fixture-peer")?;
+            let catalog = context.catalog.lock().map_err(|_| "catalog poisoned")?;
+            let serving = context.clone();
+            let address = "127.0.0.1:2234".parse()?;
+            let peer = std::thread::spawn(move || {
+                serve_peer(
+                    serving,
+                    "fixture-peer".into(),
+                    address,
+                    channel,
+                    Some((73, "generated".into())),
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !context
+                .searches
+                .lock()
+                .map_err(|_| "search routes poisoned")?
+                .contains_key("fixture-peer")
+            {
+                if Instant::now() >= deadline {
+                    return Err("initial search did not start".into());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // Hold actual catalog work beyond idle admission, with no large dataset.
+            std::thread::sleep(Duration::from_secs(2));
+            send(&mut remote, 4, &[])?;
+            drop(catalog);
+            let reply = read_frame(|bytes| {
+                remote.read_exact(bytes)?;
+                Ok(())
+            });
+            let result = peer.join().map_err(|_| "sharing peer panicked")?;
+            finish.send(())?;
+            account_server
+                .join()
+                .map_err(|_| "account server panicked")??;
+            if operation_seconds == 1 {
+                assert!(reply.is_err());
+                assert!(
+                    matches!(
+                        result,
+                        Err(Error::Remote("sharing peer time limit exceeded"))
+                    ),
+                    "{result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(Error::Remote("sharing peer idle time limit exceeded"))
+                    ),
+                    "{result:?}"
+                );
+                assert_eq!(reply?.0, 5);
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn sharing_disabled_starts_no_listener_database_or_account() -> TestResult {
         let directory = tempfile::tempdir()?;
@@ -1527,6 +1670,8 @@ mod tests {
     #[test]
     fn sharing_session_forks_reuse_one_authenticated_account_connection() -> TestResult {
         use super::super::protocol::{read_frame, send};
+        let password = generated_test_password();
+        let server_password = password.clone();
         let (client, mut server) = pair()?;
         server.set_read_timeout(Some(Duration::from_secs(5)))?;
         let (finish, finished) = mpsc::sync_channel(1);
@@ -1543,7 +1688,10 @@ mod tests {
                 let mut reply = vec![1];
                 string(&mut reply, "generated fixture");
                 reply.extend_from_slice(&0u32.to_le_bytes());
-                string(&mut reply, &super::super::md5(&[b"generated-only"]));
+                string(
+                    &mut reply,
+                    &super::super::md5(&[server_password.as_bytes()]),
+                );
                 reply.push(0);
                 send(&mut server, 1, &reply)?;
                 for code in [28, 35, 100] {
@@ -1585,7 +1733,7 @@ mod tests {
             };
             run().map_err(|error| error.to_string())
         });
-        let mut owner = SoulseekSession::login(client, "generated-user", "generated-only")?;
+        let mut owner = SoulseekSession::login(client, "generated-user", &password)?;
         owner
             .stream
             .as_ref()

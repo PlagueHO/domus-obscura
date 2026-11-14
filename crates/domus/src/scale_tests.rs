@@ -326,6 +326,10 @@ fn create_link(root: &Path) -> std::io::Result<()> {
 }
 
 fn prepare(command: &Command) -> TestResult<Value> {
+    prepare_with_audio(command, command.profile == "azure_full")
+}
+
+fn prepare_with_audio(command: &Command, full_transfer: bool) -> TestResult<Value> {
     let (count, limit) = admit(command)?;
     validate_root(&command.root)?;
     let address = match command.api_address {
@@ -345,7 +349,7 @@ fn prepare(command: &Command) -> TestResult<Value> {
     let (mp3, flac, jpeg) = tagged_media()?;
     let large = command
         .integrated
-        .then(|| integrated::audio(&mp3, command.profile == "azure_full"));
+        .then(|| integrated::audio(&mp3, full_transfer));
     let mut manifest = new_file(&command.root.join("fixtures.jsonl"))?;
     for index in 0..count {
         let shard = format!("media/catalog/shard-{:08}", index / 64);
@@ -1217,12 +1221,26 @@ mod tests {
 
     #[test]
     fn scale_integrated_generated_workload_process() -> TestResult {
+        integrated_workload_process(false)
+    }
+
+    #[test]
+    #[ignore = "bounded full-transfer check: cargo task test scale_integrated_full_transfer_workload_process -- --ignored"]
+    fn scale_integrated_full_transfer_workload_process() -> TestResult {
+        integrated_workload_process(true)
+    }
+
+    fn integrated_workload_process(full_transfer: bool) -> TestResult {
         let directory = directory()?;
         let stdout = new_file(&directory.path().join("child.log"))?;
         let mut child = std::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
-                "scale_tests::tests::scale_integrated_child",
+                if full_transfer {
+                    "scale_tests::tests::scale_integrated_full_transfer_child"
+                } else {
+                    "scale_tests::tests::scale_integrated_child"
+                },
                 "--ignored",
                 "--nocapture",
                 "--test-threads=1",
@@ -1230,7 +1248,7 @@ mod tests {
             .stdout(stdout.try_clone()?)
             .stderr(stdout)
             .spawn()?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(300);
+        let deadline = std::time::Instant::now() + Duration::from_secs(360);
         loop {
             if let Some(status) = child.try_wait()? {
                 if !status.success() {
@@ -1258,12 +1276,22 @@ mod tests {
     #[test]
     #[ignore = "isolated functional integration; called by scale_integrated_generated_workload_process"]
     fn scale_integrated_child() -> TestResult {
+        integrated_child(false)
+    }
+
+    #[test]
+    #[ignore = "bounded full-transfer regression; called by scale_integrated_full_transfer_workload_process"]
+    fn scale_integrated_full_transfer_child() -> TestResult {
+        integrated_child(true)
+    }
+
+    fn integrated_child(full_transfer: bool) -> TestResult {
         let directory = directory()?;
         let root = directory.path().join("run");
         let mut c = command(&root)?;
         c.api_address = None;
         c.integrated = true;
-        prepare(&c)?;
+        prepare_with_audio(&c, full_transfer)?;
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let socket = TcpStream::connect(listener.local_addr()?)?;
         let (control, _) = listener.accept()?;
@@ -1296,7 +1324,12 @@ mod tests {
         let channel = Channel(Arc::new(Mutex::new(socket)));
         let driver_root = root.clone();
         let driver = std::thread::spawn(move || {
-            integrated::exercise(&driver_root, &channel).map_err(|e| e.to_string())
+            if full_transfer {
+                integrated::exercise_with_budget(&driver_root, &channel, Duration::from_secs(300))
+            } else {
+                integrated::exercise(&driver_root, &channel)
+            }
+            .map_err(|e| e.to_string())
         });
         for expected in ["scan_admitted", "acquisition_admitted", "integration_ready"] {
             assert_eq!(line(&mut driver_control)?["event"], expected);
