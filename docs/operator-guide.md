@@ -27,6 +27,8 @@ Keep local results separate from CI results. Record the exact source revision or
 package manifest for each result. Package hashes detect changes; they do not
 authenticate the publisher. Distribution review remains
 [#26](https://github.com/PlagueHO/domus-obscura/issues/26).
+The [V1 acceptance matrix](v1-acceptance.md) records generated workflow checks
+and the separate missing or deferred delivery gates.
 
 ## Prepare and install for foreground use
 
