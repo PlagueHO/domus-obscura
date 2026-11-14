@@ -33,8 +33,56 @@ results for the exact tested source revision before changing a row to passed.
 ## Execution record
 
 Planning started at `a1316f1843ca84ba7394d9cde1b61ffb122fba61`.
-Local and remote results for new acceptance changes are **not yet recorded**.
-Earlier CI or a passing source inspection is not current-revision evidence.
+The implementation is committed locally as
+`4b7eaee3a922a7ec44a4387a57d5e1d6febd2d82`. The final local checks below used
+that clean revision. The later acceptance-record update changes documentation
+only; it is not a new application-behavior result.
+
+| Local Windows check         | Result                                                                                                                                                     |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.\dev.ps1 check`           | Passed: contract check, rustfmt, denied-warning Clippy, 757 Rust tests including both harnesses, Prettier, frontend types, and 266 frontend tests.         |
+| `.\dev.ps1 build`           | Passed: frontend builds and locked Rust application build.                                                                                                 |
+| `.\dev.ps1 smoke`           | Passed: `Domus Obscura 0.1.0`.                                                                                                                             |
+| `.\dev.ps1 browser`         | Passed: 37 desktop/narrow checks, zero unexpected or flaky outcomes, and three expected project-specific layout skips.                                     |
+| Browser fixture regressions | All seven passed, including missing/extra files, changed audio/tags/JPEG, incomplete destinations, empty reset compatibility, and invalid fixture options. |
+
+Environment: Windows x86_64, OS build `10.0.26100`; Rust `1.99.1`, Node
+`v26.12.1`, pnpm `12.15.0`, and existing Chrome `157.0.8103.79`.
+The browser used one worker, desktop `1440x1000`, and narrow `390x844` with
+reduced motion. Complete-album fixtures contain three silent generated tracks
+across two discs. They test main-only publication and main-plus-backup
+publication with an unavailable backup and explicit continuation.
+
+The browser report records source revision `4b7eaee3a922a7ec44a4387a57d5e1d6febd2d82`
+and `dirty=false`. Its SHA-256 is
+`6a5010134a94a159eab0290cf0ec8a9072943fe929e117099c7427436937f2a6`.
+The report and four command logs are retained in the session's artifact storage.
+The normal ignored report remains `frontend/test-results/browser-results.json`.
+CI uses the [built-in JSON reporter](https://playwright.dev/docs/test-reporters#json-reporter)
+and retains success/failure evidence under `browser-results-{OS}-{SHA}`.
+
+The full check also reported **21 ignored Rust entry points**. Private child
+entry points run only through their owning parent checks. Operator volume
+cases, the service exporter, the separate full-transfer workload, and six
+million-record scale cases were not independently run by this command. Index
+and query behavior did not change, so no new scale run was required. Preserve
+the separate historical scale and recovery evidence rather than marking these
+ignored entries passed.
+
+**Current-revision native Linux and remote CI evidence remains unverified.**
+The implementation has not been pushed, and no PR was created. No remote run
+was started for this commit. Do not infer Linux success from local Windows.
+
+The starting revision's
+[Windows check/build job](https://github.com/PlagueHO/domus-obscura/actions/runs/43628385423/job/132549293402)
+and
+[Ubuntu 24.04 check/build job](https://github.com/PlagueHO/domus-obscura/actions/runs/43628385423/job/132549293406)
+passed. Its separate
+[Windows million-record job](https://github.com/PlagueHO/domus-obscura/actions/runs/43628385423/job/132549293366)
+and
+[Linux million-record job](https://github.com/PlagueHO/domus-obscura/actions/runs/43628385423/job/132549293180)
+also passed. These are historical results at `a1316f1843ca84ba7394d9cde1b61ffb122fba61`,
+not evidence for the new browser cases.
 
 Use the pinned tools and the normal launcher:
 
@@ -65,8 +113,11 @@ Record failed, interrupted, skipped, and unavailable checks explicitly.
 
 ## Remaining delivery gates
 
-This snapshot records issue states observed during planning. Refresh the states
-and relevant comments/artifacts before the final acceptance decision.
+The issue states were checked again during this work. Tracker #1 now marks
+closed implementation issues #3 through #16 and #19 through #23. Its legend
+states that issue closure is not independent acceptance evidence. It preserves
+the open and deferred gates and the future-work exclusions. Refresh states and
+relevant comments/artifacts before any later final acceptance decision.
 
 | Gate                            | State                                                                          | Required treatment                                                                                       |
 | ------------------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
