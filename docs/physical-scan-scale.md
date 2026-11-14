@@ -63,6 +63,11 @@ python3 scripts/physical-scale-tests.py
 cargo task scale-physical
 ```
 
+The Windows million-record run passed all six ignored tests on 2026-11-14.
+These indexed-database checks are separate from physical traversal and memory
+evidence. CI run `43388175418` also passed the Windows and Linux million-record
+jobs on the base revision; it does not validate the later dirty worktree.
+
 The task builds an optimized private test host. It must not enable private
 transports in ordinary binaries. Keep fixture generation, protocol peers, the
 controller and compilation outside the measured API and worker.
@@ -236,6 +241,34 @@ private absolute paths. Then use `.\dev.ps1 scale-physical-full` on Windows or
 revision and frozen baseline. Export evidence before deleting the exact
 task-owned resources. Verify deletion explicitly.
 
+The controller requires Git in its source working directory. Include Git in the
+guest-tool approval. A source archive alone does not provide Git metadata.
+Transfer verified metadata from the actual base revision with the frozen source
+files. Retain the source hashes and actual dirty-worktree status. Do not invent
+a revision or replace the source-identity check with a successful default.
+
+Preserve empty directories when archiving Git metadata, including `.git/refs`.
+Packed references can leave this required directory empty. A files-only archive
+can fail with `fatal: not in a git directory`. Test extraction into a fresh
+directory with real Git. Check `git fsck --full`, the base revision, the actual
+dirty status and every frozen source-file hash before guest execution.
+
+An approved Windows guest can use a separately verified optimized test host
+without installing Rust or MSVC. Run the unchanged controller from the source
+working directory. Keep the approved Python and Git tools on its process path.
+Verify the executable hash before execution. This remains private test-build
+evidence, not an installed-service result.
+
+```powershell
+python scripts\physical-scale.py run --test-host '<verified-test-host>' --profile full --output '<fresh-private-evidence-directory>' --manifest '<frozen-private-inventory>' --admission '<approved-private-admission>'
+```
+
+Successful full-profile reports retain `status: evidence_collected`,
+`memory.verdict: passed_profile_only` and `full_size_acceptance: false`.
+The `full` profile identifies the admitted generated file target. It does not
+convert a private test host into production acceptance. Check the actual report
+fields and raw samples instead of requiring an invented success value.
+
 ## Acceptance status
 
 The read-only baseline completed without enumeration errors. It observed
@@ -252,13 +285,325 @@ The frozen aggregate manifest has SHA-256
 `028b8541103de8b2cf1ab5ee3456e2d8b99b017d1b9ea60c60273f4eb14f1c27`.
 The manifest is private session evidence. It is not a filesystem snapshot.
 
-Full-size Windows/Linux physical traversal and combined active-workload memory
-acceptance remain open until both native result sets exist. Keep local, CI and
-Azure results separate. A fixture, a test command or a small-profile pass is not
-full-size evidence.
+The original manifest could not be recovered. A new, separately authorized
+read-only inventory completed without errors. It observed the same 34,872 regular
+files and 3,139 directories. The generated target remains 69,744 files per system.
+The replacement manifest has SHA-256
+`f9edb74debf96426adc060bb7132aecdf9738cf7c1ae03f583d1761d137b7139`.
+It is a new baseline, not a recovered copy of the original manifest. Use this
+replacement for separately approved new runs. Preserve the original hash and
+past result sets unchanged.
+
+The approved 69,744-file generated profile completed on both native systems.
+The Linux raw-sample audit measured a **53,585,639-byte** active-window mean and
+a **73,011,200-byte** conservative peak bound. The Windows raw-sample audit
+measured a **50,036,992-byte** active-window mean and a **66,539,520-byte**
+conservative peak bound. Both bounds are below **536,870,912 bytes**. The full
+run details and evidence hashes are recorded below.
+
+The per-process `integrated` and `peers` child records set
+`integration.integrated_transfer_sharing: false` and
+`integration.scan_transfer_overlap: false`. These child-record flags are
+placeholders; the child processes do not independently verify the combined
+result. The outer physical-scale controller checks peer download and upload
+bytes, the expected listing count, peer errors, download/upload overlap, and
+scan/download overlap. It also checks final scan coverage, denial, recovery and
+memory. Independent checks of both saved Azure reports confirm these aggregate
+gates passed. Do not treat the child placeholders as a profile failure.
+
+A fresh Windows small-profile run on 2026-11-14 also passed the outer
+controller checks for scan/download overlap, peer transfers and listing,
+download/upload overlap, and verified publication. An independent audit
+recomputed its 1,269 native memory samples: the active-window mean was
+**33,676,244 bytes**, and the conservative peak bound was **36,864,000 bytes**.
+This confirms the controller's aggregate checks on a 4,000-file fixture. It
+does not replace either full Azure profile. Raw-sample SHA-256:
+`d8c1e50f82409c197c1a3e849f108d12fd5a1b3c2e20e093b5e97d754caf49df`.
+Report SHA-256:
+`2d8ff94509fd479f9fbe170689c4d00bca17b07f8ec9a8b0c59e7e28ecc475d3`.
+
+The generated target is below the more-than-500,000-file product context. It
+does not prove that broader scale, full source audio-byte scale, SMB,
+live-provider behavior or installed-service acceptance. Keep local, CI and
+Azure results separate.
 
 If a threshold fails, retain the failed value and workload. Identify required
 changes. Run changes as a new profile result instead of rewriting the original.
+
+## Slow initial-search regression
+
+The first sharing search previously started the peer idle clock before catalog
+work and did not reset it when that work finished. If catalog work exceeded the
+idle interval, the worker could close the peer before it handled a pending
+request. A bounded local test reproduced `failed to fill whole buffer` on the
+generated peer. Successful initial search processing now resets the idle clock.
+The total operation deadline still includes that processing time. No production
+timeout, buffer, slot or connection limit changed.
+
+The regression holds the real catalog mutex with fresh local SQLite state and
+an account-owned loopback peer. It checks a request after slow processing, actual
+idle expiry, and the unchanged total operation limit.
+
+```powershell
+.\dev.ps1 test --lib sharing_initial_search_processing_is_not_idle_but_keeps_operation_limit
+.\dev.ps1 test --lib scale_integrated_full_transfer_workload_process '--' --ignored
+```
+
+```sh
+cargo task test --lib sharing_initial_search_processing_is_not_idle_but_keeps_operation_limit
+cargo task test --lib scale_integrated_full_transfer_workload_process -- --ignored
+```
+
+The separate full-transfer regression uses 128 initial generated files with the
+full profile's 1,024-frame transfer payload. It uses a bounded private test-driver
+deadline, not full-profile admission. It does not generate 69,744 workstation
+files, measure process memory or prove full-size traversal. The ordinary small
+profile and Azure admission checks remain unchanged.
+
+The prior Azure run's exact timing is not established by this local reproduction.
+Keep its failed result unchanged. A new full run still needs separate resource
+approval and must pass every physical, recovery, transfer and memory gate.
+
+### Corrected local Windows evidence
+
+Run `corrected-small-windows` passed on Windows 11 build 26100. It used 4,000
+initial generated files and an optimized private test host from local, uncommitted
+changes based on `8af719cdb99095069942f8192f43b673d315c3fb`.
+
+| Measurement                          | Bytes      | MiB   |
+| ------------------------------------ | ---------- | ----- |
+| Steady combined resident-memory mean | 33,829,788 | 32.26 |
+| Maximum sampled combined memory      | 35,995,648 | 34.33 |
+| Conservative lifetime peak bound     | 36,626,432 | 34.93 |
+| Maximum observed generated storage   | 72,659,568 | 69.29 |
+
+The collector retained 1,699 paired samples. Its maximum collection gap was
+0.189 seconds. The verified active window ran from elapsed seconds 25.101
+through 56.082. The verdict was `passed_profile_only`, not full-size acceptance.
+The test-host SHA-256 was
+`8fa82ea4f2a827d1a3affeda8ea674b4d38f153d67bf934f2d88d50b91df3f74`.
+The unchanged controller SHA-256 was
+`8e93485f59338025ccffc8b7c8167e55a899abd57fde177027a4f50055b79257`.
+
+Initial and repeat scans completed. The final metadata counts were 3,250 tagged
+files, 250 assets, 250 malformed files and 250 unsupported files. One unsafe link
+was excluded. A native Windows file lock produced the additional unreadable
+diagnostic. The unavailable-root check preserved cached presence and incomplete
+coverage before restoration and explicit retry.
+
+Graceful and forced recovery completed the same durable scans, IDs 13 and 14.
+Each checkpoint had two completed directories and unfinished work. Stale batch
+and finish operations were rejected. Forced recovery waited for actual lease
+expiry. All 4,003 generated input files passed length, hash and modification-time
+verification. The fixture was removed.
+
+One account login carried 401,352 downloaded bytes and 133,784 uploaded bytes.
+Scan/download and download/upload overlap passed. Three normalization receipts,
+the approved JPEG and four published files were verified. The complete listing
+contained 3,751 files in 65 folders. It ran after publication, not concurrently
+with publication. The provider cache held one 1,664-byte body. Connection cache
+occupancy and separate spool high-water use remain unmeasured.
+
+The focused slow-search regression, opt-in full-transfer regression,
+`.\dev.ps1 scale`, and `.\dev.ps1 check` passed locally. The full-transfer
+regression used 128 files and did not collect memory evidence. The build used
+`CARGO_BUILD_JOBS=2` after an initial default-concurrency build failed with
+`Allocation failed`. This changes build scheduling, not runtime lane limits.
+
+Native CI at the unchanged base revision passed its Windows/Linux small physical
+jobs and million-record jobs in
+[run 43388175418](https://github.com/PlagueHO/domus-obscura/actions/runs/43388175418).
+That result does not verify these uncommitted changes on Linux. No corrected
+full-size Azure run, installed-service result, commit or push is implied.
+Retain the new private `report.json` and `samples.ndjson` separately from the
+earlier local and failed Azure evidence.
+
+## Incomplete replacement Azure Windows run
+
+The separately approved replacement Windows run on 2026-11-14 reached its
+command deadline. Linux did not start because Windows did not pass.
+This is failed, incomplete evidence, not a full-profile memory result.
+
+The corrected Git metadata archive passed guest reconstruction. The guest
+verified every frozen payload and source-file hash. The native slow-search
+regression passed. The controller tests passed with three expected skips.
+The unchanged controller used the 69,744-file target and the same optimized
+Windows host and controller hashes as the corrected local result.
+
+Windows admission used a shorter 55-minute command deadline measured before
+VM creation. Guest setup consumed part of that allowance. The managed guest
+command ran from 00:34:02 UTC to 01:22:59 UTC. The physical controller was stopped
+after its remaining command allowance of approximately
+2,884.5 seconds. Its preparation, integrated-workload, repeat-scan and initial
+verification child logs recorded successful exits. The last retained memory
+sample was in the `faults` phase. The fault checks and both recovery checks did
+not finish. There is no controller `report.json`. The retained evidence does not
+establish why the fault phase took this long.
+
+An independent audit checked 20,639 sequential raw memory samples. Their maximum
+sampled combined resident memory was **65,585,152 bytes**. This is a partial
+observed value only. The exact active-window mean, complete process identities
+and conservative lifetime peak bound are not verified. A sampled value below
+512 MiB does not prove that this failed profile passed.
+
+The raw sample SHA-256 is
+`6a915511a7987763167a11a16cd15b8a9d2b069248d60b09abe9d273f68c62c3`.
+The private failure-evidence ZIP SHA-256 is
+`b38d74104df399eacb9aa056c13822a3251eb1e266bacd77d1bc04d64876976a`.
+Keep the ZIP, raw samples, child logs, guest failure and independent partial
+audit unchanged. Do not replace them with a synthesized successful report.
+
+### Local timeout investigation
+
+The retained child logs show that the full run reached the Windows file-lock
+denial check. The controller started the lock process and then the exercise
+process, but it did not retain a result from that exercise. The next controller
+steps, including the unavailable-root and recovery checks, did not run.
+
+The controller's `scan` exercise performs two complete scans before it returns.
+The lock denial check uses this action while the file remains locked. A separate
+scan runs after the lock is released. The Azure fault phase lasted about
+**1,523 seconds**. This points to the locked-file scan workload as the timeout
+location, but does not establish whether the delay came from scanning, the
+locked-file path, or another interaction on the Azure host.
+
+A fresh local small profile passed all checks with 4,000 initial files. Its
+fault phase took about **52 seconds**. The two scans under the lock took about
+**11 seconds**; the separate post-lock scan took about **13 seconds**. This
+confirms that the local small profile completes the same sequence. It does not
+explain the much longer full Azure duration or prove that one scan would pass
+within a new cloud deadline. Do not treat this local timing as full-profile
+evidence.
+
+The scheduled canary deletion passed before VM creation. Cleanup deleted all
+four approved groups, with the control group last. Direct ARM reads returned
+HTTP 404 for every group by 01:30:43 UTC. This run created one replacement
+Windows VM and no Linux VM. The prior failed Windows VM remains in the attempt
+history. Resource metrics can lag, so final billing is not verified.
+
+This replacement attempt remains incomplete. Its partial samples are not a
+pass. The later Linux-only run and corrected Windows-only retry below had
+separate approvals. Preserve this failed attempt unchanged.
+
+## Separately approved Linux-only run
+
+The first Linux-only attempt stopped before VM creation. Its inherited
+Windows-group absence check conflicted with the approved setup, which recreated
+all four named groups. The Windows VM absence check had passed. The runner then
+incorrectly rejected the still-empty Windows group. Cleanup deleted all four
+groups, and direct ARM reads returned HTTP 404 by 05:04:54 UTC. No Linux VM was
+created in that attempt.
+
+The user approved one corrected Linux-only retry. The runner now checks that no
+Windows VM exists without requiring the approved Windows resource group to be
+absent. The corrected boundary tests passed before resource creation. The
+absolute deadline remained 08:39:03 UTC. The existing cost ceiling and all
+other limits remained unchanged. No Windows VM was created during this retry.
+
+The scheduled canary deletion passed before the Linux VM was admitted. The
+Linux VM started at 05:25:11 UTC. Its managed guest command ran from 05:28:49
+to 06:06:48 UTC and exited successfully. The independent guest report gates
+passed. The generated full profile contained **69,744 initial files** and
+verified **69,747 files** after the three separate transfer inputs. Final scan
+coverage was complete. Graceful and forced recovery resumed their original scan
+IDs. Stale batch and finish claims were rejected. The generated unreadable-file
+fixture proved actual OS denial. Scan/download and download/upload overlap
+passed. One account login listed **65,386 files**.
+
+An independent audit recomputed the Linux memory statistics from all **10,217**
+raw samples. The active window contained **2,394** samples. Its mean combined
+resident memory was **53,585,639 bytes** and its maximum was **54,435,840 bytes**.
+The maximum paired combined sample was **56,872,960 bytes**. The conservative
+sum of the API and worker lifetime peaks was **73,011,200 bytes**, below the
+**536,870,912-byte** profile threshold. The collector's maximum gap was **0.860
+seconds**; the independent active-window gap was **0.314 seconds**. The
+controller reported `passed_profile_only`. The report retains
+`full_size_acceptance: false`, as required.
+
+| Linux evidence       | SHA-256                                                            |
+| -------------------- | ------------------------------------------------------------------ |
+| Raw memory samples   | `16865331a5259ca20f8c9f557f860efbf30d4ce32680ff013329c10f29fea63c` |
+| Full-profile report  | `c24fa8ec2200c76736b245f68fae3fbcaca149199d63c9367363fb7638845aac` |
+| Private evidence ZIP | `01697b680c6cc62ff249542b43fa5a13817fe78b4f13f7f9ccd6b2fb6601abf2` |
+
+The run used the replacement baseline
+`f9edb74debf96426adc060bb7132aecdf9738cf7c1ae03f583d1761d137b7139` and the
+unchanged controller
+`8e93485f59338025ccffc8b7c8167e55a899abd57fde177027a4f50055b79257`. The
+measured optimized Linux test host SHA-256 is
+`0ddaff7088cd1ea3d962bcd9e22456758d1ef496f1c866fe81f6a52a5419c320`.
+
+The Linux workload group returned direct ARM HTTP 404 at 06:07:55 UTC. Cleanup
+then deleted the other three approved groups. Direct ARM reads returned HTTP
+404 for all four by 06:10:25 UTC. Billing can lag, so final billed cost is not
+verified.
+
+The Linux full-profile run completed its physical scan, recovery, peer-transfer
+and raw-memory checks. Its child records retain false placeholders, while the
+outer controller verified the actual peer bytes, listing count, transfer
+overlap and scan/download overlap. The Windows result is recorded below.
+
+## Corrected Windows-only retry
+
+Two Windows-only launches stopped before creating a Windows VM. The first
+omitted a Windows-only state transition and retained an incorrect expiry. The
+second selected the historical Linux-only profile. Both launches stopped
+before adding a Windows VM intent. Reconciliation verified cleanup; each of the
+four Azure resource groups returned direct ARM HTTP 404. The approval state and
+deadline were preserved before the separately approved corrected retry.
+
+The corrected Windows-only retry used the replacement manifest
+`f9edb74debf96426adc060bb7132aecdf9738cf7c1ae03f583d1761d137b7139` and the
+same optimized controller used for the Linux run with a Windows-specific
+optimized test host.
+The scheduled canary was deleted before VM admission. The Windows guest command
+exited with code 0. Its report verified **69,744 initial files** and **69,747
+final files**, complete final scan coverage, actual OS denial, graceful and
+forced recovery of their original scan IDs, stale batch and finish rejection,
+and an unavailable-root failure that retained incomplete coverage.
+
+The account-owned peer evidence records one login, **3,207,624 downloaded
+bytes**, **1,069,208 uploaded bytes**, **65,386 listed files**, and
+download/upload overlap. The profile also records scan/download overlap.
+Generated run storage peaked at **1,254,355,576 bytes**, below the approved
+**8,589,934,592-byte** bound.
+
+An independent audit recomputed the Windows memory values from all **11,996**
+native samples. The active window contained **2,391** samples. Its mean
+combined resident memory was **50,036,992 bytes**, and its maximum was
+**53,039,104 bytes**. The maximum paired combined sample was **66,289,664
+bytes**. The conservative sum of API and worker lifetime peaks was
+**66,539,520 bytes**, below the **536,870,912-byte** profile threshold. The
+largest active-window sample gap was **0.233 seconds**. The report retains
+`memory.verdict: passed_profile_only` and `full_size_acceptance: false`.
+
+The controller SHA-256 was
+`8e93485f59338025ccffc8b7c8167e55a899abd57fde177027a4f50055b79257`. The
+Windows test-host SHA-256 was
+`8fa82ea4f2a827d1a3affeda8ea674b4d38f153d67bf934f2d88d50b91df3f74`.
+
+The integrated and peer child records retain false placeholders because neither
+child independently verifies the aggregate result. The outer controller
+verified peer bytes, listing count, download/upload overlap, and scan/download
+overlap. Independent checks of both saved Azure reports confirm those aggregate
+gates passed. The false child flags do not mean the profile failed.
+
+| Windows evidence     | SHA-256                                                            |
+| -------------------- | ------------------------------------------------------------------ |
+| Raw memory samples   | `8099b0068d5d3b9a0b3cda015eb35c0c5cbe4725643b974551148aba096b77c2` |
+| Full-profile report  | `a2b1784632afb9113f55bac4ef12c0064fbd46452f158dddc369e0b28742a298` |
+| Private evidence ZIP | `7e8b1b439b0f15265c67ef4aae075dfb7d9519136af0cfaa8ef9748fc544ac50` |
+
+The Windows workload group returned direct ARM HTTP 404. Cleanup then deleted
+the other three approved groups. Direct ARM reads returned HTTP 404 for all
+four by 08:18:29 UTC. The cost query returned HTTP 429, and the usage fallback
+had no matching records. This is not proof of zero cost; final billing is not
+verified. Do not start another infrastructure run under the consumed approval.
+
+The acceptance checks for the selected generated profile passed on both native
+systems. All six Windows million-record tests also passed. The generated target
+does not prove the product's more-than-500,000-file context, full source
+audio-byte scale, SMB, live-provider behavior or installed-service acceptance.
 
 ## Native references
 

@@ -317,6 +317,19 @@ fn publication_evidence(root: &Path, album: &Album) -> Result<Value> {
 }
 
 pub(super) fn exercise(root: &Path, channel: &Channel) -> TestResult<Value> {
+    let budget = Duration::from_secs(if load_fixture(root)?.profile == "azure_full" {
+        1800
+    } else {
+        180
+    });
+    exercise_with_budget(root, channel, budget)
+}
+
+pub(super) fn exercise_with_budget(
+    root: &Path,
+    channel: &Channel,
+    budget: Duration,
+) -> TestResult<Value> {
     let fixture = load_fixture(root)?;
     if !fixture.integrated {
         return Err("fixture was not prepared for integration".into());
@@ -333,7 +346,7 @@ pub(super) fn exercise(root: &Path, channel: &Channel) -> TestResult<Value> {
         let (scan_result,reads)=wait_scan(&client,&fixture,fixture.location_id,scan).await?;
         require_completed_scan(&scan_result)?;
         channel.send(&json!({"event":"integration_ready","scan_completed":true,"scan_state":scan_result["state"],"scan_request_id":scan}))?;
-        let deadline=tokio::time::Instant::now()+Duration::from_secs(if fixture.profile=="azure_full" {1800} else {180});
+        let deadline=tokio::time::Instant::now()+budget;
         let mut browse_requests=reads;
         loop {
             let jobs=http_json(client.get(format!("{}/api/jobs?limit=16",fixture.origin)),200).await?;
