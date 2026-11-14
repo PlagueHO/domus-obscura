@@ -1502,10 +1502,16 @@ mod tests {
         Ok((socket, listener.accept()?.0))
     }
 
+    fn generated_test_password() -> String {
+        format!("fixture-{}", std::process::id())
+    }
+
     #[test]
     fn sharing_initial_search_processing_is_not_idle_but_keeps_operation_limit() -> TestResult {
         use super::super::protocol::{read_frame, send};
         for operation_seconds in [1, 5] {
+            let password = generated_test_password();
+            let server_password = password.clone();
             let directory = crate::infrastructure::permissions::private_fixture::tempdir()?;
             let database = directory.path().join("state.sqlite");
             let _store = crate::infrastructure::store::Store::open(&database)?;
@@ -1524,7 +1530,10 @@ mod tests {
                 let mut reply = vec![1];
                 string(&mut reply, "generated fixture");
                 reply.extend_from_slice(&0u32.to_le_bytes());
-                string(&mut reply, &super::super::md5(&[b"generated-only"]));
+                string(
+                    &mut reply,
+                    &super::super::md5(&[server_password.as_bytes()]),
+                );
                 reply.push(0);
                 send(&mut server, 1, &reply)?;
                 finished
@@ -1532,7 +1541,7 @@ mod tests {
                     .map_err(|_| Error::Remote("sharing fixture did not finish"))?;
                 Ok(())
             });
-            let session = SoulseekSession::login(client, "generated-user", "generated-only")?;
+            let session = SoulseekSession::login(client, "generated-user", &password)?;
             let account = Arc::new(Account {
                 session: Mutex::new(session),
                 configuration: SharingAccount {
@@ -1661,6 +1670,8 @@ mod tests {
     #[test]
     fn sharing_session_forks_reuse_one_authenticated_account_connection() -> TestResult {
         use super::super::protocol::{read_frame, send};
+        let password = generated_test_password();
+        let server_password = password.clone();
         let (client, mut server) = pair()?;
         server.set_read_timeout(Some(Duration::from_secs(5)))?;
         let (finish, finished) = mpsc::sync_channel(1);
@@ -1677,7 +1688,10 @@ mod tests {
                 let mut reply = vec![1];
                 string(&mut reply, "generated fixture");
                 reply.extend_from_slice(&0u32.to_le_bytes());
-                string(&mut reply, &super::super::md5(&[b"generated-only"]));
+                string(
+                    &mut reply,
+                    &super::super::md5(&[server_password.as_bytes()]),
+                );
                 reply.push(0);
                 send(&mut server, 1, &reply)?;
                 for code in [28, 35, 100] {
@@ -1719,7 +1733,7 @@ mod tests {
             };
             run().map_err(|error| error.to_string())
         });
-        let mut owner = SoulseekSession::login(client, "generated-user", "generated-only")?;
+        let mut owner = SoulseekSession::login(client, "generated-user", &password)?;
         owner
             .stream
             .as_ref()
