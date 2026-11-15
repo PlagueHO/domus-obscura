@@ -230,13 +230,72 @@ struct PendingFile {
     generation: u64,
 }
 
+fn reserve_file(
+    routes: &Mutex<BTreeMap<u32, Arc<PendingFile>>>,
+    pending: Arc<PendingFile>,
+    mut random: impl FnMut() -> Result<u32>,
+) -> Result<u32> {
+    let mut routes = routes
+        .lock()
+        .map_err(|_| Error::Internal("sharing file routes poisoned"))?;
+    for _ in 0..32 {
+        let token = random()?;
+        if token != 0
+            && let std::collections::btree_map::Entry::Vacant(entry) = routes.entry(token)
+        {
+            entry.insert(pending);
+            return Ok(token);
+        }
+    }
+    Err(Error::Conflict(
+        "Soulseek sharing connection token reservation exhausted".into(),
+    ))
+}
+
+fn claim_file(
+    routes: &Mutex<BTreeMap<u32, Arc<PendingFile>>>,
+    token: u32,
+    address: std::net::IpAddr,
+    policy: &SharePolicy,
+    check_generation: impl FnOnce(u64) -> Result<()>,
+) -> Result<Arc<PendingFile>> {
+    let pending = routes
+        .lock()
+        .map_err(|_| Error::Internal("sharing file routes poisoned"))?
+        .remove(&token)
+        .ok_or(Error::Remote("unknown sharing file connection token"))?;
+    if address != std::net::IpAddr::V4(*pending.address.ip()) || !policy.allows(&pending.peer) {
+        return Err(Error::Remote("sharing file connection peer changed"));
+    }
+    check_generation(pending.generation)?;
+    Ok(pending)
+}
+
+fn release_file(
+    routes: &Mutex<BTreeMap<u32, Arc<PendingFile>>>,
+    token: u32,
+    pending: &Arc<PendingFile>,
+) -> Result<()> {
+    let mut routes = routes
+        .lock()
+        .map_err(|_| Error::Internal("sharing file routes poisoned"))?;
+    // A consumed route can be reused before the original upload finishes.
+    if routes
+        .get(&token)
+        .is_some_and(|route| Arc::ptr_eq(route, pending))
+    {
+        routes.remove(&token);
+    }
+    Ok(())
+}
+
 struct Context {
     account: Arc<Account>,
     policy: SharePolicy,
     catalog: Mutex<ShareCatalog>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     queue: Mutex<Queue>,
-    pending: Mutex<BTreeMap<u32, PendingFile>>,
+    pending: Mutex<BTreeMap<u32, Arc<PendingFile>>>,
     peers: Mutex<BTreeMap<String, u32>>,
     handshakes: AtomicUsize,
     browses: AtomicUsize,
@@ -627,18 +686,13 @@ fn accept_peer(context: Arc<Context>, mut socket: TcpStream) -> Result<()> {
         0 => {
             let token = fields.u32()?;
             fields.end()?;
-            let pending = context
-                .pending
-                .lock()
-                .map_err(|_| Error::Internal("sharing file route poisoned"))?
-                .remove(&token)
-                .ok_or(Error::Remote("unknown sharing file connection token"))?;
-            if socket.peer_addr()?.ip() != std::net::IpAddr::V4(*pending.address.ip())
-                || !context.policy.allows(&pending.peer)
-            {
-                return Err(Error::Remote("sharing file connection peer changed"));
-            }
-            context.check_generation(pending.generation)?;
+            let pending = claim_file(
+                &context.pending,
+                token,
+                socket.peer_addr()?.ip(),
+                &context.policy,
+                |generation| context.check_generation(generation),
+            )?;
             pending
                 .sent
                 .try_send(Ok(socket))
@@ -990,21 +1044,22 @@ fn upload(
             if !context.can_receive {
                 return Err(Error::SoulseekTransport(error));
             }
-            let connection = self::token()?;
             let (sent, received) = mpsc::sync_channel(1);
-            context
-                .pending
-                .lock()
-                .map_err(|_| Error::Internal("sharing file routes poisoned"))?
-                .insert(
-                    connection,
-                    PendingFile {
-                        peer: peer.into(),
-                        address,
-                        sent,
-                        generation,
-                    },
-                );
+            let pending = Arc::new(PendingFile {
+                peer: peer.into(),
+                address,
+                sent,
+                generation,
+            });
+            let reservation = Arc::downgrade(&pending);
+            let connection = reserve_file(&context.pending, pending, || {
+                let mut bytes = [0; 4];
+                rustls::crypto::ring::default_provider()
+                    .secure_random
+                    .fill(&mut bytes)
+                    .map_err(|_| Error::Internal("sharing connection randomness failed"))?;
+                Ok(u32::from_le_bytes(bytes))
+            })?;
             let result = (|| {
                 let mut body = connection.to_le_bytes().to_vec();
                 string(&mut body, peer);
@@ -1014,11 +1069,9 @@ fn upload(
                     .recv_timeout(IO_TIMEOUT)
                     .map_err(|_| Error::Remote("sharing reverse file setup expired"))
             })();
-            context
-                .pending
-                .lock()
-                .map_err(|_| Error::Internal("sharing file routes poisoned"))?
-                .remove(&connection);
+            if let Some(pending) = reservation.upgrade() {
+                release_file(&context.pending, connection, &pending)?;
+            }
             result??
         }
     };
@@ -1475,6 +1528,216 @@ fn search(context: &Context, channel: &Channel, token: u32, query: &str) -> Resu
 mod tests {
     use super::*;
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    fn pending_file(generation: u64) -> Arc<PendingFile> {
+        let (sent, _) = mpsc::sync_channel(1);
+        Arc::new(PendingFile {
+            peer: "fixture-peer".into(),
+            address: SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 2234),
+            sent,
+            generation,
+        })
+    }
+
+    fn sharing_policy() -> SharePolicy {
+        SharePolicy {
+            access: ShareAccess::Allowlist,
+            allowlist: vec!["fixture-peer".into()],
+            ..SharePolicy::default()
+        }
+    }
+
+    #[test]
+    fn sharing_reverse_tokens_retry_collisions_without_replacing_live_routes() -> Result<()> {
+        let routes = Mutex::new(BTreeMap::new());
+        let first = pending_file(1);
+        let second = pending_file(1);
+        reserve_file(&routes, first.clone(), || Ok(73))?;
+        let mut values = [0, 73, 91].into_iter();
+        assert_eq!(
+            reserve_file(&routes, second.clone(), || {
+                values
+                    .next()
+                    .ok_or(Error::Internal("fixture random sequence exhausted"))
+            })?,
+            91
+        );
+        let routes = routes
+            .lock()
+            .map_err(|_| Error::Internal("fixture routes poisoned"))?;
+        assert_eq!(routes.len(), 2);
+        assert!(Arc::ptr_eq(&routes[&73], &first));
+        assert!(Arc::ptr_eq(&routes[&91], &second));
+        Ok(())
+    }
+
+    #[test]
+    fn sharing_reverse_tokens_fail_closed_on_randomness_failure_or_exhaustion() -> Result<()> {
+        let routes = Mutex::new(BTreeMap::new());
+        let first = pending_file(1);
+        reserve_file(&routes, first.clone(), || Ok(73))?;
+        assert!(matches!(
+            reserve_file(&routes, pending_file(1), || {
+                Err(Error::Internal("injected randomness failure"))
+            }),
+            Err(Error::Internal("injected randomness failure"))
+        ));
+        let mut calls = 0;
+        assert!(matches!(
+            reserve_file(&routes, pending_file(1), || {
+                calls += 1;
+                Ok(73)
+            }),
+            Err(Error::Conflict(_))
+        ));
+        assert_eq!(calls, 32);
+        let routes = routes
+            .lock()
+            .map_err(|_| Error::Internal("fixture routes poisoned"))?;
+        assert_eq!(routes.len(), 1);
+        assert!(Arc::ptr_eq(&routes[&73], &first));
+        Ok(())
+    }
+
+    #[test]
+    fn sharing_reverse_tokens_reserve_concurrent_routes_without_overwrite() -> TestResult {
+        let routes = Arc::new(Mutex::new(BTreeMap::new()));
+        let start = Arc::new(std::sync::Barrier::new(8));
+        let mut tasks = Vec::new();
+        for index in 0..8u32 {
+            let routes = routes.clone();
+            let start = start.clone();
+            tasks.push(std::thread::spawn(move || {
+                let pending = pending_file(1);
+                let mut first = true;
+                start.wait();
+                let token = reserve_file(&routes, pending.clone(), || {
+                    if std::mem::take(&mut first) {
+                        Ok(73)
+                    } else {
+                        Ok(100 + index)
+                    }
+                })?;
+                Ok::<_, Error>((token, pending))
+            }));
+        }
+        let mut reserved = Vec::new();
+        for task in tasks {
+            reserved.push(task.join().map_err(|_| "reservation fixture panicked")??);
+        }
+        let routes = routes
+            .lock()
+            .map_err(|_| Error::Internal("fixture routes poisoned"))?;
+        assert_eq!(routes.len(), 8);
+        for (token, pending) in reserved {
+            assert!(Arc::ptr_eq(&routes[&token], &pending));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sharing_reverse_tokens_reject_same_ip_guesses_replay_and_changed_authority() -> Result<()> {
+        let routes = Mutex::new(BTreeMap::new());
+        let address = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let policy = sharing_policy();
+        let pending = pending_file(3);
+        reserve_file(&routes, pending.clone(), || Ok(91))?;
+        assert!(matches!(
+            claim_file(&routes, 1, address, &policy, |_| Ok(())),
+            Err(Error::Remote("unknown sharing file connection token"))
+        ));
+        let claimed = claim_file(&routes, 91, address, &policy, |generation| {
+            assert_eq!(generation, 3);
+            Ok(())
+        })?;
+        assert!(Arc::ptr_eq(&claimed, &pending));
+        assert!(matches!(
+            claim_file(&routes, 91, address, &policy, |_| Ok(())),
+            Err(Error::Remote("unknown sharing file connection token"))
+        ));
+        reserve_file(&routes, pending.clone(), || Ok(92))?;
+        assert!(matches!(
+            claim_file(&routes, 92, address, &policy, |_| {
+                Err(Error::Conflict("fixture generation changed".into()))
+            }),
+            Err(Error::Conflict(_))
+        ));
+        reserve_file(&routes, pending.clone(), || Ok(93))?;
+        assert!(matches!(
+            claim_file(&routes, 93, address, &SharePolicy::default(), |_| {
+                panic!("denied policy must not check generation")
+            }),
+            Err(Error::Remote("sharing file connection peer changed"))
+        ));
+        reserve_file(&routes, pending, || Ok(94))?;
+        assert!(matches!(
+            claim_file(
+                &routes,
+                94,
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+                &policy,
+                |_| panic!("changed address must not check generation"),
+            ),
+            Err(Error::Remote("sharing file connection peer changed"))
+        ));
+        assert!(
+            routes
+                .lock()
+                .map_err(|_| Error::Internal("fixture routes poisoned"))?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sharing_reverse_cleanup_preserves_reused_routes_and_releases_failed_setup() -> Result<()> {
+        let routes = Mutex::new(BTreeMap::new());
+        let old = pending_file(1);
+        reserve_file(&routes, old.clone(), || Ok(73))?;
+        claim_file(
+            &routes,
+            73,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            &sharing_policy(),
+            |_| Ok(()),
+        )?;
+        let new = pending_file(2);
+        reserve_file(&routes, new.clone(), || Ok(73))?;
+        release_file(&routes, 73, &old)?;
+        assert!(Arc::ptr_eq(
+            &routes
+                .lock()
+                .map_err(|_| Error::Internal("fixture routes poisoned"))?[&73],
+            &new
+        ));
+        release_file(&routes, 73, &new)?;
+        assert!(
+            routes
+                .lock()
+                .map_err(|_| Error::Internal("fixture routes poisoned"))?
+                .is_empty()
+        );
+        release_file(&routes, 73, &old)?;
+        let (sent, received) = mpsc::sync_channel(1);
+        let pending = Arc::new(PendingFile {
+            peer: "fixture-peer".into(),
+            address: SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 2234),
+            sent,
+            generation: 3,
+        });
+        let reservation = Arc::downgrade(&pending);
+        reserve_file(&routes, pending, || Ok(74))?;
+        routes
+            .lock()
+            .map_err(|_| Error::Internal("fixture routes poisoned"))?
+            .clear();
+        assert!(matches!(
+            received.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        assert!(reservation.upgrade().is_none());
+        Ok(())
+    }
 
     #[test]
     fn sharing_owner_error_is_propagated_after_join() {
