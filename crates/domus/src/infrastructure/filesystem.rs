@@ -237,3 +237,11 @@ impl LibraryDirectory {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "filesystem/boundary_prototype.rs"]
+mod boundary_prototype;
+
+#[cfg(test)]
+#[path = "filesystem/topology_prototype.rs"]
+mod topology_prototype;
