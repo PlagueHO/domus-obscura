@@ -8,7 +8,8 @@ separate media libraries. Primary and backup libraries can be local folders,
 network file shares, or other native filesystem locations. They are not limited
 to the application directory, its disk, or local storage.
 
-The seven decisions below are confirmed. Detailed configuration fields and
+The seven core decisions, SQLite temporary folder and state-bootstrap location below are
+confirmed. Detailed configuration fields and
 filesystem/mount acceptance still need implementation and verification.
 Application code, existing folders, and binding rules remain unchanged.
 This agreement does not authorize data deletion or changes to existing media.
@@ -39,6 +40,8 @@ directory. It is not a library folder.
     state.db
     state.db-wal                         when SQLite requires it
     state.db-shm                         when SQLite requires it
+    sqlite-tmp
+      <SQLite-owned temporary and query-spill files>
     <stable process lock files>
   cache
     owner.lock
@@ -110,6 +113,14 @@ system-wide administrator-controlled policy, not per-user settings.
 Do not copy those mutable settings, jobs, plans, approvals, or runtime state
 into this file.
 
+**Confirmed state-bootstrap exception:** The operator-approved expected native
+state-root binding belongs in `config.json`. It is startup trust information,
+not mutable application policy or a copy of SQLite records.
+Startup must verify this expectation before SQLite can create coordination files,
+recover or migrate. The provider scope and persistent identity format still need
+proof. A copied database or owner marker must not authorize a replacement root.
+Changing the binding requires explicit operator action and coordinated restart.
+
 Operator edits alone do not synchronize running processes. Each process can
 retain a different active snapshot after an edit or a partial restart.
 **Confirmed update procedure:** Stop the API and workers at safe
@@ -138,9 +149,16 @@ configuration update files.
 | First launch                   | Create a safe starter configuration once if none exists. Use loopback-only single-user access with external providers disabled. Never replace an existing file; invalid existing configuration fails explicitly.                      |
 | Incompatible development state | Breaking changes are allowed. Report incompatibility and offer explicit fresh setup. Migration is not required for disposable pre-production state. Never reset or delete automatically.                                              |
 | Initial Docker support         | Start with documented, verified layouts: one persistent application-storage mount shared by API and worker, plus separate media mounts. Admit private child-folder overrides only where their arrangement passes the required checks. |
+| SQLite temporary files         | Use a fixed private `sqlite-tmp` child beneath the selected state directory. It follows a state-directory override. Do not add an independent setting or use the OS temporary directory as a fallback.                                |
+| State bootstrap binding        | Keep the operator-approved expected native state-root binding in `config.json`, outside SQLite. Verify it before any creating, coordinating, recovering or migrating database open. Its durable provider scope remains a proof gate.  |
 
 These decisions close the earlier product questions. They do not fix the
 existing-code findings in the separate implementation compatibility review.
+
+The temporary-folder decision adds a location, not a new cleanup command.
+SQLite manages its own temporary files. Do not delete unknown files or uncertain
+outputs during startup. Temporary files are not a backup of durable state.
+The isolated TEMP/sort proof is recorded in [storage.md](storage.md).
 
 ## What the shared SQLite database contains
 
@@ -310,8 +328,46 @@ remain engineering work. The boundary-only design failed. A replacement using
 handle-correlated Linux mount evidence now passes a restricted same-ext4
 experiment, including the real hidden alias and a child bind-mount crossing.
 See the [replacement proof and limits](storage.md#replacement-proof).
-It does not prove network-share, different-filesystem, native Linux-host, or
-Windows-container support. Runtime integration still needs separate review.
+The native Windows experiment also passes a restricted same-volume NTFS check
+using retained handles and normalized volume GUID coordinates, with actual
+alias, junction and replacement fixtures. These experiments do not prove
+network-share, different-filesystem, native Linux-host, or Windows-container
+support. A separate Ubuntu 24.04 VM now passes the bounded SQLite and Rust
+ownership proof. That does not prove native Linux storage identity or backing
+support. The approved disposable SMB lab reproduced different volume serials
+for two exports of the same backing directory. After separate approval to load
+CIFS in Docker, actual retained client handles also reproduced changed native
+device identities across containers and recreation. Unknown remote layouts are
+rejected. Positive network admission still needs a stable identity and relationship
+witness. The [network candidate review](storage.md#network-identity-candidate-review)
+also rejects Samba's share-name object IDs and the reviewed Linux path-reopening
+query ioctl as generic witnesses. SMB normalized names do not supply common
+cross-export ancestry. These are source findings, not additional mounted
+acceptance. Runtime integration still needs separate review.
+
+The user has approved investigation of a
+[server-side metadata witness](storage.md#server-side-witness-design-candidate).
+The candidate requires evidence tied to the same retained remote and native open.
+It does not yet prove cross-provider separation or subsequent file-operation
+safety. Approval covers design, not installation, new services or runtime changes.
+The subsequent approved disposable-lab experiment now
+[matches retained SMB opens to full native identities](storage.md#measured-retained-smb-open-bridge),
+rejects replaced roots and invalid opens, and reads native filesystem UUIDs
+across server recreation. It does not yet provide an authenticated production
+witness or complete network admission.
+The separately approved
+[read-only native server hook](storage.md#measured-read-only-native-server-hook)
+now proves restricted parent-relative access and refusal during controlled
+parent/child replacement and an actual child mount crossing. It uses generated
+Linux/ext4 fixtures and a matching source-built Samba server only.
+The subsequent approved
+[authenticated witness experiment](storage.md#measured-authenticated-native-witness)
+verifies encrypted SMB and operator-pinned signatures over actual native
+identity, UUID, ancestry and relationships. It also verifies hidden aliases,
+changed-root refusal, expiry, restart, key rotation and missing-key refusal.
+This remains a fixed Linux/ext4 diagnostic. General NAS compatibility,
+cross-provider and client-local/remote separation, durable binding and production
+file operations remain open. No application binding behavior has changed.
 
 Backward compatibility with old configuration, CLI forms, or disposable test
 state is not required. Explicit fresh setup must leave old data and existing
