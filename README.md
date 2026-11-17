@@ -1582,6 +1582,29 @@ These commands save database bindings only. They do not change media or replace 
 
 Native IDs can be reused. This is not protection against cloned volumes or all mount/alias changes. Isolated Windows fixtures check reopen, rename, replacement, legacy upgrades, CLI binding and copied markers. Physical volume aliases, ReFS/SMB behavior, Linux execution and power-loss acceptance remain unverified. Dynamic root relocation needs a separate recovery design.
 
+The [application storage layout](docs/storage-layout.md) records the agreed
+private-directory model and separately configured local or network libraries.
+Its seven policy choices are confirmed; runtime implementation remains pending.
+The [shared storage contract and relationship experiments](docs/storage.md)
+records the proposed work for #68. A retained boundary alone fails separation
+across bind-mount aliases. A replacement using handle-correlated Linux mount
+evidence passes a restricted same-ext4 experiment. Native Windows also passes
+a restricted same-volume NTFS experiment using normalized handle coordinates.
+Both reject unknown layouts. An isolated Samba fixture also shows different
+reported volume serials for the same backing directory. Actual CIFS handles
+also show changed native device identities across containers and recreation.
+The unknown layouts are rejected; positive network binding admission remains open.
+An approved [read-only native Samba hook](docs/storage.md#measured-read-only-native-server-hook)
+also passes controlled parent/child replacement and actual child-mount refusal
+before and after server recreation. The approved
+[authenticated Samba witness](docs/storage.md#measured-authenticated-native-witness)
+also passes encrypted SMB, pinned signatures, full native ancestry, hidden
+aliases, root replacement, expiry, restart and key-rotation checks.
+General NAS support, cross-provider separation and production media operations
+remain unproved.
+This is not proof for arbitrary mounts or approval for production. Existing
+binding rules and commands remain unchanged.
+
 ## Local output plans
 
 Plan commands save and approve records only. They do not contact MusicBrainz or Soulseek. They do not download, create, or replace media. A plan approval is not permission to overwrite existing files.

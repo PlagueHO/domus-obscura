@@ -1,0 +1,71 @@
+--- a/sqlite3.c
++++ b/sqlite3.c
+@@ -40600,6 +40600,10 @@
+ /* Forward reference */
+ static int openDirectory(const char*, int*);
+ static int unixGetpagesize(void);
+ 
++#ifdef DOMUS_SQLITE_SOURCE_ADAPTER
++#include "storage-sqlite-native-io.h"
++#endif
++
+ /*
+ ** Many system calls are accessed through pointer-to-functions so that
+@@ -40614,9 +40618,17 @@
+ } aSyscall[] = {
+   { "open",         (sqlite3_syscall_ptr)posixOpen,  0  },
++#ifdef DOMUS_SQLITE_SOURCE_ADAPTER
++#define osOpen sqlite3_domus_native_open_v1
++#else
+ #define osOpen      ((int(*)(const char*,int,int))aSyscall[0].pCurrent)
++#endif
+ 
+   { "close",        (sqlite3_syscall_ptr)close,      0  },
++#ifdef DOMUS_SQLITE_SOURCE_ADAPTER
++#define osClose sqlite3_domus_native_close_v1
++#else
+ #define osClose     ((int(*)(int))aSyscall[1].pCurrent)
++#endif
+ 
+   { "access",       (sqlite3_syscall_ptr)access,     0  },
+ #define osAccess    ((int(*)(const char*,int))aSyscall[2].pCurrent)
+@@ -40733,6 +40745,10 @@
+   { "unlink",       (sqlite3_syscall_ptr)unlink,           0 },
++#ifdef DOMUS_SQLITE_SOURCE_ADAPTER
++#define osUnlink sqlite3_domus_native_unlink_v1
++#else
+ #define osUnlink    ((int(*)(const char*))aSyscall[16].pCurrent)
++#endif
+ 
+   { "openDirectory",    (sqlite3_syscall_ptr)openDirectory,      0 },
+ #define osOpenDirectory ((int(*)(const char*,int*))aSyscall[17].pCurrent)
+ 
+@@ -49284,6 +49300,10 @@
++#ifdef DOMUS_SQLITE_SOURCE_ADAPTER
++#include "storage-sqlite-native-io.h"
++#endif
++
+ static struct win_syscall {
+   const char *zName;            /* Name of the system call */
+   sqlite3_syscall_ptr pCurrent; /* Current value of the system call */
+   sqlite3_syscall_ptr pDefault; /* Default value */
+ } aSyscall[] = {
+ #if !SQLITE_OS_WINCE
+@@ -49316,3 +49336,7 @@
+ 
++#ifdef DOMUS_SQLITE_SOURCE_ADAPTER
++#define osCloseHandle sqlite3_domus_native_close_v1
++#else
+ #define osCloseHandle ((BOOL(WINAPI*)(HANDLE))aSyscall[3].pCurrent)
++#endif
+ 
+@@ -49334,5 +49358,9 @@
++#ifdef DOMUS_SQLITE_SOURCE_ADAPTER
++#define osCreateFileW sqlite3_domus_native_create_v1
++#else
+ #define osCreateFileW ((HANDLE(WINAPI*)(LPCWSTR,DWORD,DWORD, \
+         LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE))aSyscall[5].pCurrent)
++#endif
+ 
+ #if defined(SQLITE_WIN32_HAS_ANSI) && \
+         (!defined(SQLITE_OMIT_WAL) || SQLITE_MAX_MMAP_SIZE>0) && \

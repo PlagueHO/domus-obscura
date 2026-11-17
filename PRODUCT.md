@@ -27,6 +27,15 @@ Domus Obscura makes complete-album acquisition clear, safe, and recoverable. The
 
 Run the API and worker as separate Rust processes on the same Windows or Linux host. Keep shared SQLite state on local disk. Use manual installation and supervised services. Node.js is a build tool, not a production runtime.
 
+Keep private application storage separate from media libraries. Use one private
+application directory with overridable child folders as the default model.
+Primary and backup libraries can use local folders, network file shares, or
+other native filesystem locations. They are not restricted to the application
+directory or local disk. Existing media need not move. Filesystem identity,
+separation, approval, and recovery guarantees still apply. The
+[storage layout](docs/storage-layout.md) records the agreed model and the details
+that still need review.
+
 With no host configuration, start the real application in `single_user` mode
 over direct loopback HTTP. Use the fixed `_anonymous` identity. Azure, DNS, TLS
 and Entra are not setup requirements. Keep provider and worker services disabled
@@ -116,7 +125,17 @@ acceptance remain open.
 
 ## System Configuration Form
 
-The System configuration form views and updates supported backend JSON settings
+**Storage design requirement, not yet implemented:** The main host configuration
+file is operator-managed and read-only to application components. The current
+JSON save and API reload behavior described below must be reviewed against this
+requirement before the new storage design is implemented. Shared mutable output
+policy remains in SQLite. See the [storage proposal](docs/storage-layout.md#main-configuration-ownership)
+for the confirmed filename, defaults, coordinated restart, create-once setup,
+and explicit fresh-setup policy. Host/startup settings belong in `config.json`;
+shared administrator-controlled library policy remains in SQLite.
+These decisions do not change the current implementation described below.
+
+The current System configuration form views and updates supported backend JSON settings
 through typed controls.
 Artwork size, accepted audio formats, preferred formats, quality priorities,
 output templates and future tag rules are system-wide library policy, not
