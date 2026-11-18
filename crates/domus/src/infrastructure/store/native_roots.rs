@@ -164,6 +164,13 @@ fn require_saved(client: Option<&FilesystemClient>, kind: &str, saved: &SavedRoo
 }
 
 impl Store {
+    pub(crate) fn require_current_root_bindings(&self) -> Result<()> {
+        require_bound_roots(&self.connection)?;
+        inspect_saved_roots(&self.connection, |_, kind, saved| {
+            require_saved(self.filesystem.as_deref(), kind, saved)
+        })
+    }
+
     pub(super) fn prepare_root_binding(
         &self,
         directory: &LibraryDirectory,

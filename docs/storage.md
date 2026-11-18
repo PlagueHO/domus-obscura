@@ -276,6 +276,11 @@ this path. Credential checks do not need a SQL transaction. Browser loading uses
 the same bounded reader and no-follow directory iteration, with the separate
 non-media rule for installed assets.
 
+Selected service protection also validates the bounded SQL root inventory
+against the frozen selection. Native or stale saved root records remain an
+error, even when the input directory itself has a valid private role.
+This check does not reopen offline media or convert old root records.
+
 ### Inspecting an additional root
 
 Stop all state users before changing an operator selection. Create any required
