@@ -4,6 +4,8 @@ import argparse
 import base64
 import hashlib
 import http.client
+import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -11,14 +13,16 @@ import platform
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
-DATABASE = "/data/DomusObscura/state.db"
-CONFIGURATION = "/data/DomusObscura/service.json"
+APPLICATION = "/storage/application"
+CONFIGURATION = APPLICATION + "/config.json"
 REQUIRED_CHECKS = {
     "browser",
     "api-guards",
@@ -32,6 +36,8 @@ REQUIRED_CHECKS = {
     "mount-replacement",
     "root-overlap",
     "missing-source",
+    "health-bytes",
+    "overlay-isolation",
 }
 
 
@@ -53,17 +59,94 @@ def docker(*arguments, **options):
     return command(["docker", *arguments], **options)
 
 
+def archive_configuration_digest(path):
+    with tarfile.open(path) as archive:
+        for count, member in enumerate(archive):
+            if count >= 256:
+                raise ValueError("image archive has too many metadata entries")
+        def read(name):
+            member = archive.getmember(name)
+            if not member.isfile() or not 0 < member.size <= 1024 * 1024:
+                raise ValueError("invalid image configuration metadata")
+            with archive.extractfile(member) as source:
+                return source.read(1024 * 1024 + 1)
+
+        manifests = json.loads(read("manifest.json"))
+        if not isinstance(manifests, list) or len(manifests) != 1:
+            raise ValueError("one saved candidate image is required")
+        configuration = read(manifests[0]["Config"])
+        return "sha256:" + hashlib.sha256(configuration).hexdigest()
+
+
+def image_configuration_digest(image):
+    inspected = json.loads(docker("image", "inspect", image).stdout)[0]
+    if inspected["Size"] > 1024 * 1024 * 1024:
+        raise ValueError("runtime image exceeds the 1 GiB evidence limit")
+    (ROOT / "target").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="docker-image-", dir=ROOT / "target") as directory:
+        archive = Path(directory) / "candidate.tar"
+        docker("image", "save", "--output", str(archive), inspected["Id"], timeout=180)
+        return archive_configuration_digest(archive)
+
+
 def build(image):
     revision = command(["git", "rev-parse", "HEAD"]).stdout.strip()
     dirty = bool(command(["git", "status", "--porcelain"]).stdout.strip())
-    subprocess.run(
-        [
-            "docker", "build", "--platform", "linux/amd64", "--tag", image,
+    common = [
+            "docker", "build", "--load", "--provenance=false", "--sbom=false",
+            "--platform", "linux/amd64",
             "--build-arg", f"DOMUS_SOURCE_REVISION={revision}",
-            "--build-arg", f"DOMUS_SOURCE_DIRTY={str(dirty).lower()}", ".",
-        ],
-        check=True, cwd=ROOT, timeout=3600,
-    )
+            "--build-arg", f"DOMUS_SOURCE_DIRTY={str(dirty).lower()}",
+    ]
+    name = "domus-package-check-" + uuid.uuid4().hex
+    verification = "domus-obscura:package-check-" + uuid.uuid4().hex
+    volume = name + "-state"
+    built = False
+    created = False
+    try:
+        subprocess.run(
+            [*common, "--target", "package-verification", "--tag", verification, "."],
+            check=True, cwd=ROOT, timeout=3600,
+        )
+        built = True
+        docker("volume", "create", "--label", "io.domus.test=" + name, volume)
+        created = True
+        result = docker(
+            "run", "--rm", "--name", name, "--label", "io.domus.test=" + name,
+            "--network", "none", "--read-only", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--pids-limit", "128",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m",
+            "--mount", f"type=volume,source={volume},target=/checks",
+            verification, timeout=180,
+        )
+        print(result.stdout.strip())
+        subprocess.run(
+            [*common, "--target", "runtime", "--tag", image, "."],
+            check=True, cwd=ROOT, timeout=3600,
+        )
+        def hashes(selected, *paths):
+            output = docker(
+                "run", "--rm", "--network", "none", "--read-only",
+                "--entrypoint", "sha256sum", selected, *paths,
+            ).stdout
+            return [line.split()[0] for line in output.splitlines()]
+
+        if hashes(
+            verification, "/payload/package-manifest.json", "/src/packaging/docker/health.sh",
+        ) != hashes(
+            image, "/opt/domus-obscura/package-manifest.json", "/usr/local/bin/domus-health",
+        ):
+            raise RuntimeError("runtime payload or health script differs from the verified build")
+    finally:
+        existing = docker("container", "inspect", name, check=False)
+        if existing.returncode == 0:
+            docker("rm", "--force", name)
+        elif "No such" not in existing.stderr:
+            raise RuntimeError("could not inspect the package-check container: " + existing.stderr)
+        if created:
+            docker("volume", "rm", volume)
+        if built:
+            docker("image", "rm", verification)
 
 
 def validate_evidence(linux, windows):
@@ -78,6 +161,7 @@ def validate_evidence(linux, windows):
             or report.get("scope") != "host"
             or report.get("host") != host
             or report.get("engine_os") != "linux"
+            or report.get("host_runtime") != ("native-linux" if host == "Linux" else "windows-desktop")
             or report.get("image_os") != "linux"
             or report.get("image_architecture") != "amd64"
             or report.get("source_dirty") is not False
@@ -85,11 +169,11 @@ def validate_evidence(linux, windows):
         ):
             raise ValueError(f"complete clean-source {host} host evidence is required")
     if (
-        not isinstance(linux.get("image_id"), str)
+        not isinstance(linux.get("image_config_digest"), str)
         or not isinstance(linux.get("revision"), str)
-        or not re.fullmatch(r"sha256:[0-9a-f]{64}", linux["image_id"])
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", linux["image_config_digest"])
         or not re.fullmatch(r"[0-9a-f]{40}", linux["revision"])
-        or linux["image_id"] != windows.get("image_id")
+        or linux["image_config_digest"] != windows.get("image_config_digest")
         or linux["revision"] != windows.get("revision")
     ):
         raise ValueError("both hosts must check the exact same image and source revision")
@@ -112,6 +196,11 @@ class Check:
         self.report = {
             "format": 1, "result": "failed",
             "host": platform.system(), "scope": "engine-only" if engine_only else "host",
+            "host_runtime": (
+                "wsl" if "microsoft" in platform.release().lower()
+                else "native-linux" if platform.system() == "Linux"
+                else "windows-desktop" if platform.system() == "Windows" else "unsupported"
+            ),
             "checks": [],
         }
 
@@ -126,26 +215,30 @@ class Check:
         source = self.media_volume or self.media
         return f"type={kind},source={source},target={target}" + ("" if writable else ",readonly")
 
-    def arguments(self, writable_media=False, media_alias=False):
+    def arguments(self, writable_media=False, media_alias=False, program_readonly=True):
         arguments = [
-            "--init", "--read-only", "--user", "1000:1000", "--cap-drop", "ALL",
+            "--init", "--user", "1000:1000", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges", "--network", "host",
             "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m",
         ]
+        if program_readonly:
+            arguments.append("--read-only")
         for volume, target in self.mounts:
             arguments += ["--mount", f"type=volume,source={volume},target={target}"]
         if self.media_volume or self.media:
             arguments += ["--mount", self.media_mount("/media", writable_media)]
         if media_alias:
-            arguments += ["--mount", self.media_mount("/media-alias")]
+            application = next(volume for volume, target in self.mounts if target == "/storage")
+            arguments += ["--mount", f"type=volume,source={application},target=/application-alias"]
         return arguments
 
-    def once(self, arguments, *, input=None, shell=False, check=True, writable_media=False, media_alias=False):
+    def once(self, arguments, *, input=None, shell=False, check=True, writable_media=False, media_alias=False, program_readonly=True):
         self.report["phase"] = "shell" if shell else arguments[0]
         name = self.prefix + "-once-" + uuid.uuid4().hex
         self.containers.append(name)
         result = docker(
-            "run", "--rm", "--name", name, "--interactive", *self.arguments(writable_media, media_alias),
+            "run", "--rm", "--name", name, "--interactive",
+            *self.arguments(writable_media, media_alias, program_readonly),
             *(["--entrypoint", "/bin/sh"] if shell else []),
             self.image, *arguments, input=input, check=check, timeout=150,
         )
@@ -163,7 +256,7 @@ class Check:
             "--label", "io.domus.test=" + self.prefix, *self.arguments(),
             *(["--no-healthcheck"] if role == "worker" else []),
             self.image,
-            *(["serve"] if role == "api" else ["worker", CONFIGURATION]),
+            *(["serve", "--storage-root", APPLICATION] if role == "api" else ["worker", CONFIGURATION]),
         )
         if role == "api":
             self.api = name
@@ -235,6 +328,70 @@ class Check:
             time.sleep(0.5)
         raise RuntimeError("matching worker heartbeat was not observed")
 
+    def wait_scan(self, request_id):
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            requests = json.loads(self.request("/api/worker/requests"))
+            matching = [item for item in requests if item["id"] == request_id]
+            if matching and matching[0]["state"] == "complete":
+                return
+            if matching and matching[0]["state"] in ("failed", "waiting"):
+                self.report["scan_locations"] = json.loads(self.request("/api/locations"))
+                raise RuntimeError("generated worker scan failed: " + json.dumps(matching))
+            time.sleep(0.5)
+        raise RuntimeError("generated worker scan timed out")
+
+    def queue_scan(self, location, guards):
+        previous = {item["id"] for item in json.loads(self.request("/api/worker/requests"))}
+        self.request(f"/api/locations/{location}/scan", "POST", {}, guards, 202)
+        created = [
+            item for item in json.loads(self.request("/api/worker/requests"))
+            if item["id"] not in previous
+        ]
+        if len(created) != 1:
+            raise RuntimeError("scan did not create exactly one durable worker request")
+        return created[0]["id"]
+
+    def inspect_root(self, boundary, scope, root_id, role, relative="", **options):
+        return json.loads(self.once([
+            "storage-root-inspect", boundary, scope, root_id, "1", role, relative,
+        ], **options).stdout)
+
+    def save_fixture_configuration(self, configuration, path=CONFIGURATION):
+        # These assurances describe only the fresh test-owned volume topology.
+        # This is not a configuration generator or approval for operator storage.
+        selection = configuration["storage"]
+        roots = []
+        # Match Rust struct order even when saved JSON sorts object keys.
+        for root in sorted(selection["roots"], key=lambda root: root["root_id"]):
+            canonical = {key: root[key] for key in (
+                "root_id", "binding_revision", "role", "provider_scope", "relative", "expected",
+            )}
+            canonical["expected"] = {
+                key: root["expected"][key] for key in ("profile", "components")
+            }
+            roots.append(canonical)
+        semantic = [
+            selection["format_version"], selection["selection_revision"],
+            sorted(provider["scope"] for provider in selection["providers"]),
+            roots,
+            selection["expected_selection_file"],
+        ]
+        digest = hashlib.sha256(
+            b"domus-storage-selection-v2\0"
+            + json.dumps(semantic, separators=(",", ":"), ensure_ascii=False).encode()
+        ).hexdigest()
+        selection["topology_assurances"] = [{
+            "left": {"root_id": left["root_id"], "binding_revision": left["binding_revision"]},
+            "right": {"root_id": right["root_id"], "binding_revision": right["binding_revision"]},
+            "selection_digest": digest,
+        } for left, right in itertools.combinations(
+            sorted(selection["roots"], key=lambda root: root["root_id"]), 2
+        )]
+        content = json.dumps(configuration)
+        self.once(["-c", f"umask 077; cat > {path}"], shell=True, input=content)
+        return hashlib.sha256(content.encode()).hexdigest()
+
     def missing_sources(self, temporary):
         results = {}
         for compose in (False, True):
@@ -293,9 +450,33 @@ class Check:
             "engine_os": server["Os"], "engine_version": server["Version"],
             "image_os": image["Os"], "image_architecture": image["Architecture"],
             "image_id": image["Id"], "revision": labels["org.opencontainers.image.revision"],
+            "image_config_digest": image_configuration_digest(self.image),
             "source_dirty": labels.get("io.domus.source.dirty") != "false",
         })
-        self.mounts = [(self.volume(name), "/" + name) for name in ("data", "cache", "staging")]
+        if not self.engine_only and self.report["host_runtime"] not in ("native-linux", "windows-desktop"):
+            raise RuntimeError("host acceptance requires native Linux or Windows Docker Desktop, not WSL")
+        if platform.system() == "Linux" and not self.engine_only:
+            engine_system = docker("info", "--format", "{{.OperatingSystem}}").stdout.strip()
+            if "docker desktop" in engine_system.lower():
+                raise RuntimeError("Docker Desktop is not native Linux-host evidence")
+        shipped_health = self.once(
+            ["-c", "sha256sum /usr/local/bin/domus-health"], shell=True,
+        ).stdout.split()[0]
+        if shipped_health != hashlib.sha256(Path(__file__).with_name("health.sh").read_bytes()).hexdigest():
+            raise RuntimeError("shipped health script differs from the checked source")
+        self.report["checks"].append("health-bytes")
+        denied_state = self.once([
+            "init", "--storage-root", "/opt/domus-obscura/disallowed-private-state",
+        ], check=False)
+        if not denied_state.returncode or "verified supported local filesystem" not in denied_state.stderr:
+            raise RuntimeError("private state was not refused on the image overlay filesystem")
+        writable_assets = self.once(
+            ["serve", "--storage-root", APPLICATION], check=False, program_readonly=False,
+        )
+        if not writable_assets.returncode or "installed browser assets require" not in writable_assets.stderr:
+            raise RuntimeError("browser assets were not refused on a writable image overlay")
+        self.report["checks"].append("overlay-isolation")
+        self.mounts = [(self.volume("application"), "/storage")]
         self.media = temporary / "media"
         album = self.media / "Artist" / "Album"
         album.mkdir(parents=True)
@@ -309,12 +490,13 @@ class Check:
         link = self.media / "escape-link"
         if self.volume_media:
             self.media_volume = self.volume("media")
+            self.once(["init", "--storage-root", APPLICATION])
             self.once(
-                ["-c", "set -eu; umask 077; mkdir -p /media/Artist/Album /data/outside; "
+                ["-c", "set -eu; umask 077; mkdir -p /media/Artist/Album /storage/outside; "
                  "base64 -d > /media/Artist/Album/01.mp3; "
                  "cp /media/Artist/Album/01.mp3 /media/Artist/Album/02.mp3; "
-                 "printf 'outside generated fixture\\n' > /data/outside/must-not-index.txt; "
-                 "ln -s /data/outside /media/escape-link"],
+                 "printf 'outside generated fixture\\n' > /storage/outside/must-not-index.txt; "
+                 "ln -s /storage/outside /media/escape-link"],
                 shell=True, writable_media=True,
                 input=base64.b64encode(audio * 3).decode(),
             )
@@ -361,16 +543,42 @@ class Check:
         configuration["system_settings_read_only"] = False
         configuration["production_worker"] = {"queue_capacity": 8, "acquisition": None}
         configuration["cache"] = {
-            "root": "/cache",
+            "root": "cache",
             "limits": {"item_bytes": 1048576, "total_bytes": 16777216, "entries": 16},
         }
-        content = json.dumps(configuration)
-        self.once(["-c", f"umask 077; cat > {CONFIGURATION}"], shell=True, input=content)
-        revision = hashlib.sha256(content.encode()).hexdigest()
-        location = self.once(["location-add", DATABASE, "/media", "main"]).stdout.strip()
-        self.once(["staging-init", DATABASE, "/staging"])
-        self.once(["staging-init", DATABASE, "/staging"])
-        overlap = self.once(["location-add", DATABASE, "/media-alias", "backup"], check=False, media_alias=True)
+        self.once(["-c", f"umask 077; mkdir -p {APPLICATION}/cache {APPLICATION}/staging"], shell=True)
+        selection = configuration["storage"]
+        selection["selection_revision"] += 1
+        selection["providers"].append({"scope": "media", "boundary": "/media"})
+        selection["roots"] += [
+            self.inspect_root(APPLICATION, "application", "cache", "cache", "cache"),
+            self.inspect_root(APPLICATION, "application", "staging", "staging", "staging"),
+            self.inspect_root("/media", "media", "media", "media"),
+        ]
+        revision = self.save_fixture_configuration(configuration)
+        # Explicit startup binds this fresh cache; passive validation cannot.
+        self.stop(self.start("api"))
+        validation = self.once(["configuration-check", CONFIGURATION], check=False)
+        if validation.returncode:
+            self.report["configuration_validation"] = {
+                "stdout": validation.stdout, "stderr": validation.stderr,
+            }
+            raise RuntimeError(
+                "generated host configuration validation failed: " + validation.stdout + validation.stderr
+            )
+        location = self.once(["location-add", "--host", CONFIGURATION, "/media", "main"]).stdout.strip()
+        self.once(["staging-init", "--host", CONFIGURATION, APPLICATION + "/staging"])
+        self.once(["staging-init", "--host", CONFIGURATION, APPLICATION + "/staging"])
+        bad = json.loads(json.dumps(configuration))
+        bad["storage"]["selection_revision"] += 1
+        bad["storage"]["providers"].append({"scope": "alias", "boundary": "/application-alias"})
+        bad["storage"]["roots"].append(self.inspect_root(
+            "/application-alias", "alias", "private-alias", "media", "application/cache", media_alias=True,
+        ))
+        self.save_fixture_configuration(bad, APPLICATION + "/overlap.json")
+        overlap = self.once([
+            "location-add", "--host", APPLICATION + "/overlap.json", "/application-alias/application/cache", "backup",
+        ], check=False, media_alias=True)
         if not overlap.returncode or "overlap" not in overlap.stderr:
             raise RuntimeError("an aliased media root was not rejected for native overlap")
         self.report["checks"].append("root-overlap")
@@ -381,18 +589,8 @@ class Check:
         if duplicate.returncode == 0:
             raise RuntimeError("a second worker acquired live state")
         self.report["phase"] = "worker-scan"
-        self.request(f"/api/locations/{location}/scan", "POST", {}, guards, 202)
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            requests = json.loads(self.request("/api/worker/requests"))
-            if requests and requests[0]["state"] == "complete":
-                break
-            if requests and requests[0]["state"] in ("failed", "waiting"):
-                self.report["scan_locations"] = json.loads(self.request("/api/locations"))
-                raise RuntimeError("generated worker scan failed: " + json.dumps(requests))
-            time.sleep(0.5)
-        else:
-            raise RuntimeError("generated worker scan timed out")
+        queued = self.queue_scan(location, guards)
+        self.wait_scan(queued)
         entries = json.loads(self.request(f"/api/locations/{location}/entries?folder=Artist%2FAlbum"))
         if (
             {entry["relative_path"] for entry in entries} != {"Artist/Album/01.mp3", "Artist/Album/02.mp3"}
@@ -423,10 +621,12 @@ class Check:
         worker = self.start("worker")
         self.wait_worker(revision)
         self.stop(worker, forced=True)
+        queued = self.queue_scan(location, guards)
         self.stop(api, forced=True)
         api = self.start("api")
         worker = self.start("worker")
         self.wait_worker(revision)
+        self.wait_scan(queued)
         self.stop(worker)
         self.stop(api)
         self.report["checks"].append("forced-exit")
@@ -442,17 +642,16 @@ class Check:
         self.media = replacement
         if self.volume_media:
             self.media_volume = self.volume("replacement-media")
-        changed = self.once(["scan", DATABASE, location], check=False)
+        changed = self.once(["scan", "--host", CONFIGURATION, location], check=False)
         if not changed.returncode:
             raise RuntimeError("a replacement media root was accepted")
-        retained = json.loads(self.once(["browse", DATABASE, location, "Artist/Album", "0", "100"]).stdout)
+        retained = json.loads(self.once(["browse", "--host", CONFIGURATION, location, "Artist/Album", "0", "100"]).stdout)
         if {entry["relative_path"] for entry in retained} != {"Artist/Album/01.mp3", "Artist/Album/02.mp3"}:
             raise RuntimeError("failed mount access erased retained observations")
         self.media, self.media_volume = original_media, original_volume
-        marker = self.once(["-c", "cat /cache/owner.lock"], shell=True).stdout
-        replacement_cache = self.volume("replacement-cache")
-        self.mounts = [(replacement_cache if target == "/cache" else volume, target) for volume, target in self.mounts]
-        self.once(["-c", "umask 077; cat > /cache/owner.lock"], shell=True, input=marker)
+        self.once(["-c", f"set -eu; mv {APPLICATION}/cache {APPLICATION}/cache-retained; "
+                   f"mkdir -m 0700 {APPLICATION}/cache; "
+                   f"cp {APPLICATION}/cache-retained/owner.lock {APPLICATION}/cache/owner.lock"], shell=True)
         copied = self.once(["serve", CONFIGURATION], check=False)
         if copied.returncode == 0:
             raise RuntimeError("a copied cache owner marker replaced native binding")
@@ -500,9 +699,13 @@ class EvidenceTests(unittest.TestCase):
             "format": 1, "result": "passed", "scope": "host", "engine_os": "linux",
             "image_os": "linux", "image_architecture": "amd64",
             "source_dirty": False, "image_id": "sha256:" + "a" * 64,
+            "image_config_digest": "sha256:" + "e" * 64,
             "revision": "b" * 40, "checks": sorted(REQUIRED_CHECKS | {"windows-bind-mount"}),
         }
-        return {**common, "host": "Linux"}, {**common, "host": "Windows"}
+        return (
+            {**common, "host": "Linux", "host_runtime": "native-linux"},
+            {**common, "host": "Windows", "host_runtime": "windows-desktop"},
+        )
 
     def test_release_rejects_partial_or_engine_only_results(self):
         for change in ({"scope": "engine-only"}, {"result": "failed"}, {"source_dirty": True}, {"checks": []}, {"checks": None}, {"image_architecture": "arm64"}, {"checks": sorted(REQUIRED_CHECKS - {"missing-source"})}):
@@ -522,12 +725,70 @@ class EvidenceTests(unittest.TestCase):
         linux, windows = self.reports()
         validate_evidence(linux, windows)
         for change in (
-            {"image_id": "sha256:" + "c" * 64},
+            {"image_config_digest": "sha256:" + "c" * 64},
             {"revision": "d" * 40},
             {"checks": sorted(REQUIRED_CHECKS)},
+            {"host_runtime": "wsl"},
         ):
             with self.assertRaises(ValueError):
                 validate_evidence(linux, {**windows, **change})
+        validate_evidence(linux, {**windows, "image_id": "sha256:" + "c" * 64})
+
+    def test_release_rejects_wsl_as_native_linux(self):
+        linux, windows = self.reports()
+        with self.assertRaises(ValueError):
+            validate_evidence({**linux, "host_runtime": "wsl"}, windows)
+
+    def test_scan_wait_uses_the_new_request_not_the_returned_location_id(self):
+        check = Check("unused", True)
+        with patch.object(check, "request", side_effect=[
+            b'[{"id": 1, "state": "complete"}]',
+            b'{"id": 1}',
+            b'[{"id": 1, "state": "complete"}, {"id": 2, "state": "queued"}]',
+        ]):
+            self.assertEqual(check.queue_scan("1", {}), 2)
+
+    def test_fixture_assurance_accepts_sorted_configuration_and_struct_field_order(self):
+        root = {
+            "root_id": "application", "binding_revision": 1, "role": "application",
+            "provider_scope": "application", "relative": "",
+            "expected": {
+                "profile": "linux-exportfs-chain-v1",
+                "components": ["linuxfh:0100000000000000:00000001:01"],
+            },
+        }
+        configuration = {"storage": {
+            "format_version": 1, "selection_revision": 1,
+            "providers": [{"scope": "application", "boundary": APPLICATION}],
+            "roots": [root, {**root, "root_id": "state", "role": "state"}],
+            "expected_selection_file": None,
+        }}
+        digests = []
+        for content in (
+            json.dumps(configuration), json.dumps(configuration, sort_keys=True),
+        ):
+            check = Check("unused", True)
+            with patch.object(check, "once") as saved:
+                check.save_fixture_configuration(json.loads(content))
+            stored = json.loads(saved.call_args.kwargs["input"])
+            digests.append(stored["storage"]["topology_assurances"][0]["selection_digest"])
+        self.assertEqual(digests[0], digests[1])
+
+    def test_candidate_digest_survives_legacy_and_containerd_archive_names(self):
+        configuration = b'{"architecture":"amd64","rootfs":{"type":"layers","diff_ids":[]}}'
+        digest = hashlib.sha256(configuration).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            for name in (digest + ".json", "blobs/sha256/" + digest):
+                path = Path(directory) / "image.tar"
+                with tarfile.open(path, "w") as archive:
+                    for entry, content in (
+                        (name, configuration),
+                        ("manifest.json", json.dumps([{"Config": name, "Layers": []}]).encode()),
+                    ):
+                        member = tarfile.TarInfo(entry)
+                        member.size = len(content)
+                        archive.addfile(member, io.BytesIO(content))
+                self.assertEqual(archive_configuration_digest(path), "sha256:" + digest)
 
 
 def main():

@@ -1,6 +1,6 @@
 //! Immutable, bounded browser assets loaded before the listener starts. Request
 //! paths select map keys only; they never enter filesystem APIs.
-use super::filesystem::{FilesystemClient, LibraryDirectory, read_file_in};
+use super::filesystem::{FilesystemClient, LibraryDirectory, read_browser_file_in};
 use crate::{Error, Result};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -31,12 +31,7 @@ impl BrowserAssets {
             filesystem.require_non_media_input(&directory)?;
         }
         let mut files = HashMap::new();
-        let index = read_file_in(
-            &directory,
-            std::ffi::OsStr::new("index.html"),
-            65_536,
-            false,
-        )?;
+        let index = read_browser_file_in(&directory, std::ffi::OsStr::new("index.html"), 65_536)?;
         let mut total = index.len();
         files.insert("/".into(), ("text/html; charset=utf-8", index));
         let assets = directory.open_directory(&crate::domain::LibraryPath::parse("assets")?)?;
@@ -73,7 +68,8 @@ impl BrowserAssets {
                     ));
                 }
             };
-            let bytes = read_file_in(&assets, std::ffi::OsStr::new(&name), 8 * 1024 * 1024, false)?;
+            let bytes =
+                read_browser_file_in(&assets, std::ffi::OsStr::new(&name), 8 * 1024 * 1024)?;
             total += bytes.len();
             if total > 16 * 1024 * 1024 {
                 return Err(Error::InvalidInput("browser assets exceed 16 MiB".into()));

@@ -100,7 +100,7 @@ jobs:
         run: |
           mkdir -p target
           gh api "repos/$GITHUB_REPOSITORY/environments/docker-release" > target/release-environment.json
-          python3 - <<'PY'
+          python3 -B - <<'PY'
           import json
           from pathlib import Path
           environment = json.loads(Path("target/release-environment.json").read_text())
@@ -123,9 +123,11 @@ jobs:
       - run: python3 packaging/docker/check.py validate-evidence --linux-report target/docker-linux.json --windows-report target/docker-windows.json
       - name: Check the loaded candidate and release version
         run: |
-          python3 - <<'PY'
-          import json, os, re, subprocess, tomllib
+          python3 -B - <<'PY'
+          import json, os, re, subprocess, sys, tomllib
           from pathlib import Path
+          sys.path.insert(0, "packaging/docker")
+          from check import image_configuration_digest
           report = json.loads(Path("target/docker-linux.json").read_text())
           image = json.loads(subprocess.check_output(["docker", "image", "inspect", "domus-obscura:local"]))[0]
           version = tomllib.loads(Path("crates/domus/Cargo.toml").read_text())["package"]["version"]
@@ -134,7 +136,7 @@ jobs:
               raise SystemExit("Unsupported release tag")
           if tag.removeprefix("v") != version or image["Config"]["Labels"]["org.opencontainers.image.version"] != version:
               raise SystemExit("Release and candidate versions differ")
-          if image["Id"] != report["image_id"] or report["revision"] != os.environ["GITHUB_SHA"]:
+          if image_configuration_digest("domus-obscura:local") != report["image_config_digest"] or report["revision"] != os.environ["GITHUB_SHA"]:
               raise SystemExit("Loaded candidate differs from the tested release")
           with open(os.environ["GITHUB_ENV"], "a") as output:
               output.write("IMAGE_VERSION=" + version + "\n")
@@ -154,7 +156,18 @@ jobs:
         run: |
           anonymous="$(mktemp -d)"
           docker --config "$anonymous" pull "$GHCR_IMAGE:$IMAGE_VERSION"
+          python3 -B - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, "packaging/docker")
+          from check import image_configuration_digest
+          report = json.loads(Path("target/docker-linux.json").read_text())
+          image = os.environ["GHCR_IMAGE"] + ":" + os.environ["IMAGE_VERSION"]
+          if image_configuration_digest(image) != report["image_config_digest"]:
+              raise SystemExit("Public image differs from the tested candidate")
+          PY
           docker image inspect "$GHCR_IMAGE:$IMAGE_VERSION" --format '{{json .RepoDigests}}' >> "$GITHUB_STEP_SUMMARY"
+          rmdir "$anonymous"
       - name: End registry login
         if: always()
         run: docker logout ghcr.io

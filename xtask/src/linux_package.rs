@@ -214,12 +214,15 @@ fn verify(root: &Path) -> Result<BTreeMap<String, String>> {
     Ok(observed)
 }
 
-fn archive_check(archive: &Path) -> Result<()> {
-    output(
-        Command::new("python3")
-            .arg("packaging/linux/package-check.py")
-            .arg(std::path::absolute(archive)?),
-    )?;
+fn archive_check(archive: &Path, lifecycle: bool) -> Result<()> {
+    let mut command = Command::new("python3");
+    command
+        .arg("packaging/linux/package-check.py")
+        .arg(std::path::absolute(archive)?);
+    if !lifecycle {
+        command.arg("--verify-only");
+    }
+    output(&mut command)?;
     Ok(())
 }
 
@@ -241,7 +244,7 @@ fn release_command(cargo: &std::ffi::OsStr) -> Command {
 
 pub fn check() -> Result<()> {
     verify(Path::new(ROOT))?;
-    archive_check(Path::new(ARCHIVE))?;
+    archive_check(Path::new(ARCHIVE), true)?;
     println!(
         "Linux archive and isolated lifecycle checks passed. Installed services and reboot remain separate checks."
     );
@@ -265,6 +268,7 @@ fn provenance(revision: Option<&str>) -> Result<(String, Option<bool>)> {
 
 pub fn build(revision: Option<&str>) -> Result<()> {
     require_host()?;
+    let container = revision.is_some();
     let (revision, dirty) = provenance(revision)?;
     if std::env::var_os("RUSTFLAGS").is_some()
         || std::env::var_os("CARGO_ENCODED_RUSTFLAGS").is_some()
@@ -276,7 +280,13 @@ pub fn build(revision: Option<&str>) -> Result<()> {
     if !command.status()?.success() {
         return Err("Linux release compilation failed".into());
     }
-    let staging = Path::new("target").join(format!("linux-package-{}.pending", std::process::id()));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let staging = Path::new("target").join(format!(
+        "linux-package-{}-{nonce}.pending",
+        std::process::id()
+    ));
     fs::create_dir(&staging)?;
     copy(
         &Path::new("target").join(TARGET).join("release/domus"),
@@ -332,7 +342,7 @@ pub fn build(revision: Option<&str>) -> Result<()> {
     set_modes(&staging)?;
     verify(&staging)?;
     let archive = Path::new("target").join(format!(
-        "linux-archive-{}.pending.tar.gz",
+        "linux-archive-{}-{nonce}.pending.tar.gz",
         std::process::id()
     ));
     if archive.exists() {
@@ -353,7 +363,9 @@ pub fn build(revision: Option<&str>) -> Result<()> {
             .arg(&staging)
             .arg("."),
     )?;
-    archive_check(&archive)?;
+    // BuildKit caches can use overlayfs. The Docker task runs the unchanged
+    // lifecycle checker separately on a supported local volume before export.
+    archive_check(&archive, !container)?;
     let previous = Path::new(ROOT);
     let previous_files = if previous.exists() {
         Some(verify(previous)?)
@@ -385,6 +397,11 @@ pub fn build(revision: Option<&str>) -> Result<()> {
     println!(
         "Verified Linux candidate: {ARCHIVE}. Manual installation requires separate approval."
     );
+    if container {
+        println!(
+            "Container archive structure checked; Docker volume lifecycle verification is still required."
+        );
+    }
     Ok(())
 }
 

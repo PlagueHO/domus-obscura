@@ -63,12 +63,32 @@ pub(crate) fn read_file_in(
     maximum: u64,
     sensitive: bool,
 ) -> Result<Vec<u8>> {
+    read_checked_file_in(directory, name, maximum, sensitive, require_local_file)
+}
+
+/// Installed browser bytes can use a read-only Linux image layer. This does
+/// not admit writable state, secrets or a selected storage root on overlayfs.
+pub(crate) fn read_browser_file_in(
+    directory: &LibraryDirectory,
+    name: &OsStr,
+    maximum: u64,
+) -> Result<Vec<u8>> {
+    read_checked_file_in(directory, name, maximum, false, require_browser_filesystem)
+}
+
+fn read_checked_file_in(
+    directory: &LibraryDirectory,
+    name: &OsStr,
+    maximum: u64,
+    sensitive: bool,
+    check_filesystem: fn(&std::fs::File) -> Result<()>,
+) -> Result<Vec<u8>> {
     let limit = maximum
         .checked_add(1)
         .ok_or_else(|| Error::InvalidInput("local file size limit is too large".into()))?;
-    directory.require_local()?;
+    check_filesystem(&directory.directory_file()?)?;
     let file = directory.open_file(name)?;
-    require_local_file(&file)?;
+    check_filesystem(&file)?;
     super::permissions::FilePermissions::current()?.check(&file, sensitive)?;
     let mut bytes = Vec::new();
     file.take(limit).read_to_end(&mut bytes)?;
@@ -78,6 +98,25 @@ pub(crate) fn read_file_in(
         ));
     }
     Ok(bytes)
+}
+
+fn require_browser_filesystem(file: &std::fs::File) -> Result<()> {
+    if filesystem_class(file)? == FilesystemClass::Local {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let filesystem = rustix::fs::fstatfs(file).map_err(std::io::Error::from)?;
+        let mount = rustix::fs::fstatvfs(file).map_err(std::io::Error::from)?;
+        if filesystem.f_type as u64 == 0x794c_7630
+            && mount.f_flag.contains(rustix::fs::StatVfsMountFlags::RDONLY)
+        {
+            return Ok(());
+        }
+    }
+    Err(Error::InvalidInput(
+        "installed browser assets require supported local storage or a read-only Linux overlay filesystem".into(),
+    ))
 }
 
 #[cfg(windows)]

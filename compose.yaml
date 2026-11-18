@@ -13,18 +13,16 @@ x-runtime: &runtime
   tmpfs:
     - /tmp:rw,nosuid,nodev,noexec,size=64m
   volumes:
-    - state:/data
-    - cache:/cache
-    - staging:/staging
+    - application:/storage
 
 services:
   api:
     <<: *runtime
-    command: [serve]
+    command: [serve, --storage-root, /storage/application]
   worker:
     <<: *runtime
     profiles: [worker]
-    command: [worker, /data/DomusObscura/service.json]
+    command: [worker, /storage/application/config.json]
     depends_on:
       api:
         condition: service_healthy
@@ -32,6 +30,4 @@ services:
       disable: true
 
 volumes:
-  state:
-  cache:
-  staging:
+  application:

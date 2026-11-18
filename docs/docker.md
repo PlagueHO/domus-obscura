@@ -23,28 +23,38 @@ changing a host. These settings require separate operator approval.
 See [Docker host networking](https://docs.docker.com/engine/network/drivers/host/)
 and the [Windows WSL backend](https://docs.docker.com/desktop/features/wsl/).
 
-## Acceptance is blocked
+## Acceptance status
 
-The local image build and its native Linux package checks passed.
-The full repository check also passed on Windows.
-These results do not establish Docker runtime acceptance.
+The Docker branch includes the completed storage dependency at
+`5172b83e0dd755a8caa0c1c9f5ab812ed2654820` from open PR #70. This does not merge
+that PR. The PR's rebased head is `cd33a3c880b71ac776b88f845e9071adbcb39700`;
+both revisions have the same source tree.
+The current image and Docker workflows need their own checks.
+Native storage checks are not whole-image Docker acceptance.
 
-On the tested Docker Desktop host, the container API became healthy.
-Windows access to its loopback listener failed with connection refused.
-Inside the engine, the real browser files, API guards, and read-only media
-checks passed. The worker became online, but its scan failed.
+The current generated-volume engine workflow passes browser-byte and API-guard
+checks, worker scanning, selected bindings, overlap refusal, recreation, graceful
+stop, forced exit, invalid configuration, and replacement refusal.
+The image build also passes the full native archive lifecycle check on a fresh
+local volume. These are engine results, not supported-host acceptance.
+The current Windows host-loopback retest still fails with connection refused,
+although the same fresh API serves its session inside the engine.
+The storage dependency replaces the old container-ancestor binding with the
+approved operator-selected filesystem contract. Do not restore the old binding
+model or remove the new admission checks. See the [storage contract](storage.md).
 
-The retained media directory kept its native identity. Concurrent containers
-had different native identities for `/`. Saved bindings include that ancestor.
-The worker rejected the changed binding and recorded incomplete coverage.
-This also occurred with Linux-private media, not only a Windows bind mount.
+The generated Windows-folder capability probe found a 9p mount. Component-relative
+no-follow opens rejected a generated junction and symlink. Live alias identities
+matched, and replacing a stopped parent changed its observed identity without
+changing the retained leaf. However, the mount refused `name_to_handle_at` with
+errno 95 and `FS_IOC_GETVERSION` with errno 25. No supported persistent native
+identity profile was established. Runtime inode observations are not a saved
+authority fallback. External folder mounts remain required; Linux-private volume
+checks do not replace this gate.
 
-Do not remove ancestry checks or automatically rebind roots.
-A reviewed filesystem-authority design is required before this layout can work.
-Docker Desktop network settings alone do not resolve this filesystem failure.
-On this host, both Docker CLI and Compose also created a missing bind-source
-directory. This occurred despite `create_host_path: false`.
-Windows bind-mount operation therefore has an additional unresolved gate.
+On this host, Docker CLI and Compose created missing Windows bind-source
+directories. This occurred despite `create_host_path: false` and an additional
+CLI check with `bind-create-src=false`. This remains a separate runtime gate.
 Native Linux host acceptance and a public registry pull are still unverified.
 Do not use this image with an existing library until these gates pass.
 
@@ -70,7 +80,15 @@ It does not install host software or change Docker Desktop settings.
 
 The local tag is `domus-obscura:local`. The image bases and language tools are
 pinned. Dependency restores use the checked-in lockfiles and the default package
-registry. The build runs the existing Linux package and process checks.
+registry. The task runs the existing Linux archive and process checks.
+BuildKit caches can use unsupported overlayfs storage. Archive structure checks
+run during image assembly. The unchanged lifecycle checker then runs in a
+temporary verification image, with fresh state on a Docker local volume.
+The task exports the runtime image only after those checks pass. The temporary
+container, image and volume are removed. A raw `docker build` does not replace
+this verification task.
+The native SQLite wrapper downloads and verifies its pinned upstream archive.
+Complete SQLite or SQLCipher sources are not committed or copied into the runtime.
 The source context excludes Git worktree metadata, private state, credentials,
 and generated build outputs.
 
@@ -144,9 +162,20 @@ is reused. No failed secure configuration falls back to anonymous mode.
 
 Compose runs without Linux capabilities or privilege elevation and uses a
 read-only program filesystem. `/tmp` is a bounded temporary filesystem.
-Local named volumes retain `/data`, `/cache`, and `/staging`.
-SQLite and private JSON are under `/data/DomusObscura`.
+One local named volume retains `/storage`. Fresh setup creates
+`/storage/application/config.json` and `/storage/application/state/state.db`. Optional cache, staging and
+certificate directories are children of the same application directory.
+The API uses `serve --storage-root /storage/application`. The worker uses the same
+`/storage/application/config.json`. The extra child keeps the application's setup
+parent on the supported volume, not on the container's overlay filesystem.
+Existing configuration is operator-managed and read-only
+to application components.
+Installed browser assets can use the read-only image overlay. This exception
+does not apply to state, secrets or selected writable roots. Startup refuses
+browser assets on a writable image overlay. Keep `read_only: true`.
 Do not use network volume drivers for private state.
+The current Linux native adapter requires supported ext-family storage for
+private state. A Windows host directory is not a substitute for this volume.
 
 ## Mount external media
 
@@ -180,19 +209,34 @@ stable file identities, or private Unix permissions.
 Do not use Windows bind mounts for SQLite, credentials, TLS private keys, or
 cache/staging state. Keep those resources in Linux-private local volumes.
 
-Mounting data does not register or approve it. Register a new library through
-the existing guarded settings operation or the CLI under the runtime account.
-For a fresh, separately approved registration:
+Mounting data does not select, register or approve it. Stop all state users.
+Inspect an existing candidate with the runtime binary:
 
 ```sh
-docker compose exec api /opt/domus-obscura/domus location-add /data/DomusObscura/state.db /media main
+docker compose -f compose.yaml -f compose.media.yaml run --rm --no-deps api \
+  storage-root-inspect /media media main 1 media ""
 ```
 
-Use the returned location ID with the existing scan and browse commands.
-Existing Windows-native bindings are not Linux-container bindings.
-Do not copy database bindings, owner markers, or receipts to claim a new root.
-Follow the explicit native binding and recovery rules in the
-[operator guide](operator-guide.md).
+Review the candidate and the combined operator selection before editing
+`/storage/application/config.json`. Follow [additional-root selection](storage.md#inspecting-an-additional-root)
+for provider mapping, complete expectations and exact topology assurances where
+required. Assurances are trusted operator statements, not measured separation.
+Never generate them automatically for arbitrary operator mounts.
+
+Run `configuration-check /storage/application/config.json` with all state users stopped.
+Then register a separately approved new library:
+
+```sh
+docker compose -f compose.yaml -f compose.media.yaml run --rm --no-deps api \
+  location-add --host /storage/application/config.json /media main
+```
+
+The host policy must permit this command. Use the returned location ID with the
+existing guarded scan and browse commands. Bare database-path commands are not
+supported. Existing Windows-native bindings are not Linux-container bindings.
+Do not copy database bindings, configuration, owner markers or receipts to
+authorize replacement storage. Incompatible pre-production state needs an
+explicit fresh setup, not migration, adoption or reset. Preserve existing data.
 
 Grant write access only for a separately approved media operation.
 Use a reviewed Compose override for only that mount and service.
@@ -208,11 +252,12 @@ Stop all containers that use the state before manual configuration editing:
 docker compose --profile worker stop
 ```
 
-Edit the private JSON under the same `1000:1000` runtime identity. Preserve mode
+The operator can edit private JSON under the same `1000:1000` runtime identity. Preserve mode
 `0600` and its stable sibling lock. Do not replace a live lock.
-For an editable external configuration, mount its private Linux directory,
-not only the JSON file: atomic saves also need its parent directory.
-For a read-only configuration mount, set `system_settings_read_only: true`.
+Keep the configuration inside an admitted private storage boundary. The
+application never saves changes to existing host JSON. The
+`system_settings_read_only` policy controls SQLite commands, not host JSON writes.
+Do not enable the removed configuration-save or API-only reload operations.
 
 An explicit `production_worker` section enables the worker.
 A scan-only worker can use:
@@ -252,8 +297,9 @@ The CA path identifies a public trust certificate, not a private key.
 The probe does not disable certificate validation or follow redirects.
 Generated health tests check HTTP 200, redirect rejection, and HTTPS CA trust.
 
-Configuration saves and API reloads do not activate a new worker configuration.
-Review pending work and restart that worker at the existing safe boundary.
+Operator edits do not activate a new configuration in running processes.
+Stop all state users, edit and validate, then restart all with the same file.
+Review pending work and use the existing safe boundary.
 Provider credentials, plaintext-login acknowledgement, peer reachability, and
 live transfers remain separately configured and approved.
 
@@ -274,7 +320,9 @@ and required bound roots with the existing stopped-process procedure.
 
 Retain the exact image digest used by a deployment. Acceptance requires the same image and mount
 layout to preserve native bindings after recreation.
-A new image or Docker/filesystem change can change saved ancestry.
+A new image or Docker/filesystem change can change storage admission.
+The operator-selected logical bindings exclude container-specific ancestors,
+but retain complete expectations within the selected boundary.
 Do not automatically rewrite bindings after an upgrade.
 Test the candidate against generated retained state first. If binding checks
 fail, preserve the original deployment and use explicit reviewed recovery.
@@ -292,6 +340,9 @@ Use a protected `docker-release` environment for release approval.
 The publish job fails if that environment has no required reviewers.
 The release version must match the package version.
 Both reports must identify the same image and clean source revision.
+The report keeps the engine-local image ID for diagnostics. Cross-host comparison
+uses the digest of the saved image configuration, which includes the layer-content
+identities. Engine-local IDs can differ between image storage backends.
 Public GHCR packages permit anonymous pulls, but new packages start private.
 An operator must approve and perform the initial public-visibility change.
 Verify an anonymous pull before claiming a public release.
