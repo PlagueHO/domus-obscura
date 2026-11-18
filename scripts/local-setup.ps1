@@ -87,9 +87,51 @@ $configuration.origin = "https://localhost:$Port"
 $configuration.certificate_file = Join-Path $application 'secrets\certificate.pem'
 $configuration.private_key_file = Join-Path $application 'secrets\private-key.pem'
 $configuration.browser_assets = $assets
+$library = Join-Path $root 'library'
+$mediaRoot = Invoke-Domus -Arguments @(
+    'storage-root-inspect', $library, 'library', 'main', '1', 'media', ''
+) | ConvertFrom-Json -AsHashtable
+$stagingRoot = Invoke-Domus -Arguments @(
+    'storage-root-inspect', $application, 'application', 'staging', '1', 'staging', 'staging'
+) | ConvertFrom-Json -AsHashtable
+$configuration.storage.providers += @{ scope = 'library'; boundary = $library }
+$configuration.storage.roots += @($mediaRoot, $stagingRoot)
+$configuration.storage.selection_revision += 1
+
+# These generated sibling roots use separate provider views. Bind each private/media
+# assurance to the complete selection through the authoritative Rust digest.
+$selectionFile = Join-Path $application 'secrets\setup-storage-selection.json'
+$selectionStream = [IO.File]::Open($selectionFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+try {
+    try {
+        $selectionBytes = [Text.Encoding]::UTF8.GetBytes(
+            ($configuration.storage | ConvertTo-Json -Depth 20) + "`n")
+        $selectionStream.Write($selectionBytes)
+    } finally {
+        $selectionStream.Dispose()
+    }
+    $selectionDigest = Invoke-Domus -Arguments @('storage-selection-digest', $selectionFile)
+    if ($selectionDigest -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Domus returned an invalid storage selection digest.'
+    }
+    foreach ($privateRoot in @($configuration.storage.roots | Where-Object { $_.role -ne 'media' })) {
+        $left, $right = if ([string]::CompareOrdinal($privateRoot.root_id, $mediaRoot.root_id) -lt 0) {
+            $privateRoot, $mediaRoot
+        } else {
+            $mediaRoot, $privateRoot
+        }
+        $configuration.storage.topology_assurances += @{
+            left = @{ root_id = $left.root_id; binding_revision = $left.binding_revision }
+            right = @{ root_id = $right.root_id; binding_revision = $right.binding_revision }
+            selection_digest = $selectionDigest
+        }
+    }
+} finally {
+    Remove-Item -LiteralPath $selectionFile
+}
 [IO.File]::WriteAllText($configurationFile, ($configuration | ConvertTo-Json -Depth 20) + "`n")
 
-Invoke-Domus -Arguments @('location-add', '--host', $configurationFile, (Join-Path $root 'library'), 'main')
+Invoke-Domus -Arguments @('location-add', '--host', $configurationFile, $library, 'main')
 Invoke-Domus -Arguments @('scan', '--host', $configurationFile, '1')
 Invoke-Domus -Arguments @('staging-init', '--host', $configurationFile, (Join-Path $application 'staging'))
 

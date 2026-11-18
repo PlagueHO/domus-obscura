@@ -44,6 +44,53 @@ fn storage_root_inspection_is_read_only_and_refuses_escaping_or_missing_roots()
 }
 
 #[test]
+fn storage_selection_digest_is_bounded_and_passive() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = private::tempdir()?;
+    let root = fixture.path();
+    let mut selection = domus::infrastructure::filesystem::StorageConfiguration::inspect_initial(
+        root,
+        &domus::domain::LibraryPath::parse("")?,
+    )?;
+    selection.providers[0].boundary = root.join("offline-provider");
+    let expected = selection.selection_digest()?;
+    let path = root.join("selection.json");
+    let sentinel = root.join("sentinel");
+    std::fs::write(&sentinel, b"unchanged generated input")?;
+    for (bytes, valid) in [
+        (serde_json::to_vec(&selection)?, true),
+        (b"{broken".to_vec(), false),
+        (vec![b' '; 16 * 1024 + 1], false),
+    ] {
+        std::fs::write(&path, &bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_domus"))
+            .arg("storage-selection-digest")
+            .arg(&path)
+            .output()?;
+        assert_eq!(
+            output.status.success(),
+            valid,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if valid {
+            assert_eq!(String::from_utf8(output.stdout)?.trim(), expected);
+        } else {
+            assert!(output.stdout.is_empty());
+            assert!(!output.stderr.is_empty());
+        }
+        assert_eq!(std::fs::read(&path)?, bytes);
+        assert_eq!(std::fs::read(&sentinel)?, b"unchanged generated input");
+        assert_eq!(root.read_dir()?.count(), 2);
+    }
+    Ok(())
+}
+
+#[test]
 fn configuration_check_reports_invalid_saved_input_without_startup_effects()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = private::tempdir()?;

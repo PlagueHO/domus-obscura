@@ -60,6 +60,7 @@ const USAGE: &str = "Usage:
   domus location --host <absolute-host-configuration-file> <location-id>
   domus root-identity <absolute-root>
   domus storage-root-inspect <absolute-provider-boundary> <provider-scope> <root-id> <binding-revision> <application|state|cache|staging|certificate|media> <library-relative-path>
+  domus storage-selection-digest <absolute-selection-json-file>
   domus location-bind --host <absolute-host-configuration-file> <location-id> <expected-native-identity>
   domus staging-bind --host <absolute-host-configuration-file> <absolute-root> <expected-native-identity>
   domus scan --host <absolute-host-configuration-file> <location-id>
@@ -77,6 +78,7 @@ catalog-release loads the exact MusicBrainz release through the durable provider
 State commands never accept a bare database path or migrate existing state.
 Provider commands use an already-bound selected cache without fallback.
 init creates fresh private storage without loading services or opening a listener.
+storage-selection-digest computes a candidate digest without approving or activating storage.
 service-call runs catalog discovery, metadata, artwork listing or image caching through configured services.
 It cannot approve plans, download audio or publish media.
 publish-new-once explicitly copies verified staging into new primary/backup album folders.
@@ -799,6 +801,17 @@ fn run(args: &[String]) -> Result<()> {
                 &domus::domain::LibraryPath::parse(relative)?,
             )?;
             println!("{}", serde_json::to_string_pretty(&root)?);
+        }
+        [command, path] if command == "storage-selection-digest" => {
+            let bytes = domus::infrastructure::filesystem::read_local_file(
+                Path::new(path),
+                16 * 1024,
+                true,
+            )?;
+            let selection: domus::infrastructure::filesystem::StorageConfiguration =
+                serde_json::from_slice(&bytes)
+                    .map_err(|_| Error::InvalidInput("invalid storage selection JSON".into()))?;
+            println!("{}", selection.selection_digest()?);
         }
         [command, root] if command == "root-identity" => {
             println!(

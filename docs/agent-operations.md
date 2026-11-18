@@ -132,6 +132,13 @@ must exist. Operators review the combined selection and its exact assurances
 before editing stopped hosts. Never use inspection to overwrite an incompatible
 saved root or adopt existing state. See [storage guidance](storage.md).
 
+`domus storage-selection-digest <absolute-selection-json-file>` prints the
+canonical digest for a candidate storage selection. It reads at most 16 KiB
+from a private local file through no-follow handles. It does not activate
+providers, open SQLite, bind roots, validate the layout or approve topology
+assurances. Use the complete reviewed candidate when constructing assurances;
+do not copy the digest algorithm into setup scripts.
+
 `domus serve` without a configuration argument initializes only private local
 application state and starts explicit `single_user` anonymous HTTP on loopback.
 It serves the real packaged browser, not the separate sample harness. Azure,
