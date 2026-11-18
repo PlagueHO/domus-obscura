@@ -365,6 +365,15 @@ async fn explicit_development_bootstrap_accepts_developer_certificate_not_missin
     let mut configured = valid.clone();
     configured["cache"] = json!({"root":cache_root.path()});
     std::fs::write(&path, serde_json::to_vec(&configured)?)?;
+    super::storage_fixture::select_host_roots(
+        &path,
+        &[(
+            "cache",
+            domus::infrastructure::filesystem::StorageRole::Cache,
+            cache_root.path(),
+        )],
+    )?;
+    configured = serde_json::from_slice(&std::fs::read(&path)?)?;
     drop(PreparedServer::load(&path)?);
     assert!(cache_root.path().join("owner.lock").exists());
     for root in [state.to_path_buf(), state.join("missing-cache")] {

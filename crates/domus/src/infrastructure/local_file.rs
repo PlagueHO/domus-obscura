@@ -157,6 +157,7 @@ pub(crate) fn protect_files(store: &super::store::Store, files: &[&Path]) -> Res
         .map(std::fs::canonicalize)
         .collect::<std::io::Result<Vec<_>>>()?;
     if let Some(filesystem) = store.selected_filesystem() {
+        store.require_current_root_bindings()?;
         for parent in &parents {
             filesystem.require_private_input(parent)?;
         }

@@ -48,6 +48,8 @@ mod control_tests;
 mod development_tests;
 #[path = "https/local_album.rs"]
 mod local_album_tests;
+#[path = "support/storage.rs"]
+mod storage_fixture;
 mod support;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -1567,13 +1569,20 @@ fn service_bootstrap_rejects_public_binding_bad_tls_and_media_secret_overlap() -
     }
     let media = state.join("media");
     std::fs::create_dir(&media)?;
+    private::directory(&media)?;
     domus::application::add_location(&store, &media, "main")?;
     let media_secret = media.join("secret.txt");
     std::fs::write(&media_secret, "generated-fixture-secret")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&media_secret, std::fs::Permissions::from_mode(0o600))?;
+    }
     let mut changed = valid.clone();
     changed["client_secret_file"] = serde_json::to_value(&media_secret)?;
     std::fs::write(&config, serde_json::to_vec(&changed)?)?;
-    assert!(PreparedServer::load(&config).is_err());
+    assert!(matches!(PreparedServer::load(&config),
+        Err(domus::Error::Conflict(message)) if message.contains("native root identity")));
     std::fs::write(&config, vec![b' '; 16385])?;
     assert!(PreparedServer::load(&config).is_err());
     std::fs::write(&config, serde_json::to_vec(&valid)?)?;

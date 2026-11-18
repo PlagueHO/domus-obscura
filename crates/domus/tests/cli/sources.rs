@@ -11,7 +11,19 @@ fn source_review_cli_imports_only_local_listing_and_requires_separate_exact_appr
     let state = tempdir()?;
     let media = tempdir()?;
     let database = state.path().join("state.db");
-    let mut store = Store::open(&database)?;
+    drop(Store::open(&database)?);
+    let host = write_host(state.path(), &database)?;
+    select_host_roots(
+        &host,
+        &[(
+            "media",
+            domus::infrastructure::filesystem::StorageRole::Media,
+            media.path(),
+        )],
+    )?;
+    let mut store =
+        domus::infrastructure::server::configuration::ConfigurationService::open(&host)?
+            .open_store(domus::infrastructure::store::StoreOpenMode::Current)?;
     let location = add_location(&store, media.path(), "main")?;
     scan_location(&mut store, location)?;
     store.save_settings(None, &OutputSettings::default())?;
@@ -45,7 +57,6 @@ fn source_review_cli_imports_only_local_listing_and_requires_separate_exact_appr
         catalog,
     )?;
     store.approve_plan(job, plan.version)?;
-    let host = write_host(state.path(), &database)?;
     let db = host.to_str().ok_or("host path")?;
     let job = job.to_string();
     let version = plan.version.to_string();
