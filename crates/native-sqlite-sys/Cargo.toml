@@ -1,0 +1,25 @@
+[package]
+name = "libsqlite3-sys"
+version = "0.38.2"
+edition = "2021"
+rust-version.workspace = true
+publish.workspace = true
+links = "sqlite3"
+license = "MIT"
+description = "Domus build wrapper for checksum-pinned SQLite with native namespace admission"
+
+[features]
+default = ["min_sqlite_version_3_34_1"]
+min_sqlite_version_3_34_1 = []
+bundled = ["bundled_bindings"]
+bundled_bindings = []
+bundled-sqlcipher-vendored-openssl = []
+loadable_extension = []
+
+[build-dependencies]
+cc = "1.2.27"
+diffy = "0.4.2"
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

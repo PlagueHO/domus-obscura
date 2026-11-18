@@ -1,0 +1,138 @@
+--- a/sqlite3.c
++++ b/sqlite3.c
+@@ -40601,6 +40601,8 @@
+ static int openDirectory(const char*, int*);
+ static int unixGetpagesize(void);
+ 
++#include "native.h"
++
+ /*
+ ** Many system calls are accessed through pointer-to-functions so that
+ ** they may be overridden at runtime to facilitate fault injection during
+@@ -40613,19 +40615,19 @@
+   sqlite3_syscall_ptr pDefault; /* Default value */
+ } aSyscall[] = {
+   { "open",         (sqlite3_syscall_ptr)posixOpen,  0  },
+-#define osOpen      ((int(*)(const char*,int,int))aSyscall[0].pCurrent)
++#define osOpen      domus_native_open
+ 
+   { "close",        (sqlite3_syscall_ptr)close,      0  },
+-#define osClose     ((int(*)(int))aSyscall[1].pCurrent)
++#define osClose     domus_native_close
+ 
+   { "access",       (sqlite3_syscall_ptr)access,     0  },
+-#define osAccess    ((int(*)(const char*,int))aSyscall[2].pCurrent)
++#define osAccess    domus_native_access
+ 
+   { "getcwd",       (sqlite3_syscall_ptr)getcwd,     0  },
+ #define osGetcwd    ((char*(*)(char*,size_t))aSyscall[3].pCurrent)
+ 
+   { "stat",         (sqlite3_syscall_ptr)stat,       0  },
+-#define osStat      ((int(*)(const char*,struct stat*))aSyscall[4].pCurrent)
++#define osStat      domus_native_stat
+ 
+ /*
+ ** The DJGPP compiler environment looks mostly like Unix, but it
+@@ -40699,7 +40701,7 @@
+ #define osFallocate ((int(*)(int,off_t,off_t))aSyscall[15].pCurrent)
+ 
+   { "unlink",       (sqlite3_syscall_ptr)unlink,           0 },
+-#define osUnlink    ((int(*)(const char*))aSyscall[16].pCurrent)
++#define osUnlink    domus_native_unlink
+ 
+   { "openDirectory",    (sqlite3_syscall_ptr)openDirectory,      0 },
+ #define osOpenDirectory ((int(*)(const char*,int*))aSyscall[17].pCurrent)
+@@ -40766,7 +40768,7 @@
+ #else
+   { "lstat",         (sqlite3_syscall_ptr)0,              0 },
+ #endif
+-#define osLstat      ((int(*)(const char*,struct stat*))aSyscall[27].pCurrent)
++#define osLstat      domus_native_lstat
+ 
+ #if defined(__linux__) && defined(SQLITE_ENABLE_BATCH_ATOMIC_WRITE)
+ # ifdef __ANDROID__
+@@ -49281,6 +49283,8 @@
+ ** testing and sandboxing.  The following array holds the names and pointers
+ ** to all overrideable system calls.
+ */
++#include "native.h"
++
+ static struct win_syscall {
+   const char *zName;            /* Name of the system call */
+   sqlite3_syscall_ptr pCurrent; /* Current value of the system call */
+@@ -49314,7 +49318,7 @@
+ 
+   { "CloseHandle",             (SYSCALL)CloseHandle,             0 },
+ 
+-#define osCloseHandle ((BOOL(WINAPI*)(HANDLE))aSyscall[3].pCurrent)
++#define osCloseHandle domus_native_close
+ 
+ #if defined(SQLITE_WIN32_HAS_ANSI)
+   { "CreateFileA",             (SYSCALL)CreateFileA,             0 },
+@@ -49331,8 +49335,7 @@
+   { "CreateFileW",             (SYSCALL)0,                       0 },
+ #endif
+ 
+-#define osCreateFileW ((HANDLE(WINAPI*)(LPCWSTR,DWORD,DWORD, \
+-        LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE))aSyscall[5].pCurrent)
++#define osCreateFileW domus_native_create
+ 
+ #if defined(SQLITE_WIN32_HAS_ANSI) && \
+         (!defined(SQLITE_OMIT_WAL) || SQLITE_MAX_MMAP_SIZE>0) && \
+@@ -49342,8 +49345,7 @@
+   { "CreateFileMappingA",      (SYSCALL)0,                       0 },
+ #endif
+ 
+-#define osCreateFileMappingA ((HANDLE(WINAPI*)(HANDLE,LPSECURITY_ATTRIBUTES, \
+-        DWORD,DWORD,DWORD,LPCSTR))aSyscall[6].pCurrent)
++#define osCreateFileMappingA domus_native_mapping_a
+ 
+ #if (SQLITE_OS_WINCE || defined(SQLITE_WIN32_HAS_WIDE)) && \
+         (!defined(SQLITE_OMIT_WAL) || SQLITE_MAX_MMAP_SIZE>0)
+@@ -49352,8 +49354,7 @@
+   { "CreateFileMappingW",      (SYSCALL)0,                       0 },
+ #endif
+ 
+-#define osCreateFileMappingW ((HANDLE(WINAPI*)(HANDLE,LPSECURITY_ATTRIBUTES, \
+-        DWORD,DWORD,DWORD,LPCWSTR))aSyscall[7].pCurrent)
++#define osCreateFileMappingW domus_native_mapping_w
+ 
+ #if defined(SQLITE_WIN32_HAS_WIDE)
+   { "CreateMutexW",            (SYSCALL)CreateMutexW,            0 },
+@@ -49378,7 +49379,7 @@
+   { "DeleteFileW",             (SYSCALL)0,                       0 },
+ #endif
+ 
+-#define osDeleteFileW ((BOOL(WINAPI*)(LPCWSTR))aSyscall[10].pCurrent)
++#define osDeleteFileW domus_native_delete
+ 
+ #if SQLITE_OS_WINCE
+   { "FileTimeToLocalFileTime", (SYSCALL)FileTimeToLocalFileTime, 0 },
+@@ -49464,7 +49465,7 @@
+   { "GetFileAttributesW",      (SYSCALL)0,                       0 },
+ #endif
+ 
+-#define osGetFileAttributesW ((DWORD(WINAPI*)(LPCWSTR))aSyscall[21].pCurrent)
++#define osGetFileAttributesW domus_native_attributes
+ 
+ #if defined(SQLITE_WIN32_HAS_WIDE)
+   { "GetFileAttributesExW",    (SYSCALL)GetFileAttributesExW,    0 },
+@@ -49472,8 +49473,7 @@
+   { "GetFileAttributesExW",    (SYSCALL)0,                       0 },
+ #endif
+ 
+-#define osGetFileAttributesExW ((BOOL(WINAPI*)(LPCWSTR,GET_FILEEX_INFO_LEVELS, \
+-        LPVOID))aSyscall[22].pCurrent)
++#define osGetFileAttributesExW domus_native_attributes_ex
+ 
+   { "GetFileSize",             (SYSCALL)GetFileSize,             0 },
+ 
+@@ -269370,6 +269370,8 @@
+ #endif /* !defined(SQLITE_CORE) || defined(SQLITE_ENABLE_STMTVTAB) */
+ 
+ /************** End of stmt.c ************************************************/
++/* Link-time guard: the native adapter must use this patched engine. */
++int domus_sqlite_source_boundary_v1(void){ return SQLITE_VERSION_NUMBER; }
+ /* Return the source-id for this library */
+ SQLITE_API const char *sqlite3_sourceid(void){ return SQLITE_SOURCE_ID; }
+ #endif /* SQLITE_AMALGAMATION */
