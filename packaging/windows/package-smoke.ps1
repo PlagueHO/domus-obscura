@@ -63,12 +63,12 @@ try {
         $process.WaitForExit()
         $process.Dispose()
         $process = $null
-        $database = Join-Path $root 'DomusObscura\state.db'
-        $configuration = Join-Path $root 'DomusObscura\service.json'
+        $database = Join-Path $root 'DomusObscura\state\state.db'
+        $configuration = Join-Path $root 'DomusObscura\config.json'
         if (-not (Test-Path -LiteralPath $database) -or -not (Test-Path -LiteralPath $configuration)) {
             throw 'First-run state was not retained after forced exit.'
         }
-        & (Join-Path $copied 'domus.exe') settings $database | Out-Null
+        & (Join-Path $copied 'domus.exe') settings --host $configuration | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Retained SQLite state could not be read.' }
     }
     Write-Output 'Copied package served the real browser twice with fresh state and a system-only PATH. Forced exit retained readable SQLite state. This is not SCM or graceful-stop proof.'

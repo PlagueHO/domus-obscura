@@ -410,8 +410,9 @@ def smoke(application, temporary):
                 raise RuntimeError("real packaged browser assets were not served")
             stop(api, forced)
             api = None
-        state = temporary / "state" / "DomusObscura"
-        configuration = state / "service.json"
+        application_storage = temporary / "state" / "domus-obscura"
+        state = application_storage / "state"
+        configuration = application_storage / "config.json"
         content = json.loads(configuration.read_text())
         content["production_worker"] = {"queue_capacity": 64, "acquisition": None}
         configuration.write_text(json.dumps(content))

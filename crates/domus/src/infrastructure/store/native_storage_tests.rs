@@ -17,6 +17,8 @@ fn fixture() -> Result<(
     let root = tempfile::Builder::new()
         .prefix(".store-native-")
         .tempdir_in(std::env::current_dir()?)?;
+    crate::infrastructure::permissions::private_fixture::directory(root.path())
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let state = root.path().join("state");
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
