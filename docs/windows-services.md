@@ -30,6 +30,7 @@ Use the repository pins. The launcher selects the complete MSVC environment.
 Bootstrap restores packages; it does not install system tools.
 
 First launch creates private state under the current user's `LOCALAPPDATA`.
+The `DomusObscura` child contains `config.json` and `state\state.db`.
 It does not start a worker, enable providers, approve work, or change media.
 Existing explicit secure configuration never falls back to anonymous HTTP.
 See [local development](local-development.md) for optional configured HTTPS.

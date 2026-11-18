@@ -88,6 +88,7 @@ python3 package-check.py --verify-installed /absolute/extracted/package
 Open `http://127.0.0.1:8080`.
 No configuration starts explicit single-user mode with providers disabled.
 Initial state uses `XDG_DATA_HOME`, or `$HOME/.local/share` when unset.
+The `domus-obscura` child contains `config.json` and `state/state.db`.
 Keep it on local Linux disk, not a Windows WSL mount or network filesystem.
 The real browser files must remain beside `domus`.
 
