@@ -2,8 +2,8 @@ use super::super::tests::Fixture;
 use super::super::{MAX_READ, Reference};
 use super::*;
 use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose,
+    BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyPair, KeyUsagePurpose,
 };
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -23,6 +23,8 @@ impl Certificates {
     fn new() -> TestResult<Self> {
         let mut ca = CertificateParams::default();
         ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca.distinguished_name
+            .push(DnType::CommonName, "Domus generated media adapter CA");
         ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = CertifiedIssuer::self_signed(ca, KeyPair::generate()?)?;
         let issue = |purpose| -> TestResult<(String, String)> {

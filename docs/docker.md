@@ -37,8 +37,12 @@ checks, worker scanning, selected bindings, overlap refusal, recreation, gracefu
 stop, forced exit, invalid configuration, and replacement refusal.
 The image build also passes the full native archive lifecycle check on a fresh
 local volume. These are engine results, not supported-host acceptance.
-The current Windows host-loopback retest still fails with connection refused,
-although the same fresh API serves its session inside the engine.
+After the separately approved Docker Desktop host-network setup and engine
+restart, Windows host access to the existing candidate passes the real API
+session, packaged browser-byte, command-guard and state-recreation checks.
+Report: `target/docker-windows-loopback.json`. Its scope is API loopback only,
+using image source `f497e7ea4c7ecd0dfd260a332eb39d96b7e3ad67`. It does not
+establish external-media or whole-image Windows acceptance.
 The storage dependency replaces the old container-ancestor binding with the
 approved operator-selected filesystem contract. Do not restore the old binding
 model or remove the new admission checks. See the [storage contract](storage.md).
@@ -101,7 +105,7 @@ For a separate container-to-host channel diagnostic, use the existing
 `domus-obscura:storage-candidate` image:
 
 ```powershell
-.\dev.ps1 test media_adapter_docker_loopback_probe -- --ignored
+.\dev.ps1 -TaskArgs @('test', '--lib', 'media_adapter_docker_loopback_probe', '--', '--ignored')
 ```
 
 The diagnostic does not pull an image or change Docker settings. It starts a
@@ -111,16 +115,23 @@ material enters the container's temporary filesystem. Its report is
 authenticated root-open channel, not production provider integration or complete
 Windows Docker acceptance. The ordinary test suite skips this diagnostic.
 
-The current Windows run passed all 16 adapter regressions. The separate
+The current Windows run passed all 16 adapter regressions. The first
 Linux-container diagnostic failed with curl exit 7: connection refused.
-The same generated endpoint passed native Windows mutual TLS.
-No Docker Desktop setting changed.
+The user then explicitly approved enabling Docker Desktop host networking and
+restarting its engine. The saved setting is now on and the engine is running.
+Enhanced Container Isolation remains off and was not changed.
+The repeated diagnostic passes native Windows mutual TLS and an authenticated
+root-open request from the Linux container. Its generated CA has a distinct
+issuer name so both WebPKI and the image's curl can validate the test chain.
+Certificate verification and exact peer pinning remain enabled.
+Generated containers, fixtures and the API check's private volume were removed.
 
 These fixtures need no service installation, live provider, or existing library.
 Production media-provider integration, approved mutation/recovery operations,
-and container-to-host transport proof remain required. The Windows host-loopback
-gate above is still open. SQLite and other private application storage retain
-their existing local-only rules.
+and whole-image supported-host checks remain required. The successful channel
+diagnostic does not place the adapter in the cached Linux image or route
+production operations through it. SQLite and other private application storage
+retain their existing local-only rules.
 
 ## Build and verify
 
