@@ -4,7 +4,10 @@ use domus::application::{add_location, scan_location};
 use domus::domain::{EditionSelection, OutputSettings, PlannedTrack};
 use domus::infrastructure::cache::{CacheLimits, FileCache};
 use domus::infrastructure::catalog::CatalogQuery;
+use domus::infrastructure::filesystem::StorageRole;
+use domus::infrastructure::server::configuration::ConfigurationService;
 use domus::infrastructure::store::Store;
+use domus::infrastructure::store::StoreOpenMode;
 use domus::infrastructure::worker::{PreparedFolder, PreparedSearch};
 use rusqlite::Connection;
 use serde_json::{Value, json};
@@ -38,7 +41,23 @@ impl Fixture {
         std::fs::create_dir(&root)?;
         private::directory(&root)?;
         let database = state.path().join("state.db");
-        let mut store = Store::open(&database)?;
+        drop(Store::open(&database)?);
+        let host = state.path().join("host.json");
+        std::fs::write(
+            &host,
+            serde_json::to_vec(&selected_host(
+                state.path(),
+                json!({"database":database,"cache":{"root":root}}),
+            )?)?,
+        )?;
+        select_host_roots(
+            &host,
+            &[
+                ("media", StorageRole::Media, media.path()),
+                ("cache", StorageRole::Cache, root.as_path()),
+            ],
+        )?;
+        let mut store = ConfigurationService::open(&host)?.open_store(StoreOpenMode::Current)?;
         let location = add_location(&store, media.path(), "main")?;
         scan_location(&mut store, location)?;
         store.save_settings(None, &OutputSettings::default())?;
@@ -77,14 +96,6 @@ impl Fixture {
             CatalogQuery::release(RELEASE)?.source(),
         )?;
         cache.put(&key, &body, now, now + 86400)?;
-        let host = state.path().join("host.json");
-        std::fs::write(
-            &host,
-            serde_json::to_vec(&selected_host(
-                state.path(),
-                json!({"database":database,"cache":{"root":root}}),
-            )?)?,
-        )?;
         let request = state.path().join("plan.json");
         std::fs::write(
             &request,
@@ -166,10 +177,10 @@ impl Fixture {
     }
 
     fn set_host(&self, value: Value) -> TestResult {
-        std::fs::write(
-            &self.host,
-            serde_json::to_vec(&selected_host(self.state.path(), value)?)?,
-        )?;
+        let saved: Value = serde_json::from_slice(&std::fs::read(&self.host)?)?;
+        let mut value = selected_host(self.state.path(), value)?;
+        value["storage"] = saved["storage"].clone();
+        std::fs::write(&self.host, serde_json::to_vec(&value)?)?;
         Ok(())
     }
 }
@@ -351,10 +362,16 @@ fn configured_cli_cache_open_never_binds_repairs_or_cleans_read_state() -> TestR
     std::fs::create_dir(&unbound)?;
     private::directory(&unbound)?;
     fixture.set_host(json!({"database":fixture.database,"cache":{"root":unbound}}))?;
-    failed(fixture.cli("catalog-release", &[RELEASE])?, "binding")?;
+    failed(
+        fixture.cli("catalog-release", &[RELEASE])?,
+        "selected storage role",
+    )?;
     assert_eq!(std::fs::read_dir(&unbound)?.count(), 0);
     std::fs::copy(fixture.root.join("owner.lock"), unbound.join("owner.lock"))?;
-    failed(fixture.cli("catalog-release", &[RELEASE])?, "binding")?;
+    failed(
+        fixture.cli("catalog-release", &[RELEASE])?,
+        "selected storage role",
+    )?;
     assert_eq!(
         raw.query_row("SELECT count(*) FROM private_roots", [], |row| row
             .get::<_, i64>(0))?,
@@ -455,7 +472,7 @@ fn configured_cli_protects_host_requests_and_credentials_from_media_and_cache_ov
             "catalog-plan-prepare",
             &[RELEASE, copied_request.to_str().ok_or("request")?],
         )?,
-        "outside all media roots",
+        "media/private role boundary",
     )?;
     let cache_request = fixture.root.join("request.json");
     std::fs::copy(&fixture.request, &cache_request)?;
@@ -594,7 +611,8 @@ fn configured_source_mismatch_and_disabled_selection_fail_before_credentials() -
 fn configured_caa_preparation_freezes_evidence_and_survives_cache_eviction() -> TestResult {
     let fixture = Fixture::new()?;
     fixture.plan()?;
-    let mut store = Store::open_current_existing(&fixture.database)?;
+    let mut store =
+        ConfigurationService::open(&fixture.host)?.open_store(StoreOpenMode::Current)?;
     store.approve_plan(fixture.job, 2)?;
     let listing_source = format!("https://coverartarchive.org/release/{RELEASE}/");
     let image_source = format!("{listing_source}1");
