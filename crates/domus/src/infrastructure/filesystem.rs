@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 
 mod binding;
 mod identity;
+pub mod media_adapter;
 mod selection;
 mod state;
 pub use binding::{DirectoryExpectation, DirectoryIdentityProfile, RetainedDirectory};

@@ -58,6 +58,70 @@ CLI check with `bind-create-src=false`. This remains a separate runtime gate.
 Native Linux host acceptance and a public registry pull are still unverified.
 Do not use this image with an existing library until these gates pass.
 
+## Native media adapter proof
+
+The user approved implementation of a native Windows media adapter for the
+Linux image. External Windows folders remain in scope. This changes their
+planned access from guest 9p mounts to authenticated native provider roots.
+It does not approve host changes, installation, or service registration.
+
+The isolated read-only implementation is
+`infrastructure::filesystem::media_adapter`. It is not connected to production
+API, worker, scanning, sharing, or publication operations. No production command
+starts its listener. Do not treat this proof as Windows Docker acceptance.
+
+The adapter verifies complete selected native chains and retains the opened
+directories and files. Only the Windows/native host maps root IDs to paths.
+The client sends frozen root definitions and a logical selection digest.
+References belong to one authenticated connection. Closing a parent closes its
+descendants. A new connection or adapter restart cannot reuse those references.
+Private adapter directories and supplied private-input hard-link aliases are
+excluded. Configuration and TLS inputs remain in memory after preparation.
+The adapter cannot open a remote database or mutate media.
+
+The loopback-only channel requires mutual TLS and exact paired leaf certificates
+on both sides. Pinning supplements normal chain, validity, usage and hostname
+checks. It does not replace them. The listener reuses the guarded API server.
+It rejects browser headers and bounds request time, frames, pages, reads,
+blocking tasks and live references. A failed enumeration remains incomplete.
+Connection loss never becomes an empty page or a fallback to 9p.
+Each connection permits 32 live references. Pages have at most 64 entries.
+File chunks are at most 16 KiB, and frames are at most 256 KiB.
+At most eight native operations run at once. Each request has a 10-second
+deadline. A deadline closes the connection; it cannot cancel an OS read already
+running on a bounded blocking task.
+
+Run the generated native and TLS fixtures on Windows:
+
+```powershell
+.\dev.ps1 test media_adapter
+```
+
+For a separate container-to-host channel diagnostic, use the existing
+`domus-obscura:storage-candidate` image:
+
+```powershell
+.\dev.ps1 test media_adapter_docker_loopback_probe -- --ignored
+```
+
+The diagnostic does not pull an image or change Docker settings. It starts a
+generated Windows fixture and one temporary container. Only generated pairing
+material enters the container's temporary filesystem. Its report is
+`target/media-adapter-docker-loopback.json`. A successful result proves only the
+authenticated root-open channel, not production provider integration or complete
+Windows Docker acceptance. The ordinary test suite skips this diagnostic.
+
+The current Windows run passed all 16 adapter regressions. The separate
+Linux-container diagnostic failed with curl exit 7: connection refused.
+The same generated endpoint passed native Windows mutual TLS.
+No Docker Desktop setting changed.
+
+These fixtures need no service installation, live provider, or existing library.
+Production media-provider integration, approved mutation/recovery operations,
+and container-to-host transport proof remain required. The Windows host-loopback
+gate above is still open. SQLite and other private application storage retain
+their existing local-only rules.
+
 ## Build and verify
 
 From a checkout on Windows:

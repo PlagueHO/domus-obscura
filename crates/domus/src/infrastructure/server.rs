@@ -114,6 +114,20 @@ pub async fn serve_listener(
     router: Router,
     handle: axum_server::Handle<SocketAddr>,
 ) -> io::Result<()> {
+    serve_listener_with_connect_info::<SocketAddr>(listener, config, router, handle).await
+}
+
+/// Give a native adapter one connection-owned capability table while retaining
+/// the same TLS, parser, handshake and connection-lifetime limits as the API.
+pub(crate) async fn serve_listener_with_connect_info<C>(
+    listener: TcpListener,
+    config: RustlsConfig,
+    router: Router,
+    handle: axum_server::Handle<SocketAddr>,
+) -> io::Result<()>
+where
+    C: axum::extract::connect_info::Connected<SocketAddr> + Clone + Send + Sync + 'static,
+{
     let _shutdown = ShutdownOnDrop(handle.clone());
     listener.set_nonblocking(true)?;
     let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(config);
@@ -123,7 +137,7 @@ pub async fn serve_listener(
         .handle(handle);
     configure_http_limits(server.http_builder());
     server
-        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+        .serve(router.into_make_service_with_connect_info::<C>())
         .await
 }
 
