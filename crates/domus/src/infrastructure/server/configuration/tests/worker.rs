@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn backend_configuration_worker_capacity_is_validated_and_save_does_not_start_work() -> TestResult {
+fn backend_configuration_worker_capacity_validation_does_not_save_or_start_work() -> TestResult {
     let fixture = Fixture::new(false)?;
     for capacity in [0, 1025] {
         let command = section_command(
@@ -23,19 +23,13 @@ fn backend_configuration_worker_capacity_is_validated_and_save_does_not_start_wo
             "production_worker":{"queue_capacity":3,"acquisition":null}
         }]),
     )?;
-    let result = fixture.source.save_sections(command)?;
+    let result = fixture.source.validate_sections(command)?;
     assert!(result.errors.is_empty());
-    let state = result.state.ok_or("missing saved worker state")?;
+    assert!(result.state.is_none());
+    let state = fixture.source.read()?;
     assert!(state.active.production_worker.is_none());
-    assert_eq!(
-        state
-            .saved
-            .production_worker
-            .ok_or("missing saved worker configuration")?
-            .queue_capacity,
-        3
-    );
-    assert!(state.restart_required);
+    assert!(state.saved.production_worker.is_none());
+    assert!(!state.restart_required);
     let store = Store::open_read_current(&fixture.source.active.database)?;
     assert!(!store.worker_status(3)?.online);
     assert!(
@@ -49,8 +43,13 @@ fn backend_configuration_worker_capacity_is_validated_and_save_does_not_start_wo
 #[test]
 fn backend_configuration_worker_credentials_stay_redacted_and_local_mode_stays_separate()
 -> TestResult {
-    let fixture = Fixture::new(false)?;
+    let mut fixture = Fixture::new(false)?;
     let staging = crate::infrastructure::permissions::private_test_directory()?;
+    fixture.select_root(
+        "staging",
+        crate::infrastructure::filesystem::StorageRole::Staging,
+        staging.path(),
+    )?;
     let credentials = fixture
         .directory
         .path()
@@ -64,7 +63,7 @@ fn backend_configuration_worker_credentials_stay_redacted_and_local_mode_stays_s
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600))?;
     }
-    let mut store = Store::open_current_existing(&fixture.source.active.database)?;
+    let mut store = fixture.source.open_store(StoreOpenMode::Current)?;
     drop(crate::infrastructure::staging::StagingRoot::open(
         &mut store,
         staging.path(),
@@ -85,7 +84,7 @@ fn backend_configuration_worker_credentials_stay_redacted_and_local_mode_stays_s
             .field,
         "production_worker"
     );
-    let saved = fixture.source.save(serde_json::from_value(command)?)?;
+    let saved = fixture.source.validate(serde_json::from_value(command)?)?;
     assert!(
         saved.errors.is_empty(),
         "{}",
@@ -94,6 +93,12 @@ fn backend_configuration_worker_credentials_stay_redacted_and_local_mode_stays_s
     let rendered = serde_json::to_string(&saved)?;
     assert!(!rendered.contains("hidden-worker-credentials"));
     assert!(!rendered.contains("fixture-password"));
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&fixture.path)?)?;
+    document["production_worker"] = json!({"queue_capacity":64,"acquisition":{
+        "staging_root":staging.path(),"credentials_file":credentials,
+        "server":"8.8.8.8:2242","acknowledge_plaintext_login":true
+    }});
+    std::fs::write(&fixture.path, serde_json::to_vec(&document)?)?;
     let mut keep = fixture.command()?;
     keep["draft"]["production_worker"]["acquisition"]["credentials_file"] =
         json!({"action":"keep"});

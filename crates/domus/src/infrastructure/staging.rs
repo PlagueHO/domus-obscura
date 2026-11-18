@@ -32,9 +32,11 @@ struct InputReceipt {
 /// One worker owns the root's OS lock for its complete lifetime. All names below
 /// this handle are application-controlled. No peer path is opened.
 pub struct StagingRoot {
-    directory: Dir,
+    directory: LibraryDirectory,
     permissions: FilePermissions,
     identity: String,
+    binding_key: String,
+    binding_identity: String,
     path: PathBuf,
     native: NativeRoot,
     _owner: File,
@@ -68,7 +70,7 @@ impl Seek for ReceivedInput {
 }
 
 pub struct NormalizationDirectory<'root> {
-    directory: Dir,
+    directory: LibraryDirectory,
     run: i64,
     cover_sha256: String,
     cover_bytes: u64,
@@ -228,15 +230,12 @@ fn check_directory(directory: &Dir, permissions: &FilePermissions) -> Result<()>
 
 impl StagingRoot {
     pub(crate) fn cleanup_binding(&self) -> Result<(String, String)> {
-        Ok((
-            self.path.to_str().ok_or_else(conflict)?.into(),
-            self.native.identity.clone(),
-        ))
+        Ok((self.binding_key.clone(), self.binding_identity.clone()))
     }
 
-    pub(crate) fn cleanup_directory(&self, store: &Store) -> Result<Dir> {
+    pub(crate) fn cleanup_directory(&self, store: &Store) -> Result<LibraryDirectory> {
         self.check_store(store)?;
-        let opened = LibraryDirectory::open(&self.path)?;
+        let opened = store.open_registered_root(&self.binding_key, "staging")?;
         if opened.native_root() != &self.native {
             return Err(conflict());
         }
@@ -273,10 +272,10 @@ impl StagingRoot {
     /// and bind it to this database's durable identity. Never delete owner.lock.
     pub fn open(store: &mut Store, path: &Path) -> Result<Self> {
         require_local_disk(path)?;
-        let (path, opened) = LibraryDirectory::canonical(path)?;
+        let (path, opened) = store.open_candidate_root(path, "staging")?;
         require_local_disk(&path)?;
         let native = opened.native_root().clone();
-        let directory = opened.into_directory();
+        let directory = opened;
         let permissions = FilePermissions::current()?;
         check_directory(&directory, &permissions)?;
         let application_identity = store.application_identity()?;
@@ -292,6 +291,8 @@ impl StagingRoot {
             ));
         }
         let new_reservation = store.reserve_staging_root(&path, &native)?;
+        let binding_key = store.root_key_for_directory(&path, &directory, "staging")?;
+        let binding_identity = store.root_binding_identity(&binding_key, "staging")?;
         store.check_native_root(
             path.to_str()
                 .ok_or_else(|| Error::InvalidInput("staging root is not valid Unicode".into()))?,
@@ -343,6 +344,8 @@ impl StagingRoot {
             directory,
             permissions,
             identity: application_identity,
+            binding_key,
+            binding_identity,
             path,
             native,
             _owner: owner,
@@ -353,11 +356,7 @@ impl StagingRoot {
         if self.identity != store.application_identity()? {
             return Err(conflict());
         }
-        store.check_native_root(
-            self.path.to_str().ok_or_else(conflict)?,
-            "staging",
-            &self.native,
-        )?;
+        store.check_native_root(&self.binding_key, "staging", &self.native)?;
         Ok(())
     }
 

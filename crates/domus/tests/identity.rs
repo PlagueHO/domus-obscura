@@ -12,6 +12,9 @@ use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
 
+#[path = "support/private.rs"]
+mod private;
+
 const TENANT: &str = "12345678-1234-4321-9876-123456789abc";
 const OBJECT: &str = "87654321-4321-4321-9876-123456789abc";
 const CLIENT: &str = "abcdef12-1234-4321-9876-123456789abc";
@@ -234,7 +237,7 @@ fn sessions_store_hashes_survive_restart_and_require_the_configured_identity() -
     )?
     .to_string();
     let identity = verifier.verify(&encoded, &nonce)?;
-    let state = tempfile::tempdir()?;
+    let state = private::tempdir()?;
     let database = state.path().join("state.db");
     let mut store = Store::open(&database)?;
     assert!(store.create_session(&identity, 0).is_err());

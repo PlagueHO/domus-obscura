@@ -767,7 +767,7 @@ async fn browser_sign_in_guards_commands_rotates_sessions_and_preserves_durable_
         trusted_http(&material, &server)?,
     )
     .await?;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     let media = directory.path().join("media");
     std::fs::create_dir(&media)?;
@@ -1542,6 +1542,7 @@ fn service_bootstrap_rejects_public_binding_bad_tls_and_media_secret_overlap() -
     }
     let valid = json!({
         "database": database, "listen": "127.0.0.1:8443", "origin": "https://localhost:8443",
+        "storage":domus::infrastructure::filesystem::StorageConfiguration::inspect_initial(state, &domus::domain::LibraryPath::parse("")?)?,
         "tenant_id": TENANT, "object_id": OBJECT, "client_id": CLIENT,
         "client_secret_file": secret, "certificate_file": certificate, "private_key_file": private_key,
     });

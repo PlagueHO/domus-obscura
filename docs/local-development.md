@@ -36,7 +36,7 @@ photo API or library requests. It covers loaded, small, missing, disabled,
 loading and failed presentation states.
 
 The real developer HTTPS application can use Commons only after an operator
-selects it with an existing shared file cache and explicitly reloads or restarts.
+selects it with an existing shared file cache through a coordinated restart.
 Changing saved JSON alone does not activate it. Do not run live photo checks
 without separate approval for provider access.
 
@@ -59,7 +59,7 @@ Use the pinned tools. Run these commands from the repository in PowerShell 7:
 ```powershell
 .\dev.ps1 build
 .\scripts\local-setup.ps1 -Directory C:\DomusDev
-.\target\debug\domus.exe api-preview C:\DomusDev\service.local.json
+.\target\debug\domus.exe api-preview C:\DomusDev\application\config.json
 ```
 
 Choose a new directory whose parent already exists. The script refuses an existing
@@ -68,6 +68,10 @@ default output settings and a 90-day ECDSA developer certificate for `localhost`
 and `127.0.0.1`. Its directories inherit access for the current Windows user only.
 It does not install software, change certificate trust or create provider credentials.
 If setup fails, it retains the partial setup for inspection.
+The private application directory is `C:\DomusDev\application`. Its generated
+`config.json` keeps the external storage selection. The generated library is
+`C:\DomusDev\library`, outside the application directory. The script makes the
+development system policy editable before it saves the initial output settings.
 
 Open `https://localhost:8443`. Use the same hostname and port as `origin`.
 The application uses the real guarded API, not `frontend/local-test`.
@@ -77,35 +81,23 @@ Rebuild and restart after frontend changes. The browser has a Component library.
 Open **System** to inspect the Core application and Media > Music sections. The real file-backed HTTPS
 bootstrap supplies active and saved settings through
 `GET /api/system/configuration`. The active snapshot remains unchanged until
-explicit API reload or restart. Changed saved JSON is explicitly unvalidated; reading it cannot change
+coordinated restart. Changed saved JSON is explicitly unvalidated; reading it cannot change
 the running read-only policy. Secret-file paths and Entra identifiers remain
 hidden. Malformed, missing and oversized files return errors. A failed refresh
 retains the last values with a stale warning. Inspection creates no database,
 cache root or staging directory and starts no provider work.
-Set `system_settings_read_only: false` outside the UI to enable editing.
-Both the running configuration and saved file must permit a backend JSON save.
-Select the required section. Under **Advanced**, use
-**Check changes before saving** for passive validation. Use **Save changes** to
-save the section. These commands retain the draft after failure.
-Navigation retains unsaved sections. **Save all changed sections** saves
-related backend edits together without changing other saved sections.
-A stale revision requires reload and review; the form never overwrites it.
-Secret-file references and Entra identifiers have write-only replacement controls.
-Blank replacements keep the existing values. Optional removals are explicit.
-
-Validation reads existing local inputs and checks TLS without provider requests,
-SQLite migration, root creation/binding, or activation. Cache and staging roots
-must already be set up. A successful save is passively validated and
-reload-required, not active. **Refresh saved values** only reads JSON.
-**Reload** explicitly replaces the API host through ConfigurationService.
-It leaves separate workers unchanged and rejects busy local media operations.
-Save or discard drafts first. Same-origin reload checks the active revision
-before refreshing the browser. A different origin needs explicit navigation;
-identity changes can require login. Failed reload preparation keeps the old
-host active. Reload commands never retry automatically.
-Startup checks all inputs again. Do not use `PreparedServer::load` as a dry run.
-Stop the API before manual JSON edits, or follow the
-[shared writer lock protocol](agent-operations.md#backend-configuration-writers).
+Host JSON is read-only under either `system_settings_read_only` value. That flag
+controls protected SQLite policy commands, including output settings and artist
+photo bindings. It cannot enable host saves or API-only reload.
+Stop the API and all workers before editing the file.
+Run `domus configuration-check <absolute-configuration-file>` before restarting
+all components with the same file. It validates existing local references and
+TLS without provider requests, SQLite migration, root creation/binding, or
+activation. It reports errors and a failing exit status. Cache and staging roots
+must already be set up. Startup rechecks every reference.
+**Refresh settings** only reads JSON. The old host save and reload routes return
+`410 Gone`. Do not use `PreparedServer::load` as a dry run.
+See [configuration operations](agent-operations.md#backend-configuration-writers).
 
 The saved design target is `docs/ui-poc/structure.html`, not the temporary
 functional forms. The connected app now uses the approved Orbit header and
@@ -168,7 +160,7 @@ shows only events with the exact saved plan version, oldest first. Global
 diagnostic event reads retain the older unversioned events. History reads need
 the normal authenticated or explicit loopback-development boundary. There is no
 history mutation, resume or retry command.
-The local `domus job-history <local-database> <job-id> <plan-version> <after-id> <limit>`
+The local `domus job-history --host <absolute-host-file> <job-id> <plan-version> <after-id> <limit>`
 command returns the same JSON event page through a current-schema read-only
 snapshot. It never creates or upgrades state. For the first page, use `after-id`
 `0` and a limit from `1` through `200`.
@@ -231,7 +223,8 @@ The generated setup directory is private. A file created there inherits its
 restricted access. On Unix, set the credential file mode to `0600`.
 Never put these values into the service JSON, browser, URL or logs.
 
-Add `local_acquisition` to `service.local.json` and explicitly reload or restart the API:
+With all components stopped, add `local_acquisition` to `application\config.json`.
+Validate the file before restarting all components:
 
 ```json
 {
@@ -347,7 +340,6 @@ Stopping only this API does not exclude a separate worker, CLI, or certificate o
 The server first rejects new local source, download and publication operations.
 It requests immediate HTTP shutdown; in-flight requests can lose their responses.
 It then waits for the current local operation and its result recording.
-The ten-second HTTP grace period applies only to configuration reload.
 The normal operation drain has no forced
 timeout: it must not abandon an active receive or publication copy.
 A server error also drains before the process exits. A forced process kill
@@ -418,7 +410,7 @@ connection. Supply `source_candidate: null` only for an existing source; an idle
 new job needs its exact approved source candidate.
 
 Library browsing remains read-only. A completed copy is not automatically a
-fresh index observation. Run `domus scan <database> <location-id>` when the worker
+fresh index observation. Run `domus scan --host <absolute-host-file> <location-id>` when the worker
 has finished, then refresh the browser's library view.
 
 ## Repeatable evidence without live credentials
@@ -455,14 +447,20 @@ remote, or host-specific results.
 
 Use fresh, separate local directories. Keep private staging at mode `0700` and
 credentials/private keys at mode `0600`. Build with `cargo task build`.
-Run `domus init`, `location-add`, `scan`, `staging-init`, and save the JSON from
-`settings-default` with `settings-save <database> 0 <settings-json>`.
-Use absolute paths in the configuration:
+Run `domus init --storage-root <absolute-application-storage>` for a fresh empty
+application directory. Preserve its generated `storage` selection and database
+reference when editing `config.json`. Keep the library outside that application
+directory. Use `--host <absolute-config.json>` with `location-add`, `scan`,
+`staging-init`, and `settings-save`. Save the JSON from `settings-default` with
+`settings-save --host <absolute-config.json> 0 <settings-json>`.
+Set `system_settings_read_only` to `false` before protected setup commands.
+These fields show the development HTTPS additions, not a replacement for the
+generated storage configuration:
 
 ```json
 {
   "environment": "development",
-  "database": "/absolute/local/state/domus.db",
+  "system_settings_read_only": false,
   "listen": "127.0.0.1:8443",
   "origin": "https://localhost:8443",
   "certificate_file": "/absolute/local/certificate.pem",

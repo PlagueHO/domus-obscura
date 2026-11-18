@@ -131,7 +131,7 @@ async fn artist_images_commons_cache_reuses_original_without_any_network_and_rep
             .ok_or(Error::Internal("fixture metadata missing"))?;
     let original_key = CacheKey::new(PROVIDER, "original-v1", &evidence_source.fingerprint()?)?;
     cache.put(&original_key, &original, now, now + 86400)?;
-    let client = CommonsClient::new(database.clone(), cache.clone())?;
+    let client = CommonsClient::new(Store::open_read_current(&database)?.source(), cache.clone())?;
     for _ in 0..2 {
         let evidence = client
             .inspect(source.file.clone())

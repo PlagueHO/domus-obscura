@@ -18,7 +18,7 @@ async fn catalog_album_filters_reuse_raw_cache_and_protect_artist_scope() -> Tes
     fixture.mode.store(10, Ordering::SeqCst);
     let material = certificates(MUSIC_HOST)?;
     let server = FixtureServer::start(fixture.router(), &material, MUSIC_HOST)?;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let api = Api::new_with_catalog(
         ORIGIN,
         Store::open(&directory.path().join("state.db"))?,

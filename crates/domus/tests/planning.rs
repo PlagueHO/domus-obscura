@@ -5,7 +5,10 @@ use domus::domain::{
 };
 use domus::infrastructure::store::{Observation, PlanRequest, Store};
 use std::path::PathBuf;
-use tempfile::{TempDir, tempdir};
+#[path = "support/private.rs"]
+mod private;
+use private::tempdir;
+use tempfile::TempDir;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -141,10 +144,22 @@ fn plan_events_are_bounded_durable_and_do_not_mix_jobs_or_versions() -> TestResu
     );
     let after: i64 = raw.query_row("SELECT count(*) FROM events", [], |row| row.get(0))?;
     assert_eq!(before, after);
+    let host = fixture._state.path().join("host.json");
+    std::fs::write(
+        &host,
+        serde_json::to_vec(&serde_json::json!({
+            "environment":"single_user", "database":fixture.database,
+            "listen":"127.0.0.1:8080", "origin":"http://127.0.0.1:8080",
+            "storage":domus::infrastructure::filesystem::StorageConfiguration::inspect_initial(
+                fixture._state.path(), &LibraryPath::parse("")?
+            )?,
+        }))?,
+    )?;
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_domus"))
         .args([
             "job-history",
-            fixture.database.to_str().ok_or("database path")?,
+            "--host",
+            host.to_str().ok_or("host path")?,
             &job.to_string(),
             &version.to_string(),
             &first[0].id.to_string(),

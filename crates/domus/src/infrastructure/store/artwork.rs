@@ -334,7 +334,7 @@ impl Store {
             ));
         }
         writable_plan(&self.connection, job, version)?;
-        let input = crate::infrastructure::local_file::read_local(path, 8 * 1024 * 1024, false)?;
+        let input = self.source().read_input(path, 8 * 1024 * 1024, false)?;
         self.prepare_artwork_input(job, version, "local", &input, background, None)
     }
 

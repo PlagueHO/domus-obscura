@@ -149,11 +149,16 @@ impl Fixture {
         }
         let staging = StagingRoot::open(&mut store, &root.path().join("staging"))?;
         let configuration_path = root.path().join("state").join("backend.json");
+        let storage = domus::infrastructure::filesystem::StorageConfiguration::inspect_initial(
+            &root.path().join("state"),
+            &domus::domain::LibraryPath::parse("")?,
+        )?;
         std::fs::write(
             &configuration_path,
             serde_json::to_vec(&json!({
                 "environment":"single_user", "system_settings_read_only":false,
-                "database":store.database_path(), "listen":AUTHORITY, "origin":ORIGIN
+                "database":store.database_path(), "listen":AUTHORITY, "origin":ORIGIN,
+                "storage":storage
             }))?,
         )?;
         let configuration = ConfigurationService::open(&configuration_path)?;
@@ -650,9 +655,15 @@ impl Fixture {
                 let command = self.configuration_command(body)?;
                 return json_response(self.configuration.validate_sections(command)?);
             }
-            ("POST", "/api/system/configuration/sections/save") => {
-                let command = self.configuration_command(body)?;
-                return json_response(self.configuration.save_sections(command)?);
+            (
+                "POST",
+                "/api/system/configuration/save"
+                | "/api/system/configuration/sections/save"
+                | "/api/system/configuration/reload",
+            ) => {
+                return Ok((StatusCode::GONE, Json(json!({
+                    "error":"Host configuration is operator-managed. Stop all components before editing and validating the file, then restart them."
+                }))).into_response());
             }
             ("GET", "/api/settings") => return json_response(self.store.settings()?),
             ("PUT", "/api/settings") => {
@@ -1430,30 +1441,28 @@ mod tests {
                 "account":{"credentials_file":replace,"server":"generated.invalid:2242",
                     "acknowledge_plaintext_login":false}}}),
         ];
-        for endpoint in ["validate", "save"] {
-            for section in &sections {
-                let body = serde_json::to_vec(&json!({
-                    "expected_revision":revision, "sections":[section]
-                }))?;
-                let result = fixture.dispatch(
-                    &Method::POST,
-                    &format!("/api/system/configuration/sections/{endpoint}"),
-                    &BTreeMap::new(),
-                    &body,
-                );
-                assert!(
-                    matches!(result, Err(Error::InvalidInput(ref message))
-                        if message.starts_with("browser fixture configuration accepts only")),
-                    "{endpoint} must reject {section} before configuration validation"
-                );
-                assert_eq!(fixture.configuration.read()?.saved_revision, revision);
-            }
+        for section in &sections {
+            let body = serde_json::to_vec(&json!({
+                "expected_revision":revision, "sections":[section]
+            }))?;
+            let result = fixture.dispatch(
+                &Method::POST,
+                "/api/system/configuration/sections/validate",
+                &BTreeMap::new(),
+                &body,
+            );
+            assert!(
+                matches!(result, Err(Error::InvalidInput(ref message))
+                    if message.starts_with("browser fixture configuration accepts only")),
+                "validate must reject {section} before configuration validation"
+            );
+            assert_eq!(fixture.configuration.read()?.saved_revision, revision);
         }
         fixture.dispose()
     }
 
     #[test]
-    fn configuration_endpoints_preserve_generated_database_and_section_saves() -> Result<()> {
+    fn configuration_endpoints_preserve_generated_state_and_refuse_host_writes() -> Result<()> {
         let mut fixture = Fixture::new()?;
         let revision = fixture.configuration.read()?.saved_revision;
         let body = serde_json::to_vec(&json!({
@@ -1464,23 +1473,22 @@ mod tests {
                 {"section":"storage","database":fixture.store.database_path(),"cache":null}
             ]
         }))?;
-        for endpoint in ["validate", "save"] {
-            let response = fixture.dispatch(
-                &Method::POST,
-                &format!("/api/system/configuration/sections/{endpoint}"),
-                &BTreeMap::new(),
-                &body,
-            )?;
-            assert_eq!(response.status(), StatusCode::OK);
+        for (route, status) in [
+            (
+                "/api/system/configuration/sections/validate",
+                StatusCode::OK,
+            ),
+            ("/api/system/configuration/save", StatusCode::GONE),
+            ("/api/system/configuration/sections/save", StatusCode::GONE),
+            ("/api/system/configuration/reload", StatusCode::GONE),
+        ] {
+            let response = fixture.dispatch(&Method::POST, route, &BTreeMap::new(), &body)?;
+            assert_eq!(response.status(), status);
             let state = fixture.configuration.read()?;
-            if endpoint == "validate" {
-                assert_eq!(state.saved_revision, revision);
-            } else {
-                assert_ne!(state.saved_revision, revision);
-                assert_eq!(state.saved.origin, "http://127.0.0.1:4175");
-                assert_eq!(state.active.origin, ORIGIN);
-                assert!(state.restart_required);
-            }
+            assert_eq!(state.saved_revision, revision);
+            assert_eq!(state.active.origin, ORIGIN);
+            assert_eq!(state.saved.origin, ORIGIN);
+            assert!(!state.restart_required);
             assert_eq!(
                 fixture.store.database_path().to_string_lossy(),
                 state.saved.database

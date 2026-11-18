@@ -30,7 +30,7 @@ async fn catalog_batch(shared: bool) -> TestResult {
     let catalog_fixture = CatalogFixture::default();
     let material = certificates(MUSIC_HOST)?;
     let metadata_server = FixtureServer::start(catalog_fixture.router(), &material, MUSIC_HOST)?;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     let media = directory.path().join("media");
     std::fs::create_dir(&media)?;

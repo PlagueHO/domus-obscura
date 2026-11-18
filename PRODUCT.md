@@ -125,18 +125,14 @@ acceptance remain open.
 
 ## System Configuration Form
 
-**Storage design requirement, not yet implemented:** The main host configuration
-file is operator-managed and read-only to application components. The current
-JSON save and API reload behavior described below must be reviewed against this
-requirement before the new storage design is implemented. Shared mutable output
-policy remains in SQLite. See the [storage proposal](docs/storage-layout.md#main-configuration-ownership)
+The main host configuration file is operator-managed and read-only to
+application components. Shared mutable output policy remains in SQLite.
+See the [storage proposal](docs/storage-layout.md#main-configuration-ownership)
 for the confirmed filename, defaults, coordinated restart, create-once setup,
 and explicit fresh-setup policy. Host/startup settings belong in `config.json`;
 shared administrator-controlled library policy remains in SQLite.
-These decisions do not change the current implementation described below.
-
-The current System configuration form views and updates supported backend JSON settings
-through typed controls.
+The configurable layout and external state binding remain incomplete.
+System settings shows redacted host configuration without host-edit controls.
 Artwork size, accepted audio formats, preferred formats, quality priorities,
 output templates and future tag rules are system-wide library policy, not
 per-user preferences. All users share the same library. Only the system
@@ -150,20 +146,16 @@ production administrator role. Before adding other production users, enforce
 administrator-only system-setting writes in the backend. The read-only switch
 is an additional operator restriction, not a replacement for authorization.
 
-Cover all supported backend JSON configuration fields through typed form controls,
-including optional and provider-specific settings. Show field descriptions,
-validation errors and whether a change needs a process restart. Distinguish saved
+Show supported host and provider settings with their configured states and
+whether a change needs a process restart. Distinguish saved
 configuration from the configuration currently active in each process. Never show
 a saved change as active before it takes effect.
 
-A backend JSON setting must control whether the form is editable or read-only.
-Read-only mode must still allow safe configuration viewing. Enforce this mode in
-the backend on every configuration write; disabled UI controls alone are not
-protection. Do not allow the UI to change this control setting or bypass it through
-another endpoint. The operator must change it outside the UI. The exact setting
-name is `system_settings_read_only`. It defaults to `true`. The operator must
-change it in the server JSON file. Versioned shared-library output policy remains
-stored in SQLite. Backend JSON has a separate revision-bound save operation.
+`system_settings_read_only` controls protected SQLite policy commands, not host
+JSON ownership. It defaults to `true`. Each command checks both active and saved
+policy. Only an operator can change it outside the UI. Host JSON remains
+read-only even when this flag is `false`. Versioned shared-library output policy
+remains in SQLite. Artist-photo bindings retain their separate guarded commands.
 System settings is a route inside the main application, with its normal header
 and navigation. It also supports explicit registration of existing server-side
 main/backup library folders and separate read-only index scans. Both commands
@@ -173,57 +165,48 @@ folders, move media, replace existing roots or rebind legacy roots.
 
 The system output-settings API uses the existing immutable version history and rejects
 stale versions. Existing plans keep their saved settings. Backend JSON changes
-remain inactive until an explicit API-host reload or operator restart.
+remain inactive until all components restart with the same validated file.
 
 `ConfigurationService` owns backend JSON loading, inspection, validation, secret
-merging, revisions, and persistence. Startup and API handlers use that service.
+merging for passive drafts, and revisions. Startup and API handlers use that service.
 `GET /api/system/configuration` returns its immutable active startup snapshot and
 a bounded, no-follow read of saved JSON. Secret-file paths and Entra identifiers
 appear only as configured states. Both raw JSON revisions are hashed.
 
-The typed editor covers the host, provider selections, optional cache and browser
-assets, Entra references, TLS references, and optional development acquisition.
+The read-only view covers the host, provider selections, optional cache and browser
+assets, Entra configured states, TLS references, and acquisition settings.
 `POST /api/system/configuration/validate` checks a draft without saving it.
-`POST /api/system/configuration/save` repeats validation and atomically saves it.
+`POST /api/system/configuration/sections/validate` checks selected draft sections.
+`domus configuration-check <absolute-configuration-file>` validates saved JSON
+without a listener. Validation reports errors and a failing exit status.
 Normal authentication and development loopback/origin guards apply. Commands
 require the exact Origin and CSRF header. A host without a configuration service
 returns an explicit unavailable error.
 
-Saved JSON remains inactive until reload or restart. Changed external JSON is unvalidated.
-An exact revision saved through the service is passively validated, but startup
-checks remain required. Validation can read local files, verify TLS, and query a
+Saved JSON remains inactive until coordinated restart. Changed JSON is unvalidated.
+Startup checks remain required after passive validation. Validation can read local files, verify TLS, and query a
 current-schema database. It does not migrate SQLite, create or bind roots, contact
 providers, activate TLS, or start work. Referenced inputs can change after a check.
-New cache or staging roots need separate operator setup before browser saves.
-
-Saves use a stable configuration lock and reject stale revisions. All operator
-writers must use the same lock protocol, or stop the API before editing.
-Unrestricted editors that ignore the lock are outside this guarantee.
-Failed saves retain the browser draft. Pre-replacement failures preserve the
-previous file. An error after replacement explicitly requires reloading and
-reviewing the saved file; it does not claim a rollback.
+New cache or staging roots need separate operator setup.
 
 Do not return saved passwords, tokens, private keys or other secret values to the
-browser. Show only their configured state. Where secret updates are supported,
-use write-only replacement controls; an unchanged or blank field must not erase
-an existing secret. Keep secret values out of logs, URLs and audit records.
+browser. Show only their configured state. Passive drafts use write-only
+replacement instructions. Keep secret values out of logs, URLs and audit records.
 
 Validate proposed changes with the same authoritative Rust rules used at startup.
-Save changes atomically and reject stale edits instead of overwriting concurrent
-operator changes. Report failed saves and activation failures explicitly. Preserve
-the last valid configuration when validation or persistence fails. Record which
-settings changed without recording secrets.
+Reject stale validation revisions. Never rewrite existing host JSON or create
+configuration update locks or pending files from application commands.
 
 Keep production authentication, guarded browser commands, TLS validation, native
-root binding and other operational boundaries in force. A configuration save must
+root binding and other operational boundaries in force. A configuration edit must
 not implicitly approve media work, rebind roots or change frozen plans, saved
 settings versions, approvals or receipts. Identify restart-only changes and
 changes that need a separate explicit operation.
 
-Acceptance must cover complete supported-field coverage, valid and invalid edits,
-secret redaction and replacement, stale-edit rejection, failed-save recovery and
-restart-required status. Verify that read-only mode rejects direct write requests
-as well as disabling form edits, and cannot be disabled from the UI.
+Acceptance must cover safe viewing, valid and invalid passive drafts, redaction,
+stale validation rejection and restart-required status. Host save and API-only
+reload routes return `410 Gone` under either SQLite policy flag. They retain
+normal browser command guards and cannot change files or the running host.
 
 System configuration uses a sidebar within the normal application shell:
 **Core application** contains General, Identity, TLS, and Storage/cache.
@@ -236,41 +219,27 @@ All and Specific allowlist. Select only explicitly bound registered library
 folders, with optional relative subfolders and public aliases. Sharing is
 read-only and initially permits MP3, FLAC and JPEG. It uses the same account
 session as acquisition. Resource limits are finite, validated and configurable.
-Saving settings never starts sharing or opens a listener. Restart the separate
-worker to activate the saved configuration. Listener address and port are
+Changing JSON never starts sharing or opens a listener. Stop all components,
+edit and validate the file, then restart them. Listener address and port are
 explicit; automatic port mapping remains disabled.
 
-Open each section directly to its saved settings form. Use the shared Component
-library and a compact reload notice only when saved backend changes need
-activation. Keep running values, revision identifiers, and optional validation
+Open each section directly to its saved settings summary. Use the shared Component
+library and a compact restart notice when saved backend changes need
+activation. Keep running values and revision identifiers
 under Advanced. Do not present a configuration-state dashboard as the main task.
-Use a section picker on narrow screens. Discarding one section must retain drafts
-in other sections.
+Use a section picker on narrow screens.
 
-Typed section commands use `POST /api/system/configuration/sections/validate`
-and `/sections/save`. They submit only selected changed sections. The service
-merges them with saved JSON under the existing writer lock and validates the
-complete candidate. Batched changes are atomic. A stale whole-file revision
-still fails, even when another writer changed a different section.
-Successful section saves retain drafts in other sections. Navigation keeps
-backend and Music policy drafts. Music output saves retain their existing
+Typed section validation merges selected drafts with saved JSON in memory and
+checks the complete candidate. It rejects duplicate or unknown sections and stale
+whole-file revisions. It never saves the candidate. Music output saves retain their existing
 immediate effect on new plans; existing plans retain frozen policy versions.
 Library registration and scanning remain separate explicit operations.
 
-**Refresh saved values** is passive. **Reload** sends a revision-bound command
-through ConfigurationService to replace the API host with saved backend JSON.
-It does not restart separate workers. The service reports pending, active, or
-failed reload state, separately from save/validation state. The runtime prepares
-the replacement host before listener handover and keeps the old listener bound
-for recovery. Preparation failure leaves the old host active. Busy host-owned
-media operations reject reload instead of interrupting effects or receipts.
-Reload retains the guarded TLS listener and command/authentication checks.
-
-Reload is disabled while configuration drafts remain. A same-origin browser
-checks the active revision with bounded reads before refreshing the application.
-A different origin requires an explicit navigation and can require login.
-A dropped response or failed confirmation never triggers an automatic activation
-retry. Operator recovery remains required if listener restoration itself fails.
+**Refresh settings** reads saved JSON without activation. Stop the API and all
+workers at safe boundaries before operator edits. Validate the file, then restart
+all components with that file. Check active revisions and fresh worker
+heartbeats. Managed certificate renewal and validated manual TLS material refresh
+remain separate from host JSON activation.
 
 ## Future Conversational Workflow
 

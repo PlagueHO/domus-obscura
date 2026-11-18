@@ -2,23 +2,39 @@
 
 ## Status
 
-This is the first-stage design for [#68](https://github.com/PlagueHO/domus-obscura/issues/68).
-The user requires prototype evidence and separate design approval before
-production changes.
+This is the design and implementation record for
+[#68](https://github.com/PlagueHO/domus-obscura/issues/68).
+The user approved production implementation under the operator-trusted logical
+filesystem contract after reviewing the prototypes. Production integration is
+implemented. Final repository checks and native Ubuntu CI remain incomplete.
 
 The user selected one private application directory with overridable child
 folders and separate primary/backup media libraries. Media can be local or on
 network file shares; SQLite must remain local. See the
 [application storage layout](storage-layout.md) for the seven confirmed policy
 decisions, including default paths, read-only host configuration, coordinated
-restart, and explicit fresh setup. Detailed configuration contracts and safe
-mount arrangements still need implementation and verification.
+restart, and explicit fresh setup. The current production model is in
+[initial production selection](#initial-production-selection). Progress and
+prototype sections below retain their original evidence and limits.
+
+**Confirmed trust boundary:** The user selected
+"Use operator-trusted filesystem bindings (Recommended)" after rejecting
+physical-device properties as a storage prerequisite. The
+[current authority contract](#confirmed-hardware-independent-authority-contract)
+supersedes earlier requirements for physical backing graphs, Intel member
+mapping, globally clone-resistant identity and independently proved separation
+across opaque providers. Those investigations remain historical evidence,
+not production prerequisites. The production adapter now retains ancestor handles
+and queries actual filesystem locality. New selected records save logical root
+meaning. Existing native records are never converted or adopted.
+Host JSON writes and API-only activation have now been removed.
 
 **The simple retained-boundary proposal failed its alias-separation gate.**
 Removing container-specific ancestors makes identity comparison stable, but does
 not prove that media and private storage are separate. Do not use the experiment
-to authorize storage. No production binding semantics, configuration fields, or
-database migrations change in this stage.
+to authorize storage. That historical experiment changed no production binding
+semantics, configuration fields or database migrations. The later approved
+production integration is recorded below.
 
 **Restricted replacements now reject real Linux and Windows aliases.** Linux
 correlates retained directory handles with kernel mount-root coordinates.
@@ -31,9 +47,575 @@ integration or arbitrary mounts. Network media, different filesystems, native
 Linux hosts, and Windows containers still need separate evidence.
 See [replacement proof](#replacement-proof).
 
-Existing native operation and explicit legacy-binding commands keep their
-current behavior. The agreed container layout still requires a valid binding
-design and separate platform verification.
+Selected production access refuses old native root records. It never converts
+or adopts them. Bare native access remains available to isolated fixtures.
+Container concurrency and recreation now have a passing generated-data proof;
+native Linux-host evidence remains separate.
+
+## Confirmed hardware-independent authority contract
+
+Storage authority concerns filesystem objects and directory relationships, not
+the disks that hold their bytes. Separate filesystems may share physical media.
+Do not require disk serials, controller identifiers, RAID membership or a physical
+backing graph. This design does not establish independent backup failure domains.
+A filesystem behind RAID is not excluded merely because controller membership
+metadata is unavailable. The observed Intel-backed Windows filesystem remains
+in scope through its supported logical filesystem interface.
+
+The operator controls configuration, mounts and share mappings. Treat that
+administration as trusted. Stop all components before changing those mappings,
+then validate and restart them with the same frozen selection. Do not claim
+protection against a privileged administrator making undisclosed topology changes.
+
+Keep three different responsibilities:
+
+1. **Logical selection:** operator-owned configuration selects the provider,
+   root and role. A stable application root ID identifies a record; it is not
+   proof that a directory is the approved one.
+2. **Live filesystem authority:** open components without following links.
+   Retain handles, verify the expected native identities within the supported
+   operator-selected provider scope, and reject unexpected replacements.
+   A copied marker cannot replace this check. Filesystem IDs are not physical
+   device IDs, and must not be assumed portable across clients or containers.
+3. **Relationships:** reject known equal, nested or aliased roots where policy
+   requires separation. Use actual namespace evidence where the supported
+   provider supplies it. Do not infer independence from different labels,
+   paths, UUIDs, hosts or signing keys.
+
+For opaque mappings between provider views, an explicit operator topology
+assurance can supply the missing relationship assumption. Bind that assurance
+to the exact selected roots and configuration/binding revisions, not a blanket
+"trust all storage" flag. It is trusted administrative input, not a measured
+separation proof. Without a matching assurance or supported relationship evidence,
+keep the relationship unknown and refuse new admission. An assurance cannot
+override a known overlap, unsafe link or changed native binding.
+
+The operator must ensure that private roots are not also exposed as media through
+another provider. The application cannot promise automatic discovery of hidden
+aliases across opaque systems. A deployment needing independent verification
+must supply a supported trusted namespace bridge or remain refused; that is not
+the default requirement for every deployment.
+
+An exact copy of the filesystem identifiers and trusted configuration may be
+indistinguishable from the original using those same inputs. That case needs
+explicit operator handling or an authority outside the copy. Automatic detection
+of all such clones is not a guarantee of this model. Ordinary detectable root
+replacement, unsafe traversal and stale-binding refusal remain required.
+
+The user subsequently approved production implementation under this contract.
+The document below distinguishes historical test-model schemas from implemented
+production behavior. Current supported profiles, exact assurances, fresh setup
+and stopped-host restart rules are implemented. No automatic rebinding is
+available. Complete final platform validation before claiming acceptance.
+Keep SQLite local, configuration read-only, component traversal handle-relative,
+and media effects subject to their existing approval and recovery rules.
+
+## Production adapter progress
+
+`LibraryDirectory` now keeps all opened ancestor handles. Its canonical form
+returns the directory whose actual handles supplied the verified native chain.
+Capability-style child opens and clones retain that chain. The old
+`into_directory` escape is removed. Cache, staging, publication, recovery,
+certificate, startup, configuration and sharing consumers keep the shared
+directory object instead of discarding its ancestor handles. Metadata and
+permission queries can borrow a cloned file handle while that object stays live.
+SQL remains in `Store`.
+
+On Windows, the retained handles prevent ancestor rename until their owner ends.
+On Unix, a rename can succeed; retained handles still reference the original
+objects. These are different native behaviors, not a portable pathname lock.
+The new regressions exercise child opens and clones after the initial root ends.
+
+The locality guard now inspects the opened filesystem, not just its path prefix.
+Windows queries reopen the exact borrowed object synchronously through
+`NtOpenFile` with an empty relative name. They query
+[`NtQueryVolumeInformationFile`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryvolumeinformationfile)
+and, for nonremote objects, `GetVolumeInformationByHandleW`.
+This avoids `ReOpenFile`, which failed on generated directory handles in the
+native Windows check. Only nonremote disk filesystems reporting `NTFS` receive
+the current local classification.
+
+Linux uses `fstatfs` on the actual file or directory handle. The current local
+classification covers the ext filesystem family. Its shared magic value does
+not distinguish ext2, ext3 and ext4 or establish a durable provider binding.
+Recognized NFS and CIFS/SMB filesystem types report remote; other types report
+unknown. State and secret guards reject remote and unknown classifications.
+No path spelling, physical-device query or owner marker substitutes for this
+check.
+
+Passive path validation does not open inactive references or require new parents
+to exist. Active reads inspect both the opened parent and the opened file.
+First-run directory creation checks the actual existing or created parent.
+This keeps startup validation separate from filesystem effects and catches a
+file mount whose filesystem differs from its parent.
+
+Configuration loads and passive draft validation now resolve nonempty relative
+native paths from the configuration file's parent. Absolute overrides stay
+unchanged. Empty paths and Windows rooted paths without a drive remain invalid.
+The saved JSON and its raw-byte revision are not rewritten during resolution.
+
+The production filesystem module now supplies `DirectoryExpectation` and a
+retained directory guard. Its versioned codecs are
+`windows-file-id128-chain-v1` and `linux-exportfs-chain-v1`. An expectation covers
+the selected provider boundary and every relative directory below it. Reopening
+checks each actual handle before descending. Ancestors above that boundary stay
+retained but are not part of this expectation. No bare directory capability is
+returned through the public guard.
+
+The Linux native adapter queries the borrowed object with
+[`name_to_handle_at` and `AT_EMPTY_PATH`](https://man7.org/linux/man-pages/man2/name_to_handle_at.2.html).
+It pairs the opaque handle with the opened filesystem's identifier. It never uses
+`open_by_handle_at`, a mount ID, a physical-device identifier, an inode-only
+fallback or the object's former path. The adapter accepts at most 128 opaque
+handle bytes. Unsupported filesystems, larger handles and syscall restrictions
+return errors. This is an adapter bound, not a guarantee about all filesystems.
+
+Generated Windows and WSL ext4 fixtures check serialized-chain reopening and
+refusal of replaced boundaries, intermediate directories and leaves despite
+copied markers. Linux also checks link refusal and the borrowed native handle
+after path replacement. Provider admission, scope persistence, locality and
+relationship assurances remain separate. These primitives do not change saved
+production bindings or establish container acceptance.
+
+The default first-launch path now uses `config.json` and `state/state.db` under
+the agreed personal OS root. `serve --storage-root` selects an explicit absolute
+root without adding another application folder. The saved database reference is
+relative to the configuration file, not the working directory.
+First launch refuses a nonempty application directory when
+its main configuration is absent. It does so before creating its startup lock
+or pending configuration and before opening SQLite. Existing databases,
+orphaned sidecars, copied locks, unknown files and media are not adopted or
+removed. A concurrent setup rechecks under a lock opened through the retained
+directory. Existing invalid configuration fails without creating that lock.
+This refusal guard is not the complete configurable setup or external
+state-binding implementation. Omitted database and enabled optional-role paths
+now use `state/state.db`, `cache`, `staging` and `certificates` relative to the
+configuration file. Omitted optional services remain disabled.
+The native Store integration now uses a fixed private `sqlite-tmp` child.
+Its full integration checks remain incomplete.
+
+The retained-consumer, directory-profile and fresh-refusal version passed full
+`check`, `build` and `smoke` on Windows and Ubuntu 24.04 WSL. Its main library
+suite passed 414 Windows tests and 408 WSL tests, with 15 ignored on each.
+Workspace integrations, the separate harness and 266 frontend tests passed.
+An earlier default-parallel WSL run failed the scoped-refresh worker's completion
+assertion. That exact test passed alone; the full two-thread rerun passed.
+The failed log is preserved. These counts precede the host-configuration change
+below. WSL used a verified generated source copy on ext4. It does not establish
+native Linux-host or concurrent-container acceptance.
+
+Existing host JSON now has no application writer or API-only reload lifecycle.
+The old save and reload routes return `410 Gone` under both SQLite policy flag
+values. Browser guards remain active. System settings shows redacted saved and
+active summaries with coordinated restart guidance, while versioned SQLite
+output policy and artist-photo bindings retain their existing commands.
+`domus configuration-check` validates saved JSON without opening a listener.
+It reports invalid input through redacted issues and a failing exit status.
+Managed renewal and validated manual TLS material refresh remain separate.
+The host-configuration snapshot passed Windows `check` and Ubuntu 24.04 WSL
+`check`, `build` and `smoke`. Desktop and narrow browser cases passed with the
+installed Edge executable after pinned Playwright Chromium was unavailable.
+No browser was installed. These checks precede the latest layout and selection
+changes; they do not validate the final integrated storage implementation.
+
+### Initial production selection
+
+The new `filesystem/selection.rs` module defines a frozen `FilesystemClient`.
+Supplied host `storage` configuration selects versioned roots, provider mappings
+and exact topology assurances. Each root has a role, stable record ID, binding
+revision, provider scope, relative `LibraryPath` and complete native directory
+expectation. Provider boundaries resolve from the configuration file.
+Raw source and canonical semantic revisions remain separate.
+
+`LogicalRootBinding` serializes one versioned complete root definition without
+its runtime provider locator or ancestors above the selected boundary.
+Its stable digest is a record identifier, not directory or write authority.
+`FilesystemClient::open_binding` requires the exact current root definition and
+the requested role before it verifies the complete native chain. A new runtime
+ancestor chain can therefore reopen unchanged saved meaning. A changed binding
+revision, role or boundary cannot reuse it.
+
+The existing SQL root registry now saves these records under
+`storage-root:<root_id>`. Native paths remain runtime locators, not database keys.
+Selected production access refuses native records. Bare isolated fixtures refuse
+logical records. Neither mode converts or adopts the other representation.
+Filesystem admission precedes SQL transactions; registration inside a transaction
+only compares immutable definitions and writes SQL.
+
+Scans, availability, indexed JPEG reads, publication and recovery reopen registered
+roots through the current mapping. Cache owner records and staging receipts use
+the stable binding identity. Staging keeps its current native locator separately
+for playback path reporting. Sharing bindings and catalog directory evidence save
+logical descendant snapshots: the complete root definition, a root-relative path
+and every persistent component identity from the selected root. The snapshots
+contain no handles and cannot authorize access without a matching fresh traversal.
+
+Admitted directories and their descendants retain the selected client. Its raw
+root pins retain current native ancestry without creating an ownership cycle.
+Known runtime overlap fails even when an assurance says that roots are separate.
+A live client refuses a changed runtime ancestor chain. Release all owners before
+an intentional locator change and restart with the unchanged logical selection.
+
+Managed certificate journals, pending recovery and history archives also save
+logical directory evidence. Certificate status, startup, ownership and renewal
+use admitted certificate directories. Explicit bootstrap can initialize only an
+already selected, empty certificate root. Unknown files, existing locks and copied
+journals are not fresh state. Runtime certificate and credential locators do not
+change the frozen hostname, authority, resource and credential-content binding.
+There is no conversion for a native-bound journal.
+
+Service configuration and credential inputs must be inside an admitted private
+boundary and outside known media ancestry. Installed browser assets can remain
+outside application storage, but cannot enter known media roots. This exception
+does not apply to secrets or writable application state.
+
+Input reads admit the actual parent directory before opening its child file.
+They retain that handle through the bounded read. Worker requests, source
+listings, local artwork, service requests, credentials and manual TLS refresh use
+this path. Credential checks do not need a SQL transaction. Browser loading uses
+the same bounded reader and no-follow directory iteration, with the separate
+non-media rule for installed assets.
+
+### Inspecting an additional root
+
+Stop all state users before changing an operator selection. Create any required
+empty private directory yourself with the required permissions. Inspect its
+complete expectation without changing configuration:
+
+```powershell
+domus storage-root-inspect 'G:\' media-home main 1 media Music
+```
+
+The command prints one `StorageRoot` candidate. Its arguments select the absolute
+provider boundary, provider scope, root ID, positive binding revision, role and
+library-relative path. An empty relative path selects the boundary itself.
+The directory must already exist. Inspection creates no files, registers no root
+and gives no media-write approval.
+
+Review the candidate and the complete layout. Add its provider mapping and root
+to the operator-owned `storage` configuration. Add exact topology assurances
+where required. Advance the selection revision for a changed selection. Keep the
+existing external state expectation unchanged. Then run `configuration-check`
+and restart all components with the same configuration. A candidate is not
+proof that the combined layout is admissible. Do not replace an existing saved
+root definition to make incompatible state pass.
+
+The production semantic digest uses `domus-storage-selection-v2\0`. It covers
+the selection version and revision, sorted provider scope IDs, complete
+sorted root records and the expected coordination-file identity. Provider boundary locators are excluded. Relative provider
+resolution and container-local mount paths must not invalidate an otherwise
+unchanged logical selection or its exact assurances. Each root's complete native
+expectation still verifies its selected boundary and every relative component.
+A locator that opens a different boundary is refused. The raw source digest
+still binds the exact host configuration bytes. This production digest is
+separate from the historical test-model digest below.
+
+The `application` role protects the containing private directory from media.
+It can contain the other private roles. The reverse containment is refused.
+An opaque application/private relationship still needs an exact assurance.
+State, cache, staging, certificate and
+media roots keep their separate relationship checks. A supported complete chain
+within one unchanged provider/filesystem scope supplies namespace evidence.
+A filesystem transition or opaque mapping requires an exact operator assurance.
+Known native overlaps remain refused even with an assurance. Offline selected
+roots remain reserved without being opened during another root's admission.
+An individual root must pass its own native check before access.
+
+Fresh setup saves application/state expectations outside SQLite before database
+initialization. `ConfigurationService` requires those selections and retains both
+source-directory and selected-root authority. API startup, passive draft database
+reads, certificate commands, the production worker, service CLI and MCP host
+loading use that selected authority when opening Store. Service CLI and MCP use
+the main host schema, not a second unselected service-host schema.
+An absent selection fails before their startup lock or SQLite effects. Copying
+configuration to another application root does not authorize that root.
+Configured locators are compared through complete retained native ancestry.
+Ordinary and extended-length Windows path spellings can identify the same
+selection; another directory cannot.
+
+State utility commands now require `--host`. Worker/check, publication and source
+metadata commands also require the selected main host. Their operation files
+must identify that same database through its native file identity. They cannot
+select a bare database or migrate old state. Publication remains independent of
+acquisition-provider enablement. Source listing import reopens through the
+retained selected source after local input validation.
+
+Explicit `init --storage-root` creates fresh private configuration and state
+without browser validation, provider activation or a listener. Existing
+configuration and nonempty storage are refused without changing their evidence.
+Shared-policy and root-binding commands check the host's read-only policy.
+The development setup script uses the generated application configuration and
+keeps its generated library outside the application directory.
+
+This is not complete production acceptance. The selected Windows regressions now
+cover logical media, sharing, cache and staging reopening after provider relocation.
+Certificate journal and archive relocation also passes without rewriting saved
+bytes. These generated checks are not concurrent-container or native Linux-host
+proof. Complete the remaining consumer audit and final platform checks before
+claiming acceptance.
+
+### Selected state coordination
+
+Fresh setup creates the private `.domus-storage-selection.lock` file before it
+captures external expectations and opens SQLite. Host storage configuration
+records its full persistent identity in `expected_selection_file`. Selected
+state access refuses a missing or replaced file, including a copied valid record.
+It does not recreate or adopt that file. Database names cannot use this reserved
+name, including ASCII case variants.
+
+The fixed record contains a version header, a 64-character digest and a SHA-256
+checksum. The checksum detects damaged records; it is not authentication.
+The fence digest covers the semantic selection digest and all exact topology
+assurances in canonical order. Assurances reference the semantic digest, not
+the fence digest, so there is no circular reference. Provider locators and raw
+host bytes are not part of this cross-process token. Different local mount paths
+can share an unchanged logical selection. Each client still retains its exact
+raw source revision and verifies actual native boundaries before access.
+
+Matching selections hold shared OS locks. A different selection needs exclusive
+ownership before it can update the existing coordination record. Admission
+rechecks the record after converting back to shared ownership. This record update
+is also possible during read-only database admission when no conflicting owner
+exists. It does not write host JSON, create SQLite state, bind a root, change a
+saved plan or grant an approval. Passive JSON parsing and selection inspection
+do not acquire this fence. Stop all state users before operator configuration
+changes; the fence does not replace that procedure.
+
+The native adapter owns the original locked file handle. It keeps that handle
+through independent connections, retained filesystem clients, operation locks,
+deferred statements, blobs, backups and quarantined close failures. It checks
+the file entry, native identity and exact record before SQLite file effects.
+Rust owner destruction must not unlock an earlier duplicate. The terminal native
+release closes the fence only after dependent files and directory pins.
+Malformed, truncated and oversized records fail without repair.
+
+### Native SQLite integration in progress
+
+The five Store open modes now use the pinned native SQLite namespace adapter.
+The adapter retains actual no-follow state ancestry and the private `sqlite-tmp`
+directory through SQLite file operations and deferred native lifetimes. Main,
+sidecar and temporary names do not fall back to ambient pathname opens.
+Read/current modes refuse a missing temporary directory without creating or
+repairing it. Only explicit create mode can create that private child.
+
+`StoreSource` creates independent connections from admitted native authority.
+It retains the Rust directory chain and the complete frozen filesystem client,
+including offline root reservations and the source revision. Independent owners
+do not reconstruct that selection from database rows or reported paths.
+Worker supervisors and lanes, acquisition, publication recovery, local runtime,
+sharing catalogs and visibility, account reconnects, response spools, CAA and
+Commons use the retained source. State locks and overlap checks use its admitted
+directory, not a new database-parent lookup. WAL, FULL synchronization, foreign keys, the
+five-second busy timeout and independent read snapshots remain Store policy.
+Terminal close failures retain native evidence and produce an error report.
+
+Five focused Windows Store cases passed. They cover open modes and snapshots,
+real private temporary spill, refusal of missing temporary storage or a replaced
+state root, source-owned state locks and the complete frozen selection across
+independent thread owners while media is offline.
+Windows retains state and TEMP pins that prevent directory rename. Unix can
+permit rename, but subsequent source opens and lock effects must fail without
+touching either a replacement root or the detached original.
+
+The selected-startup and Windows locator regression passed 90 cases with two
+ignored. A later complete check passed 418 library cases with 15 ignored before
+the frozen-selection addition. It exposed old cache and catalog service-host
+fixtures. The corrected cache and CLI selection regressions passed 42 cases.
+The later Windows check passed the integration targets and local harness, then
+found missing selection in the browser-workflow fixture. After that correction,
+all seven browser-workflow cases passed. The host-selected CLI stage also passed
+28 worker/bootstrap cases, all 33 CLI cases and the publication CLI case with
+acquisition providers disabled. Complete checks for this later source are pending.
+The adapter alone also
+passed six Windows and six pinned Ubuntu WSL cases. None of these results is
+native Linux-host or concurrent-container production acceptance.
+
+These historical check results precede the logical registry and certificate
+integration described above. They do not complete the shared storage client.
+External selection and cross-process native fencing now protect selected Store
+entry and dependent ownership. Current complete checks and the required native
+Linux-host and concurrent-container evidence remain open. Locality validation
+alone is not sufficient.
+
+## Concurrent container regression
+
+The ignored `logical_store_container_probe` is a private generated-data test.
+Build the Linux library test executable with the pinned tools. Use the executable
+reported by `cargo test --locked --package domus --lib --no-run`.
+Run the controller with a compatible runtime image that is already cached:
+
+```text
+node scripts/storage-container-proof.mjs <Linux-test-executable> <cached-runtime-image> <new-evidence-directory>
+```
+
+The controller requires a Linux Docker engine. It does not pull or build an
+image. It creates one new named volume and four bounded containers with network
+access disabled. Each container has a different runtime ancestor chain.
+An independent reader keeps its one-row snapshot while the writer commits
+20 additional rows. Both complete before their containers are removed.
+A new container then reopens and scans the unchanged retained storage.
+
+The controller compares the immutable root bodies, retained media identity and
+byte-for-byte saved selection. It records the executable hash and runtime image
+ID. Label-checked cleanup removes only the generated containers and volume.
+Any test or cleanup failure produces a failing exit status. Preserve the result
+directory as evidence. Docker Desktop execution is Windows-host evidence,
+not native Ubuntu-host evidence.
+
+The first current production-client run passed all four modes. Its executable
+SHA-256 was
+`739341c5cf7f8e8edd9245f7dc316bb1de97cf214a7105ae7a583f635c28db07`.
+The saved selection SHA-256 stayed
+`433b0a8d537dca41f558cf9a3c5ab5aa1649acd337e96787ebb66fb800b3c3f1`.
+Runtime ancestry differed in each mode. The recreated reader observed all
+21 rows and unchanged generated media. All generated resources were removed.
+This result predates the later cache error-order correction. Final validation
+must identify its exact source separately.
+
+## Proposed logical binding document and admission model
+
+The test-only
+[`logical_binding_prototype.rs`](../crates/domus/src/infrastructure/filesystem/logical_binding_prototype.rs)
+models the configuration checks for this trust boundary. It does not change
+production configuration, startup, native identity encoding or database access.
+The format below is a review proposal, not an accepted production schema.
+
+### Document fields
+
+| Field                                     | Proposed meaning                                                                                                                                                 |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `format_version`                          | Version of the binding document. The model accepts version 1 only.                                                                                               |
+| `selection_revision`                      | Nonzero operator revision for the selected storage arrangement.                                                                                                  |
+| `roots`                                   | Complete selected root inventory with unique `root_id` values and exactly one state root.                                                                        |
+| `root_id`, `binding_revision`             | Stable record ID and nonzero revision for one binding. Neither is native directory authority.                                                                    |
+| `role`                                    | `state`, `cache`, `staging` or `media`. These are separated roots, not the containing application directory or a complete model of protected private references. |
+| `provider_scope`, `locator`               | Operator-selected logical provider view and root location. Labels and path spelling do not establish identity or separation.                                     |
+| `expected.profile`, `expected.components` | Supported provider-owned identity format and ordered directory expectations. A real adapter must verify these against retained no-follow handles.                |
+| `topology_assurances`                     | Exact canonical root pairs, each with both binding revisions and the semantic selection digest. No global assurance is accepted.                                 |
+
+Unknown fields, unsupported versions/profiles, zero revisions, duplicate roots,
+invalid state inventories and malformed or stale assurances are refused.
+Assurance pairs use increasing root-ID order. Self-pairs, reversed pairs,
+duplicate pairs and references to missing roots are refused.
+
+The diagnostic bounds input to 65,536 bytes, 16 roots and 64 identity components
+per root. Root/provider/profile names are limited to 128 bytes, locators to 4,096
+bytes and each identity component to 512 bytes. These are test-model bounds,
+not approved product limits or a promise to accept arbitrary native path forms.
+
+The portable model uses the synthetic `fixture-handles-v1` identity profile.
+The Windows-only extension below adds an actual handle-based profile.
+There is no Linux or SMB identity codec in this model.
+Provider profiles still need complete production validation, continuity scope
+and reconnect behavior. Preserve full Windows file IDs.
+Do not make transient Linux `st_dev` values, mount labels or arbitrary provider
+names durable identity authority.
+
+### Selection and activation
+
+The **selection digest** uses SHA-256 with the domain prefix
+`domus-storage-selection-v1\0`. It covers the format version, selection revision
+and complete bindings sorted by root ID. This includes each role, locator,
+provider scope, expected identity and binding revision. It excludes assurances
+to avoid a circular hash. JSON whitespace and inventory order do not affect it.
+A changed mapping invalidates an assurance even without a revision increase.
+The digest binds content; it is not a signature or proof of operator identity.
+
+The separate **source digest** covers the exact document bytes, including
+assurances and whitespace. The model refuses an active source digest or
+observation digest that differs from its frozen selection. Production must
+bind this check to the complete host configuration and coordinated process
+lifecycle. The model takes a supplied active digest; it does not implement a
+configuration reader, cross-process agreement or restart protocol.
+
+### Admission and SQLite ordering
+
+Admission requires a complete current observation batch for the frozen selection.
+Each observation must match its binding revision, provider scope and expected
+directory chain, and report retained no-follow traversal. State must report
+verified local storage; remote and unknown classifications are refused.
+Every required root pair needs current relationship evidence:
+
+| Relationship                          | Admission result                                                                       |
+| ------------------------------------- | -------------------------------------------------------------------------------------- |
+| Measured separation                   | Admit with an observed basis.                                                          |
+| Opaque provider mapping               | Admit only with an exact current operator assurance; record an operator-assured basis. |
+| Known overlap or unsupported topology | Refuse, even with an assurance.                                                        |
+| Missing evidence                      | Refuse.                                                                                |
+
+The result is a policy review, not a serializable filesystem capability.
+The portable model observations are synthetic, including traversal and filesystem
+classification. They do not prove native handle safety or storage locality.
+The ordering test uses fresh temporary directories and real generated SQLite
+databases. Invalid model observations must fail and leave the directory empty;
+valid observations must succeed and permit writing and reading the exact value.
+This tests the proposed order, not production bootstrap or the native SQLite
+adapter.
+
+### Proposed setup and rebinding lifecycle
+
+1. **Existing state:** Load operator-owned configuration without SQLite effects.
+   Reject missing, unsupported or mismatched expectations before database
+   creation, coordination, recovery or migration. Do not recover expectations
+   from SQLite, an owner marker or a new scan of the selected path.
+2. **Explicit fresh setup:** Select a new empty state location without deleting
+   old state. Inspect the roots and present exact bindings and any assurances
+   for operator review. The operator installs the reviewed configuration.
+   Database creation follows successful live admission, not passive inspection.
+   Safe starter-file creation remains the separate create-once exception.
+3. **Explicit rebinding:** Stop all components. Review old and proposed
+   selections against current root evidence. Change binding/selection revisions
+   and replace obsolete assurances explicitly. Do not silently bless a
+   replacement, migrate data, discard receipts or move media.
+4. **Restart:** Validate the complete configuration and restart all components
+   with the same exact selection. Do not use an API-only reload to activate it.
+   New work must use retained authority and current versions throughout its
+   operation. Existing recovery and submitted-effect receipts remain protected.
+
+These lifecycle steps are design requirements, not implemented commands.
+Native profiles, live observation collection, private-reference coverage,
+production SQLite bootstrap and coordinated activation remain separate work.
+Production implementation is now approved. These lifecycle commands and
+production enforcement remain incomplete.
+
+**Earlier model-only result:** All six model tests, four native Windows profile tests and
+`.\dev.ps1 check` pass on Windows.
+The full check includes contracts, formatting, Clippy, Rust tests, browser
+harness tests and frontend checks. This result is not native provider acceptance
+or evidence of production integration. This check predates the production
+adapter changes above.
+
+### Windows native directory-chain extension
+
+The test-only
+[`logical_binding_native_windows.rs`](../crates/domus/src/infrastructure/filesystem/logical_binding_native_windows.rs)
+adds `windows-file-id128-chain-v1`. It uses the existing no-follow directory
+operations and borrowed-file high-resolution identity query. It retains the
+selected boundary and every directory component through the requested leaf.
+Its ordered expectations contain the boundary identity followed by each child
+identity, excluding ancestors above the selected boundary.
+
+Each component uses `win128:<16 hexadecimal digits>:<32 hexadecimal digits>`:
+the 64-bit filesystem volume serial number and full 128-bit file ID.
+These are logical filesystem identifiers, not hardware serials or RAID members.
+There is no short-ID fallback. Microsoft documents their
+[same-computer file identity scope](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info).
+This extension does not establish portability across Windows hosts, containers
+or SMB clients, or detection of indistinguishable copied filesystems.
+
+The generated-fixture tests reopen serialized expectations after releasing the
+first handles and read exact sentinel bytes through the retained leaf handle.
+Separate cases replace the boundary, intermediate directory and leaf. Every
+replacement must fail even when its owner-marker bytes match.
+Live ancestry detects known equal/nested roots, including a child opened from
+a different selected boundary. Non-overlap remains opaque; it is not promoted
+to measured separation.
+
+Actual native identity does not establish SQLite locality. The extension reports
+`Unknown` filesystem classification, which must refuse state admission before
+any SQLite creation. It does not substitute a path prefix or filesystem label
+for handle-based locality evidence. Locality, complete relationship evidence,
+restart/remount continuity and production bootstrap remain open.
 
 ## Client contract
 
@@ -45,7 +627,7 @@ I/O or testing boundary.
 | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | Open each component without following links; retain handles; collect native identities; establish root relationships | Shared filesystem client                 |
 | Save and query root records, versions, observations, and receipts                                                    | Existing SQLite `Store`                  |
-| Coordinate inspection, registration, explicit migration, claims, approvals, and effects                              | Application use cases                    |
+| Coordinate inspection, fresh setup, registration, claims, approvals, and effects                                     | Application use cases                    |
 | Select configured roots and construct the client                                                                     | API, worker, and CLI composition         |
 | Normalize audio, decode images, and enforce provider rules                                                           | Existing adapters and application policy |
 
@@ -61,8 +643,8 @@ Keep these operations distinct:
    handles for the requested operation.
 3. **Register:** inspect existing directories and save an explicitly admitted
    root. Do not create or move media.
-4. **Migrate a binding:** require a separate exact-state preview and confirmation.
-   Startup and configuration save cannot perform this operation.
+4. **Fresh setup:** create new state only through explicit setup or the authorized
+   first-launch starter path. Never convert or rebind incompatible old state.
 
 Native paths come only from operator configuration. Domain requests use
 `LibraryPath` or saved entity IDs. Do not provide a generic path-based bypass.
@@ -99,7 +681,9 @@ separation.
 Reject equal, nested, or aliased roots where the current policy requires
 separation. Check every admitted and reserved root, including roots currently
 offline. An offline root does not become absent or lose its reservation.
-Reject new authority when separation cannot be proved. Cached browsing remains
+Reject new authority when neither supported relationship evidence nor the exact
+operator topology assurance establishes the required relationship under the
+confirmed contract. Known overlaps remain refused. Cached browsing remains
 available under the existing observation rules.
 
 Keep SQLite on a verified supported local filesystem. A path spelling or mount
@@ -109,8 +693,8 @@ filesystems under this work.
 Configuration inspection stays passive. The reviewed storage requirement makes
 the main JSON file operator-managed and read-only to application components.
 Editing it must not bind roots, create directories, migrate SQLite, change
-active process handles, or approve media work. The existing JSON save and
-API-only reload paths must be replaced under the confirmed policy.
+active process handles, or approve media work. Host JSON save and API-only
+reload paths have been removed under the confirmed policy.
 New storage-selection fields would require typed inspection and validation,
 generated TypeScript contracts, and the agreed coordinated restart procedure.
 First launch may create a safe starter file once; an existing file must never
@@ -137,7 +721,7 @@ operator's example drive paths.
 | `store/native_roots.rs::register`              | Saved serialized ancestry is used for new separation checks. The record has no current provider/topology proof.              | Collect evidence outside SQL, then commit against an unchanged complete root inventory.                                                                              |
 | `store/private_roots.rs`                       | Reservations cover staging/cache and reject path nesting. They do not model all agreed private child roles.                  | Protect state, secrets, immutable approvals/receipts, configuration and other private references. Allow only intended containment beneath the application container. |
 | `store.rs` database opens                      | SQLite receives a pathname after local-path/canonicalization checks. A directory authority is not passed to the SQLite open. | Define and prove state-file and journal/WAL/shared-memory opens against the protected local state root.                                                              |
-| Configuration consumers                        | API and worker load their own configuration; CLI operations accept separate database paths.                                  | Use one resolved startup selection and refuse conflicting active revisions before new effects. Remove application JSON writes and API-only host reload.              |
+| Configuration consumers                        | Host JSON writers and API-only activation are removed. Processes still load independent snapshots.                           | Use one resolved startup selection and refuse conflicting active revisions before new effects.                                                                       |
 
 This is a source review, not a reproduced exploit or a runtime fix.
 The existing binding commands and database remain unchanged.
@@ -162,18 +746,21 @@ Keep three values distinct:
 1. **Configured locator:** an operator path or supported network-root reference.
    It selects a candidate, not authority. Relative private children stay beneath
    the application root; outside overrides must be explicit absolute paths.
-2. **Saved binding:** role, binding format/version, full native identity and
-   proved provider scope. Preserve full Windows IDs. Do not use a marker,
+2. **Saved binding:** role, binding format/version, full native identity within
+   the supported operator-selected provider scope, and applicable topology
+   assurance revisions. Preserve full Windows IDs. Do not use a marker,
    namespace-local mount ID or transient signing context as durable identity.
 3. **Live authority:** retained root/component handles, current binding and
    inventory revisions, filesystem classification, complete required
    relationships and operation-specific permissions. Never serialize handles
    or treat a saved observation as current I/O permission.
 
-Provider scope is evidence, not a hostname or arbitrary configured label.
-Different signing keys, server GUIDs, device values or filesystem UUIDs alone
-do not prove disjoint backing. A remote witness cannot attest a client-local
-private root that it cannot observe and correlate.
+Provider labels name the operator's selected scope; they do not prove independent
+storage or namespace separation. Different signing keys, server GUIDs, device
+values or filesystem UUIDs alone do not prove a root relationship. A remote
+witness cannot attest a client-local private root that it cannot observe.
+Use the exact operator topology assurance for opaque mappings under the confirmed
+trust contract, not an invented physical-backing proof.
 
 Use one pure Rust implementation of relationship policy. Native evidence
 collection and SMB transport stay in infrastructure. The experimental C module
@@ -184,7 +771,8 @@ must not become a second implementation of the business rule.
 Read the complete relevant binding inventory and its revision. Open candidates
 without following links. Retain their handles. Collect current identity,
 filesystem class and all required relationship pairs outside SQL transactions.
-Missing, stale or unknown pairs refuse new registration.
+Missing or stale relationships refuse new registration. Opaque pairs require
+the exact operator topology assurance selected by the confirmed contract.
 
 Commit an immutable binding in a short transaction only if the inventory and
 configuration revisions still match. A concurrent registration must make the
@@ -363,7 +951,7 @@ do not belong in this saved expectation.
 
 Startup must read bounded, no-follow operator configuration, resolve its selected
 state candidate and retain native ancestors. It must verify the expected native
-identity within a proved durable provider scope before any SQLite open can
+identity within the supported operator-selected provider scope before any SQLite open can
 create files, coordinate, recover or migrate. Missing, malformed, unsupported
 or mismatched expectations fail explicitly without falling back to current
 filesystem identity or a copied database/owner marker.
@@ -378,14 +966,14 @@ The precise schema and initialization protocol are not implemented by this
 location decision. A later explicit operator binding update requires the same
 coordinated stop/edit/validate/restart as other host changes.
 
-The current prototypes do not yet supply that persistent identity contract.
-Unix `st_dev`, retained descriptor labels and transient witness contexts are not
-durable provider scope. Full Windows file IDs alone do not resolve cloned or
-file-backed volume authority. Serializing those diagnostic observations into
-`config.json` would not complete bootstrap protection.
-Prove the required local provider continuity and supported backing contract
-before accepting persistent state bindings. Common local/remote separation
-remains a further media-registration gate. Keep unsupported providers refused.
+The current prototypes do not yet supply the serialized identity contract.
+Unix `st_dev`, retained descriptor labels and transient witness contexts must
+not become durable provider identity. Define and verify logical provider/root
+continuity within the operator-trusted mapping before accepting persistent state
+bindings. Physical backing discovery and automatic refusal of indistinguishable
+full clones are not prerequisites under the confirmed contract.
+Media registration still requires supported namespace relationships or exact
+operator topology assurances. Keep unsupported providers refused.
 
 Cover every SQLite file class used by the current engine, not only the four
 fixed diagnostic filenames. Main files, WAL, shared memory and rollback journals
@@ -497,10 +1085,10 @@ remain in Store when that escape is removed, not move into the filesystem client
 These are caller-review findings, not runtime changes.
 
 The user selected "Keep independent connection owners (Recommended)".
-This preserves current connection concurrency. It authorizes the next isolated
-ownership proof, not production integration. The Intel layout, durable
-provider/backing scope, bootstrap and separate production integration gates
-remain unchanged.
+This preserves current connection concurrency. It authorizes the isolated
+ownership proof, not production integration. Provider/root identity, bootstrap
+and the separate production integration gate remain required under the confirmed
+hardware-independent authority contract. Intel member mapping is not a gate.
 
 ##### Bounded independent-owner result
 
@@ -1135,12 +1723,12 @@ Preserve secure startup failure, read-only command guards and bounded I/O.
 ### Remaining proof gates
 
 Proceed in dependency order. Design the database adapter and bootstrap protocol
-first. Persistent state-binding acceptance also requires proved local provider
-continuity and supported backing authority; do not put that proof after
-bootstrap acceptance. Define the complete local backing graph and common
-local/remote provider scope before admitting independent media roots. General remote operation
-proof follows the same frozen bindings and native parent authority. Each new
-effect needs the existing application intent, claim and approval protocol.
+first. Define and verify logical provider/root continuity within the trusted
+operator mapping before bootstrap acceptance. Define exact topology assurances
+for supported opaque provider mappings; do not require a physical backing graph.
+General remote operation proof follows the same frozen bindings and native
+parent authority. Each new effect needs the existing application intent, claim
+and approval protocol.
 Neither a metadata witness nor a signed operation result replaces those checks.
 
 Reuse only approved fresh fixture resources and installed tools for these proofs.
@@ -1152,21 +1740,23 @@ the separate production integration approval.
 
 | Gate                       | Evidence required before integration                                                                                                                                                                        |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Different native volumes   | Correlate actual local filesystem/volume handles with backing relationships. Distinct device numbers or drive names are insufficient. Include virtual/file-backed volumes and unsupported metadata refusal. |
-| Client-local versus remote | Establish a trusted common backing authority, or an equally strong proved separation mechanism, covering the actual private and media roots. Do not infer separation from different hosts, keys or UUIDs.   |
+| Different native volumes   | Verify native root identity in each supported logical provider scope. Check namespace relationships or exact operator topology assurances. Do not require physical-device independence.                     |
+| Client-local versus remote | Define and test exact operator assurances for opaque private/media mappings. Refuse missing or stale assurances and known overlaps. Do not claim independently proved separation from administrative input. |
 | Durable remote bindings    | Define provider-scoped identity, reconnect/remount behavior, inventory changes and explicit pin/root rotation. The transient diagnostic context is insufficient.                                            |
 | Network operations         | Prove production operations against frozen bindings and retained native parents. Bounded read-only lab cases do not prove reusable child leases, arbitrary streams, effects or recovery.                    |
 | Protected SQLite files     | Prove main-file and sidecar access, parent replacement refusal, compatible multiprocess locks and crash/recovery behavior on both native OS targets.                                                        |
 | Root bounds and names      | Set production inventory/response limits separately from fixture limits. Verify normal Unicode root names and filesystem case rules. The bounded ASCII prototype is not a product-wide path restriction.    |
 
-Windows
+Historical Windows
 [volume disk extents](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_volume_get_volume_disk_extents)
 and
 [storage dependency information](https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/nf-virtdisk-getstoragedependencyinformation)
-are candidate metadata sources for different-volume/backing review.
+were investigated for different-volume/backing review.
 The latter describes virtual-disk/parent-volume relationships.
-These are documentation findings, not native acceptance. No host volume, mount,
-account or installation changes are authorized by this review.
+Neither is a prerequisite under the confirmed operator-trusted contract.
+The investigation records below preserve their original findings and limitations.
+Their unresolved physical-backing requirements are superseded by that contract.
+No new host volume, mount, account or installation changes are authorized.
 
 ### Approved read-only C: backing metadata
 
@@ -1365,10 +1955,15 @@ Production Rust, Store, configuration and dependencies remain unchanged.
 
 ### Required Intel controller member authority
 
-The user requires this Intel controller in the first supported Windows profile.
-Do not silently remove that requirement or admit it using only the presented
-disk identifier. The observed two-member topology remains insufficient for
-durable membership and common-provider separation.
+**Historical requirement, now retired:** The operator-trusted filesystem
+contract removes Intel/RAID membership from production prerequisites.
+The captured response and decoder limitations below remain unresolved evidence;
+they are not an accepted ABI and do not require further investigation for #68.
+
+The earlier investigation required this controller in the first supported
+Windows profile. Its observed two-member topology did not establish durable
+membership or independently measured common-provider separation.
+Retiring that proof requirement does not remove the Windows deployment from scope.
 
 The public [Intel SSI project](https://github.com/intel/irstessi) is archived.
 Its [current README](https://github.com/intel/irstessi/blob/master/README.md)
@@ -1872,34 +2467,24 @@ exploratory kernel-identity evidence, not current-checkout production integratio
 or native Linux-host acceptance. Native Linux-host and full API/worker
 recreation evidence remain open.
 
-## Explicit migration requirements
+## Explicit fresh setup
 
-No migration is implemented or authorized in this stage.
-Migration support is not required for disposable pre-production state.
-The remaining requirements in this section apply only if an optional
-state-preserving migration is later proposed. Explicit fresh setup must not
-reset old data automatically.
+The user confirmed that the application is not released and has no existing
+installation. Issue #68 now requires explicit fresh setup, not an existing-state
+migration feature. Do not add a binding conversion or compatibility layer for
+disposable development state.
 
-Preserve existing immutable root records and their meaning. A later schema
-upgrade may add versioned records, but cannot activate a new binding by itself.
-Do not silently rebind or change the old equality rule.
+Use new empty state for the new storage contract. Jobs, plans, settings,
+approvals and receipts do not transfer from old state. Leave any pre-existing
+state and media untouched. Report incompatible or partially initialized state
+and require an explicit operator action. Never delete, reset, overwrite, approve
+or rebind it automatically.
 
-The later approved protocol must require all state users to stop. It must
-preview the exact old records, observed complete identities, proposed authority,
-all root relationships, and affected derived sharing evidence. Confirmation
-must bind to this exact preview and expected database state. Recheck filesystem
-evidence before one atomic commit. Reject stale confirmation, changed roots,
-partial root sets, and conflicting inventory. An interrupted or uncertain commit
-needs explicit inspection, not an automatic new approval.
-
-When the old ancestor chain is unavailable, leaf equality is insufficient.
-Define and approve an explicit inspection/attestation procedure, or block the
-migration. Never accept copied owner markers as substitute evidence.
-
-Preserve immutable plans, approvals, receipts, retained versions, and recovery
-state. Sharing saves ancestry and directory hashes in addition to root records;
-audit those dependencies. Derived catalogs may need explicit invalidation and
-rebuilding. Do not rewrite old evidence or infer sharing approval.
+Establish the approved external state expectation before any SQLite creation,
+coordination or recovery. A copied database or marker cannot supply it.
+Existing configuration remains read-only. The authorized first-launch starter
+path can create configuration once, but must not replace an existing file after
+failure or reinterpret old records as new authority.
 
 ## Review gate and remaining work
 

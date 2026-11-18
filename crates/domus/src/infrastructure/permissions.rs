@@ -11,17 +11,6 @@ pub(crate) struct FilePermissions {
 }
 
 impl FilePermissions {
-    pub(crate) fn copy(&self, source: &File, target: &mut File) -> Result<()> {
-        self.check(source, false)?;
-        #[cfg(unix)]
-        target.set_permissions(source.metadata()?.permissions())?;
-        #[cfg(windows)]
-        {
-            native_file_security::copy_dacl(source, target)?;
-        }
-        self.check(target, false)
-    }
-
     pub(crate) fn current() -> Result<Self> {
         #[cfg(windows)]
         {

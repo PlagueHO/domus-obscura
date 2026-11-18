@@ -31,9 +31,8 @@ pub fn add_location(store: &Store, root: &Path, kind: &str) -> Result<i64> {
 }
 
 pub fn scan_location(store: &mut Store, location_id: i64) -> Result<i64> {
-    let location = store.location(location_id)?;
     let claim = store.begin_scan(location_id)?;
-    run_scan(store, claim, Path::new(&location.root))
+    run_scan(store, claim)
 }
 
 /// Refresh one directory only. This never renews whole-location coverage.
@@ -52,13 +51,12 @@ pub fn refresh_library_folder(
             "publication recovery folders cannot be scanned".into(),
         ));
     }
-    let location = store.location(location_id)?;
     let claim = store.begin_folder_scan(location_id, folder)?;
-    run_scan(store, claim, Path::new(&location.root))
+    run_scan(store, claim)
 }
 
-fn run_scan(store: &mut Store, claim: ScanClaim, root: &Path) -> Result<i64> {
-    if let Err(error) = observe(store, &claim, root) {
+fn run_scan(store: &mut Store, claim: ScanClaim) -> Result<i64> {
+    if let Err(error) = observe(store, &claim) {
         if matches!(error, Error::WorkerStopping) {
             store.release_scan(&claim)?;
             return Err(error);
@@ -78,8 +76,8 @@ fn run_scan(store: &mut Store, claim: ScanClaim, root: &Path) -> Result<i64> {
 /// Keep cached coverage and entries unchanged when the root is unavailable.
 pub fn check_location_availability(store: &Store, location_id: i64) -> Result<()> {
     let location = store.location(location_id)?;
-    let opened = LibraryDirectory::open(Path::new(&location.root))?;
-    store.check_native_root(&location.root, "media", opened.native_root())
+    store.open_registered_root(&location.root, "media")?;
+    Ok(())
 }
 
 /// Read a saved JPEG asset by entry identity. No raw bytes are served until the
@@ -104,8 +102,7 @@ pub fn library_jpeg_input(store: &Store, location: i64, entry: i64) -> Result<Ve
         ));
     }
     let location = store.location(location)?;
-    let root = LibraryDirectory::open(Path::new(&location.root))?;
-    store.check_native_root(&location.root, "media", root.native_root())?;
+    let root = store.open_registered_root(&location.root, "media")?;
     let parent = root.open_directory(&LibraryPath::parse(path.parent())?)?;
     let name = path
         .as_str()
@@ -176,10 +173,9 @@ fn flush(store: &mut Store, claim: &ScanClaim, batch: &mut Vec<OwnedObservation>
 /// The persistent directory frontier resumes after a crash. Only an unfinished
 /// directory is revisited. File batches and directory completion are separate
 /// short transactions; no transaction spans filesystem I/O.
-fn observe(store: &mut Store, claim: &ScanClaim, root: &Path) -> Result<()> {
-    let root = LibraryDirectory::open(root)?;
+fn observe(store: &mut Store, claim: &ScanClaim) -> Result<()> {
     let location = store.location(claim.location)?;
-    store.check_native_root(&location.root, "media", root.native_root())?;
+    let root = store.open_registered_root(&location.root, "media")?;
     let mut batch = Vec::with_capacity(128);
     while let Some(directory) = store.next_directory(claim)? {
         store.check_worker_stop()?;

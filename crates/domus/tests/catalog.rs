@@ -5,6 +5,9 @@ use domus::infrastructure::store::Store;
 use serde_json::{Value, json};
 use std::time::{Duration, SystemTime};
 
+#[path = "support/private.rs"]
+mod private;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 // On Linux, a forked test child temporarily inherits open flock descriptors.
@@ -79,7 +82,7 @@ fn shared_service_cli_uses_cached_provider_data_without_job_or_approval_effects(
     let _process_test_lock = CATALOG_PROCESS_TEST_LOCK
         .lock()
         .map_err(|_| "catalog process test lock was poisoned")?;
-    let state = tempfile::tempdir()?;
+    let state = private::tempdir()?;
     let database = state.path().join("state.db");
     let configuration = state.path().join("host.json");
     let request = state.path().join("request.json");
@@ -106,10 +109,14 @@ fn shared_service_cli_uses_cached_provider_data_without_job_or_approval_effects(
             .arg(&request)
             .output()
     };
-    std::fs::write(
-        &configuration,
-        serde_json::to_vec(&json!({"database":database}))?,
-    )?;
+    let mut host = json!({
+        "environment":"single_user", "database":database,
+        "listen":"127.0.0.1:8080", "origin":"http://127.0.0.1:8080",
+        "storage":domus::infrastructure::filesystem::StorageConfiguration::inspect_initial(
+            state.path(), &domus::domain::LibraryPath::parse("")?
+        )?
+    });
+    std::fs::write(&configuration, serde_json::to_vec(&host)?)?;
     for (command, response_operation) in [
         (
             json!({"operation":"metadata","release":{"provider":"musicbrainz","id":RELEASE}}),
@@ -143,7 +150,8 @@ fn shared_service_cli_uses_cached_provider_data_without_job_or_approval_effects(
     }
     let output = Command::new(env!("CARGO_BIN_EXE_domus"))
         .arg("catalog-release")
-        .arg(&database)
+        .arg("--host")
+        .arg(&configuration)
         .arg(RELEASE)
         .output()?;
     assert!(
@@ -154,10 +162,8 @@ fn shared_service_cli_uses_cached_provider_data_without_job_or_approval_effects(
     let result: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(result["data"]["summary"]["id"], RELEASE);
     assert_eq!(result["cached"], true);
-    std::fs::write(
-        &configuration,
-        serde_json::to_vec(&json!({"database":database,"services":{"discovery":[]}}))?,
-    )?;
+    host["services"] = json!({"discovery":[]});
+    std::fs::write(&configuration, serde_json::to_vec(&host)?)?;
     let disabled = run()?;
     assert!(!disabled.status.success());
     assert!(String::from_utf8(disabled.stderr)?.contains("enabled discovery providers"));
@@ -179,9 +185,10 @@ fn catalog_plan_cli_uses_only_fresh_verified_cache_and_never_approves_or_starts_
     let _process_test_lock = CATALOG_PROCESS_TEST_LOCK
         .lock()
         .map_err(|_| "catalog process test lock was poisoned")?;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let media = tempfile::tempdir()?;
     let database = directory.path().join("state.db");
+    let configuration = directory.path().join("host.json");
     let request_path = directory.path().join("request.json");
     let mut store = Store::open(&database)?;
     let location = domus::application::add_location(&store, media.path(), "main")?;
@@ -194,10 +201,21 @@ fn catalog_plan_cli_uses_only_fresh_verified_cache_and_never_approves_or_starts_
         "bucket":null
     });
     std::fs::write(&request_path, serde_json::to_vec(&request)?)?;
+    std::fs::write(
+        &configuration,
+        serde_json::to_vec(&json!({
+            "environment":"single_user", "database":database,
+            "listen":"127.0.0.1:8080", "origin":"http://127.0.0.1:8080",
+            "storage":domus::infrastructure::filesystem::StorageConfiguration::inspect_initial(
+                directory.path(), &domus::domain::LibraryPath::parse("")?
+            )?
+        }))?,
+    )?;
     let run = || -> std::io::Result<std::process::Output> {
         Command::new(env!("CARGO_BIN_EXE_domus"))
             .arg("catalog-plan-prepare")
-            .arg(&database)
+            .arg("--host")
+            .arg(&configuration)
             .arg(RELEASE)
             .arg(&request_path)
             .output()
@@ -496,7 +514,7 @@ fn catalog_rate_lease_is_durable_fenced_and_cannot_be_skipped_on_restart() -> Te
     let _process_test_lock = CATALOG_PROCESS_TEST_LOCK
         .lock()
         .map_err(|_| "catalog process test lock was poisoned")?;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     let mut first = Store::open(&database)?;
     let mut second = Store::open_existing(&database)?;
@@ -541,7 +559,7 @@ fn catalog_concurrent_connections_receive_one_network_permit() -> TestResult {
     let _process_test_lock = CATALOG_PROCESS_TEST_LOCK
         .lock()
         .map_err(|_| "catalog process test lock was poisoned")?;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     Store::open(&database)?;
     let stores = (0..8)

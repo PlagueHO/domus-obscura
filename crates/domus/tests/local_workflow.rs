@@ -2,7 +2,9 @@ use domus::application::{add_location, scan_location};
 use domus::domain::{JobState, LibraryPath, Page};
 use domus::infrastructure::store::Store;
 use std::fs;
-use tempfile::tempdir;
+#[path = "support/private.rs"]
+mod private;
+use private::tempdir;
 
 #[test]
 fn indexing_is_read_only_and_location_specific() -> Result<(), Box<dyn std::error::Error>> {

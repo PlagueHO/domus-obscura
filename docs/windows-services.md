@@ -169,7 +169,7 @@ cannot migrate it. Do not run a foreground worker against the same state while
 using services. Stop every state user before a schema upgrade.
 
 Running means initialization completed, not just process creation. Worker
-readiness follows supervisor initialization. Stop is latched across API reloads.
+readiness follows supervisor initialization. Stop remains latched until exit.
 The service control callback requests stop and returns promptly. Existing
 application code drains operation threads, received/copy outputs, saved receipts,
 certificate owners, and native locks before reporting stopped.

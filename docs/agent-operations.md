@@ -41,77 +41,57 @@ Live provider downloads and external configuration still need separate approval.
 ## Backend configuration writers
 
 `ConfigurationService` is the sole access boundary for backend JSON.
-Keep startup, inspection, validation, and save callers on its typed operations.
+Keep startup, inspection and validation callers on its typed operations.
 Never add direct file reads, parsing, secret merging, or writes in API handlers.
 Keep runtime activation separate. Do not use `PreparedServer::load` to validate a
 draft; startup can migrate SQLite and bind a cache.
 
-The safest manual editing procedure is to stop the API, edit its JSON file, and
-start it again. Preserve private file permissions. Only this operator procedure
+Stop the API and all workers at safe boundaries before editing JSON. Validate
+the file, then restart all components with the same file. Preserve private file
+permissions. Only this operator procedure
 can change `system_settings_read_only`; browser requests cannot change it.
 Do not restart a service or edit a live external configuration without approval.
 
-If an operator tool edits configuration while the API runs, it must follow the
-same writer protocol. For `service.local.json`, the stable sibling lock file is
-`.service.local.json.lock`. Open it without following links and hold an exclusive
-OS file lock through reading, checking the expected raw-byte SHA-256 revision,
-validation, synced sibling-file replacement, directory sync where supported, and
-verification. Never unlink or replace this lock file. Keep every file operation
-relative to checked native directory handles. Use Rust `File::try_lock`, or an
-equivalent native lock: `flock` on Linux and `LockFileEx` on Windows.
-The API creates the lock on its first save and retains its identity.
-Manual editors that do not implement this protocol must run with the API stopped.
-Linux locks are advisory; atomic rename alone does not exclude another writer.
-See [Linux flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html),
-[Rust File locking](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock),
-and [cap-std directory operations](https://docs.rs/cap-std/4.0.3/cap_std/fs/struct.Dir.html).
+Application components cannot update existing host JSON. The old save and
+API-only reload routes return `410 Gone`, with browser guards still active.
+Do not restore their writer locks, pending files, replacement code or host
+handover channel. Preserve existing operator files and interrupted evidence.
+`system_settings_read_only` still gates each protected SQLite policy command.
+It never enables host JSON writes. Keep output policy and artist-photo bindings
+on their existing versioned database commands.
 
-Backend JSON saves do not activate changes. They do not approve media work, change
-immutable plans, create or bind roots, or activate TLS. Validation requires a
+Run `domus configuration-check <absolute-configuration-file>` with all components
+stopped. It uses `ConfigurationService` and returns a failing exit status for
+invalid saved configuration. Whole-draft and section HTTP validation remain
+available to guarded tools. Validation requires a
 current-schema local database and existing valid file/root references. Set up new
 cache or staging roots separately. Full startup and operation-time checks remain.
 Do not report passive validation as proof that later startup will succeed.
 
-ConfigurationService also owns typed section saves and revision-bound reload
-requests. Section updates merge with the latest exact saved revision under the
-same writer protocol. Other sections retain their saved values. A browser can
-save several changed sections atomically when validation spans section boundaries.
+Typed validation merges drafts in memory against the exact saved revision.
+Unknown or duplicate sections and stale revisions fail. It never writes the
+candidate or marks it active. Passive validation does not reserve references.
 
 Music Sharing owns only `production_worker.sharing`. Music Acquisition owns the
-worker queue and acquisition settings. A section save must preserve the sibling
+worker queue and acquisition settings. Section validation must preserve sibling
 settings. Sharing is disabled by default. A sharing-only worker needs no staging
 root. An explicit sharing account must match the acquisition account when both
 are configured; otherwise sharing can reuse the acquisition account.
 
 Folder inspection and explicit native binding are separate from configuration
-saves. A save validates policy and existing account references without binding
+validation. Passive checks validate policy and existing account references without binding
 folders, building catalogs, logging in or opening listeners. The Sharing form
 reports saved configuration separately from worker status. Only a fresh worker
 heartbeat with the exact saved revision confirms that configuration revision.
-An API reload does not restart the worker or prove that sharing is available.
+An API snapshot alone does not prove that the worker has applied a revision.
 
-`POST /api/system/configuration/reload` explicitly replaces the API host with
-the expected saved revision. The runtime prepares the replacement before listener
-handover. It retains the old bound socket for restoration. Preparation failure
-keeps the previous host active. A failed restoration is a fatal host error and
-requires operator recovery; it is not reported as successful activation.
-Read-only policy and browser command guards apply. Host-owned local operations
-must be idle and remain excluded during preparation. Reload never interrupts a
-receive or publication and never restarts separate workers. Review each worker's
-configuration and restart it separately at a safe boundary.
-
-Read/validate operations remain passive. Only explicit startup or reload can
+Read/validate operations remain passive. Only explicit startup can
 initialize host resources, load identity, or activate a listener/TLS generation.
 Origin changes can require manual browser navigation. Identity changes can
 require login. Check the active revision after reconnecting. A pending command
-or lost response is not evidence of activation. Never retry reload automatically.
-
-After a stale revision or failed save, retain the draft and review the saved
-file. A pre-replacement error leaves the previous file intact. A post-replacement
-sync or verification error reports an uncertain saved result, not rollback.
-Refresh saved values before retrying. An interrupted save can leave an owned `.pending` file;
-inspect and remove only that exact temporary file while the API is stopped.
-Never delete the configuration or lock file as automatic recovery.
+or lost response is not evidence of activation. Managed certificate renewal and
+validated manual TLS material refresh remain separate from host JSON activation.
+Never delete configuration, old locks or pending files as automatic recovery.
 
 ## Indexed Library
 
@@ -145,13 +125,33 @@ Do not extract embedded covers or infer artwork approval from a preview.
 
 ## Commands
 
+`domus storage-root-inspect <absolute-provider-boundary> <provider-scope>
+<root-id> <binding-revision> <role> <library-relative-path>` prints a complete
+candidate root record without writing files or approving access. The directory
+must exist. Operators review the combined selection and its exact assurances
+before editing stopped hosts. Never use inspection to overwrite an incompatible
+saved root or adopt existing state. See [storage guidance](storage.md).
+
 `domus serve` without a configuration argument initializes only private local
 application state and starts explicit `single_user` anonymous HTTP on loopback.
 It serves the real packaged browser, not the separate sample harness. Azure,
 DNS, TLS and Entra are optional. Default provider services are disabled.
+Personal defaults use `%LOCALAPPDATA%\DomusObscura` on Windows and
+`$XDG_DATA_HOME/domus-obscura` on Linux, with `$HOME/.local/share/domus-obscura`
+as the Linux fallback. `serve --storage-root <absolute-application-storage>`
+selects an explicit root. Fresh setup creates `config.json` and `state/state.db`.
+It refuses nonempty selected storage without `config.json`, including old
+configuration names, pending files and state directories. Never adopt or reset them.
 Keep Host, Origin, CSRF, peer and connection limits active without HSTS or OAuth
 cookies. An explicit configuration argument never falls back after failure.
 Existing secure configurations retain their mode and validation requirements.
+
+`domus init --storage-root <absolute-application-storage>` creates only fresh
+private configuration and state. It needs no browser build and starts no listener
+or provider. Refuse existing configuration and nonempty storage without changing
+them. State utility commands require `--host <absolute-host-file>` and use its
+external selection. Never accept bare database paths or migrate old state.
+Recheck `system_settings_read_only` before changing shared policy or root bindings.
 
 `certificate-status` is a passive local command. It never starts a listener,
 creates state or contacts ACME or Azure DNS. The authenticated
@@ -159,11 +159,14 @@ creates state or contacts ACME or Azure DNS. The authenticated
 result is bound to the exact active configuration revision and confirmed live
 generation. Reject a journal/live mismatch instead of reporting an unconfirmed
 activation. Report runtime recovery even when a failed journal save could not
-record it or renewal could not restart after a rejected reload.
+record it.
 Anonymous and manual modes do not read inactive managed references.
 
 `certificate-bootstrap` is explicit issuance or continuation under the native
-certificate lifecycle lock. Stop the API first. Save private account keys,
+certificate lifecycle lock. Stop the API first. Fresh setup requires an existing
+empty private certificate directory in the operator-owned storage selection.
+It refuses unknown contents and native-bound journals instead of adopting them.
+Save private account keys,
 DNS intents and exact CSRs before effects. Reconcile uncertain submissions;
 never create replacement work automatically. A timed Azure token failure is
 before DNS submission; a lost PUT response is not a timed retry permission.
@@ -192,7 +195,7 @@ The durable queue accepts offline submissions. Validate capacity from 1 through
 1024, default 64. Admission, duplicate checks, and capacity checks are atomic.
 Failed/waiting requests retain capacity until explicit retry or dismissal.
 Persist the provider/acquisition configuration digest with immutable requests.
-Configuration save or API reload never activates a new worker configuration.
+Only a coordinated restart activates a new host configuration.
 
 Keep one acquisition pipeline and one independent scan. The native process lock
 excludes another daemon in the same state directory. Account locks also cover
@@ -260,7 +263,7 @@ It uses the fixed `_anonymous` identity without Entra and accepts a valid develo
 certificate. Keep it loopback-only. Production is the default and requires Entra;
 missing credentials must never select development mode.
 
-`domus worker-once <absolute-configuration-file>` is an experimental blocking
+`domus worker-once --host <absolute-host-file> <absolute-operation-file>` is an experimental blocking
 worker for an approved acquisition with an explicitly selected source. It opens only outgoing
 connections and needs explicit plaintext Soulseek login acknowledgement.
 Never run it against a live account without separate approval. Its optional
@@ -276,7 +279,7 @@ Keep incomplete files unchanged and require operator review when evidence cannot
 resolve uncertainty.
 It is not production publication, peer search or a complete setup workflow.
 
-`domus publish-new-once <absolute-configuration-file>` remains a separate,
+`domus publish-new-once --host <absolute-host-file> <absolute-operation-file>` remains a separate,
 explicit local new-only publication command. It requires a current approved
 plan, completed normalization, the private staging lock and new-only
 acknowledgement. It cannot grant replacement permission. The connected API
@@ -401,12 +404,12 @@ then the exact empty owned directory. Do not use recursive native-path deletion.
 Persist partial outcomes and errors. A failed final receipt is not a rollback.
 
 API recovery operations run outside async executor threads and keep their media
-permit until blocking work ends, even if the request times out. API reload and
+permit until blocking work ends, even if the request times out. API
 shutdown must not release that protection early. Linux external writers must
 cooperate with the visibility lock; do not claim protection against arbitrary
 external mutation or untested physical power loss.
 
-`domus job-control <local-database> <job-id> <plan-version> <pause|cancel>`
+`domus job-control --host <absolute-host-file> <job-id> <plan-version> <pause|cancel>`
 records a version-bound operator request. Settle it only at a safe file/transfer
 boundary with a live fenced claim, or atomically when no worker lease is live.
 Never stop uncertain submissions or active receives. Block new submissions and
@@ -418,7 +421,7 @@ It does not claim, approve, fetch, open staging or start work. Keep operator
 controls separate from artwork questions. Retain all staging and receipts.
 `job-control-status` is read-only. Control commands must not migrate old state.
 
-`domus worker-check <absolute-configuration-file>` checks local inputs through
+`domus worker-check --host <absolute-host-file> <absolute-operation-file>` checks local inputs through
 a current-schema read-only SQLite snapshot. It must not claim jobs, record sources,
 migrate data, open staging or contact a network. A successful check is not
 authority to skip the worker's live claim, staging or approval checks.
@@ -454,7 +457,7 @@ Keep answers, resume and worker claims separate. Preserve all transfer receipts.
 Fully received inputs may continue through `worker-once` without a new Soulseek
 connection. Never use that local-only path for planned or uncertain inputs.
 
-`domus catalog-release <local-database> <release-id>` loads an exact MusicBrainz
+`domus catalog-release --host <absolute-host-file> <release-id>` loads an exact MusicBrainz
 release through the normal durable provider budget and cache. It creates no
 job, plan or approval.
 MusicBrainz and CAA share one durable network permit, including each CAA redirect.
@@ -492,16 +495,17 @@ states. They make no provider, acquisition or approval calls. Process-exit and
 simulated timing fixtures do not prove physical process suspension or host-sleep
 acceptance. Record unperformed physical and live-provider checks separately.
 
-`domus catalog-plan-prepare <local-database> <release-id> <request-json>` builds
+`domus catalog-plan-prepare --host <absolute-host-file> <release-id> <request-json>` builds
 the normal provider-backed plan from the fresh cache without network access.
 Its bounded request has the same fields as CatalogPlanRequest. It cannot
 override provider track text, approve the result or start acquisition.
 
-The retained catalog and CAA preparation commands also accept
-`--host <absolute-host-configuration-file>` in place of `<local-database>`.
-`source-search` and `source-folder` accept the same option before their existing
-source configuration path. Use the read-service host format (`database`,
-`services`, optional `cache`), not HTTPS startup configuration.
+The retained catalog and CAA preparation commands require
+`--host <absolute-host-configuration-file>`. `source-search` and `source-folder`
+require the same option before their operation configuration path. Use the main
+host schema and its external storage selection, not a second service-host schema.
+Worker and publication operation files must identify that selected database.
+Local publication does not require an acquisition provider to be enabled.
 
 Configured CLI access requires a current-schema database and, when selected,
 an already-bound shared cache. It never initializes a root, changes a binding,

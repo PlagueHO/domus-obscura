@@ -31,7 +31,11 @@ struct Protocol {
 }
 
 impl Protocol {
-    fn new(configuration: ManagedTlsConfiguration, hostname: &str) -> Result<Self> {
+    fn new(
+        configuration: ManagedTlsConfiguration,
+        hostname: &str,
+        source: crate::infrastructure::store::StoreSource,
+    ) -> Result<Self> {
         let names = configuration.validate(hostname)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -41,7 +45,7 @@ impl Protocol {
             DnsPropagation::new()?
         };
         let http = AcmeHttp::new(configuration.environment)?;
-        let mut azure = AzureDns::new(configuration.dns.clone(), hostname)?;
+        let mut azure = AzureDns::new(configuration.dns.clone(), hostname)?.with_source(source);
         azure.pin_credential()?;
         Ok(Self {
             runtime,
@@ -259,23 +263,44 @@ pub(crate) struct HostGuard {
     lock: crate::infrastructure::local_file::ProcessLock,
 }
 impl HostGuard {
+    #[cfg(test)]
     pub(crate) fn acquire(path: &Path, previous: Option<Arc<Self>>) -> Result<Arc<Self>> {
-        let root = crate::infrastructure::filesystem::LibraryDirectory::open(path)?
-            .native_root()
-            .clone();
+        Self::acquire_opened(
+            path,
+            crate::infrastructure::filesystem::LibraryDirectory::open(path)?,
+            previous,
+        )
+    }
+
+    pub(crate) fn acquire_for(
+        path: &Path,
+        store: &crate::infrastructure::store::Store,
+        previous: Option<Arc<Self>>,
+    ) -> Result<Arc<Self>> {
+        Self::acquire_opened(
+            path,
+            store.open_candidate_root(path, "certificate")?.1,
+            previous,
+        )
+    }
+
+    fn acquire_opened(
+        path: &Path,
+        directory: crate::infrastructure::filesystem::LibraryDirectory,
+        previous: Option<Arc<Self>>,
+    ) -> Result<Arc<Self>> {
+        let root = directory.native_root().clone();
         if let Some(previous) = previous
             && previous.root == root
         {
-            previous
-                .lock
-                .verify(&path.join("lifecycle.json"), "certificate-host")?;
+            previous.lock.verify_in(&directory, "certificate-host")?;
             return Ok(previous);
         }
-        let lock = crate::infrastructure::local_file::ProcessLock::acquire(
-            &path.join("lifecycle.json"),
+        let lock = crate::infrastructure::local_file::ProcessLock::acquire_in(
+            &directory,
             "certificate-host",
         )?;
-        if crate::infrastructure::filesystem::LibraryDirectory::open(path)?.native_root() != &root {
+        if directory.reopen_at(path)?.native_root() != &root {
             return Err(Error::Conflict(
                 "certificate host root changed during gate acquisition".into(),
             ));
@@ -295,7 +320,7 @@ impl RenewalOwner {
     pub(crate) fn start(
         configuration: ManagedTlsConfiguration,
         hostname: String,
-        database: std::path::PathBuf,
+        database: crate::infrastructure::store::StoreSource,
         live_tls: axum_server::tls_rustls::RustlsConfig,
         live_selection: Arc<Mutex<Option<super::state::CertificateSelection>>>,
         recovery_required: Arc<std::sync::atomic::AtomicBool>,
@@ -305,9 +330,9 @@ impl RenewalOwner {
         let (sender, ready) = std::sync::mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("certificate-renewal".into()).spawn(move || {
             let initialized = (|| {
-                let binding = configuration.binding(&hostname)?;
-                let mut state = StateStore::open(&configuration.state_directory, &binding, configuration.environment)?;
-                let database = crate::infrastructure::store::Store::open_read_current(&database)?;
+                let binding = configuration.binding_for(&hostname, &database)?;
+                let database = database.open(crate::infrastructure::store::StoreOpenMode::ReadCurrent)?;
+                let mut state = StateStore::open_for(&database, &configuration.state_directory, Some(&binding), configuration.environment, false)?;
                 state.check_database_root(&database)?;
                 let selected = live_selection.lock().map_err(|_| Error::Internal("live certificate selection lock failed"))?.clone();
                 if let Some(selected) = selected
@@ -315,7 +340,7 @@ impl RenewalOwner {
                     return Err(Error::Conflict("certificate selection changed after listener preparation; local recovery is required".into()));
                 }
                 state.bind_policy(&binding, &configuration.resource_binding(&hostname)?)?;
-                let mut protocol = Protocol::new(configuration.clone(), &hostname)?;
+                let mut protocol = Protocol::new(configuration.clone(), &hostname, database.source())?;
                 protocol.live_tls = Some(live_tls);
                 protocol.live_selection = Some(live_selection);
                 Ok::<_, Error>((state, protocol, binding))
@@ -330,7 +355,7 @@ impl RenewalOwner {
                 && stopped_after(&owned_stop, Duration::from_secs(u64::from(seconds)))? { return Ok(()); }
             loop {
                 if stopped_after(&owned_stop, Duration::ZERO)? { return Ok(()); }
-                if !matches!(configuration.binding(&hostname), Ok(current) if current == binding) {
+                if !matches!(configuration.binding_for(&hostname, &database), Ok(current) if current == binding) {
                     crate::application::certificates::pause(&mut state, "certificate credential binding changed; stop the API before local recovery")?;
                 }
                 let timestamp = match now() {
@@ -460,7 +485,7 @@ pub fn recover(
     }
     let (configuration, hostname, database) =
         crate::infrastructure::server::configuration::ConfigurationService::certificate_operation_configuration(path)?;
-    let binding = configuration.binding(&hostname)?;
+    let binding = configuration.binding_for(&hostname, &database.source())?;
     if action == "order" {
         super::http::endpoint(
             evidence.ok_or(Error::Internal("order evidence missing"))?,
@@ -476,12 +501,14 @@ pub fn recover(
             "certificate recovery ETag is invalid".into(),
         ));
     }
-    let mut state = StateStore::open_recovery(
+    let mut state = StateStore::open_for(
+        &database,
         &configuration.state_directory,
+        None,
         configuration.environment,
         action == "pending",
     )?;
-    let _host_gate = HostGuard::acquire(&configuration.state_directory, None)?;
+    let _host_gate = HostGuard::acquire_for(&configuration.state_directory, &database, None)?;
     state.check_database_root(&database)?;
     if action == "bindings" {
         state.recover_binding(
@@ -497,7 +524,8 @@ pub fn recover(
         }
         if action == "archive" {
             state.archive_generations()?;
-            return StateStore::status(
+            return StateStore::status_for(
+                &database,
                 &configuration.state_directory,
                 &binding,
                 configuration.environment,
@@ -505,7 +533,8 @@ pub fn recover(
         }
         if action == "pending" {
             state.recover_pending()?;
-            return StateStore::status(
+            return StateStore::status_for(
+                &database,
                 &configuration.state_directory,
                 &binding,
                 configuration.environment,
@@ -530,7 +559,8 @@ pub fn recover(
                             .into(),
                     ));
                 }
-                let mut protocol = Protocol::new(configuration.clone(), &hostname)?;
+                let mut protocol =
+                    Protocol::new(configuration.clone(), &hostname, database.source())?;
                 protocol.restore(
                     state
                         .journal
@@ -552,7 +582,8 @@ pub fn recover(
                         .certificate()?
                         .ok_or(Error::Remote("original order certificate is not available"))?;
                     state.recover_generation(&certificate, &hostname)?;
-                    return StateStore::status(
+                    return StateStore::status_for(
+                        &database,
                         &configuration.state_directory,
                         &binding,
                         configuration.environment,
@@ -579,7 +610,8 @@ pub fn recover(
                 let receipt = state.journal.dns_receipt.clone().ok_or_else(|| {
                     Error::Conflict("successful owned-value receipt is missing".into())
                 })?;
-                let mut protocol = Protocol::new(configuration.clone(), &hostname)?;
+                let mut protocol =
+                    Protocol::new(configuration.clone(), &hostname, database.source())?;
                 let record = protocol
                     .read_dns()?
                     .ok_or_else(|| Error::Conflict("owned TXT resource is missing".into()))?;
@@ -610,7 +642,8 @@ pub fn recover(
                     state.journal.dns_intent = None;
                 }
                 state.save()?;
-                return StateStore::status(
+                return StateStore::status_for(
+                    &database,
                     &configuration.state_directory,
                     &binding,
                     configuration.environment,
@@ -642,7 +675,8 @@ pub fn recover(
                     ));
                 }
                 let url = evidence.ok_or(Error::Internal("order recovery evidence is missing"))?;
-                let mut protocol = Protocol::new(configuration.clone(), &hostname)?;
+                let mut protocol =
+                    Protocol::new(configuration.clone(), &hostname, database.source())?;
                 protocol.restore(
                     state
                         .journal
@@ -669,7 +703,8 @@ pub fn recover(
                         "DNS recovery action differs from its saved intent".into(),
                     ));
                 }
-                let mut protocol = Protocol::new(configuration.clone(), &hostname)?;
+                let mut protocol =
+                    Protocol::new(configuration.clone(), &hostname, database.source())?;
                 let record = protocol
                     .read_dns()?
                     .ok_or_else(|| Error::Conflict("DNS recovery resource is missing".into()))?;
@@ -708,7 +743,8 @@ pub fn recover(
                     if state.journal.candidate_generation.is_none() {
                         state.journal.dns_intent = None;
                         state.save()?;
-                        return StateStore::status(
+                        return StateStore::status_for(
+                            &database,
                             &configuration.state_directory,
                             &binding,
                             configuration.environment,
@@ -727,7 +763,8 @@ pub fn recover(
         state.journal.retry_interval = None;
         state.save()?;
     }
-    StateStore::status(
+    StateStore::status_for(
+        &database,
         &configuration.state_directory,
         &binding,
         configuration.environment,
@@ -739,31 +776,35 @@ pub fn recover(
 pub fn bootstrap(path: &Path) -> Result<super::state::CertificateStatus> {
     let (configuration, hostname, database) =
         crate::infrastructure::server::configuration::ConfigurationService::certificate_operation_configuration(path)?;
-    let binding = configuration.binding(&hostname)?;
-    let candidate = super::StateDirectory::inspect(&configuration.state_directory)?;
-    let mut state = if candidate.exists {
-        StateStore::open(
+    let binding = configuration.binding_for(&hostname, &database.source())?;
+    let (_, directory) =
+        database.open_candidate_root(&configuration.state_directory, "certificate")?;
+    let mut state = if directory.entries()?.next().is_none() {
+        StateStore::initialize_for(
+            &database,
             &configuration.state_directory,
             &binding,
             configuration.environment,
         )?
     } else {
-        StateStore::initialize(
+        StateStore::open_for(
+            &database,
             &configuration.state_directory,
-            &binding,
+            Some(&binding),
             configuration.environment,
+            false,
         )?
     };
-    let _host_gate = HostGuard::acquire(&configuration.state_directory, None)?;
+    let _host_gate = HostGuard::acquire_for(&configuration.state_directory, &database, None)?;
     state.bind_database_root(&database)?;
     state.bind_policy(&binding, &configuration.resource_binding(&hostname)?)?;
     let names = configuration.validate(&hostname)?;
-    let mut protocol = Protocol::new(configuration.clone(), &hostname)?;
+    let mut protocol = Protocol::new(configuration.clone(), &hostname, database.source())?;
     if let Some(seconds) = state.journal.retry_interval {
         std::thread::sleep(Duration::from_secs(u64::from(seconds)));
     }
     for _ in 0..64 {
-        if configuration.binding(&hostname)? != binding {
+        if configuration.binding_for(&hostname, &database.source())? != binding {
             return Err(Error::Conflict(
                 "certificate credential binding changed; use explicit local recovery".into(),
             ));
@@ -773,7 +814,8 @@ pub fn bootstrap(path: &Path) -> Result<super::state::CertificateStatus> {
             Step::Continue => {}
             Step::Wait(seconds) => std::thread::sleep(Duration::from_secs(u64::from(seconds))),
             Step::Ready => {
-                return StateStore::status(
+                return StateStore::status_for(
+                    &database,
                     &configuration.state_directory,
                     &binding,
                     configuration.environment,
@@ -856,6 +898,7 @@ mod tests {
         state.bind_database_root(&database)?;
         crate::application::certificates::pause(&mut state, "fixture requires explicit recovery")?;
         drop(state);
+        let source = database.source();
         drop(database);
         let gate = HostGuard::acquire(&configuration.state_directory, None)?;
         let reused = HostGuard::acquire(&configuration.state_directory, Some(gate.clone()))?;
@@ -872,7 +915,7 @@ mod tests {
             RenewalOwner::start(
                 configuration,
                 "media.example.com".into(),
-                database_path,
+                source,
                 tls,
                 Arc::new(Mutex::new(None)),
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),

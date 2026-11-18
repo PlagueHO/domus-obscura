@@ -78,6 +78,7 @@ pub struct AzureDns {
     token: Option<Token>,
     credential_digest: Option<[u8; 32]>,
     retry_delay: RetryDelay,
+    source: Option<crate::infrastructure::store::StoreSource>,
 }
 
 impl AzureDns {
@@ -98,7 +99,23 @@ impl AzureDns {
             token: None,
             credential_digest: None,
             retry_delay: RetryDelay::default(),
+            source: None,
         })
+    }
+
+    pub(crate) fn with_source(mut self, source: crate::infrastructure::store::StoreSource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    fn read_credential(
+        source: Option<&crate::infrastructure::store::StoreSource>,
+        path: &std::path::Path,
+    ) -> Result<Vec<u8>> {
+        match source {
+            Some(source) => source.read_input(path, 4096, true),
+            None => crate::infrastructure::local_file::read_local(path, 4096, true),
+        }
     }
 
     pub(crate) fn retry_delay(&self) -> Result<Option<u32>> {
@@ -106,11 +123,8 @@ impl AzureDns {
     }
 
     pub(crate) fn pin_credential(&mut self) -> Result<()> {
-        let bytes = crate::infrastructure::local_file::read_local(
-            &self.configuration.client_secret_file,
-            4096,
-            true,
-        )?;
+        let bytes =
+            Self::read_credential(self.source.as_ref(), &self.configuration.client_secret_file)?;
         self.credential_digest = Some(Sha256::digest(bytes).into());
         Ok(())
     }
@@ -118,12 +132,10 @@ impl AzureDns {
     async fn bearer(&mut self) -> Result<&str> {
         if let Some(expected) = self.credential_digest {
             let path = self.configuration.client_secret_file.clone();
+            let source = self.source.clone();
             let current: [u8; 32] = tokio::task::spawn_blocking(move || {
                 Ok::<_, Error>(
-                    Sha256::digest(crate::infrastructure::local_file::read_local(
-                        &path, 4096, true,
-                    )?)
-                    .into(),
+                    Sha256::digest(Self::read_credential(source.as_ref(), &path)?).into(),
                 )
             })
             .await
@@ -140,11 +152,11 @@ impl AzureDns {
             .is_none_or(|token| token.expires <= Instant::now())
         {
             let path = self.configuration.client_secret_file.clone();
-            let bytes = tokio::task::spawn_blocking(move || {
-                crate::infrastructure::local_file::read_local(&path, 4096, true)
-            })
-            .await
-            .map_err(|_| Error::Internal("Azure DNS secret-file task failed"))??;
+            let source = self.source.clone();
+            let bytes =
+                tokio::task::spawn_blocking(move || Self::read_credential(source.as_ref(), &path))
+                    .await
+                    .map_err(|_| Error::Internal("Azure DNS secret-file task failed"))??;
             if self
                 .credential_digest
                 .is_some_and(|expected| <[u8; 32]>::from(Sha256::digest(&bytes)) != expected)

@@ -113,7 +113,62 @@ async fn shared_cache_host_configuration_is_explicit_bounded_and_never_migrates_
     use serde_json::json;
     let mut fixture = Fixture::new()?;
     let host_path = fixture._state.path().join("host.json");
-    let write = |value: serde_json::Value| -> TestResult {
+    use domus::infrastructure::filesystem::{
+        DirectoryExpectation, FilesystemClient, StorageConfiguration, StorageRole, StorageRoot,
+    };
+    let mut storage = StorageConfiguration::inspect_initial(
+        fixture._state.path(),
+        &domus::domain::LibraryPath::parse("")?,
+    )?;
+    let boundary = fixture
+        ._state
+        .path()
+        .ancestors()
+        .find(|path| fixture.root.starts_with(path))
+        .ok_or("cache fixture has no common provider boundary")?;
+    storage.providers[0].boundary = boundary.into();
+    storage.roots.clear();
+    for (root_id, role, path) in [
+        (
+            "application",
+            StorageRole::Application,
+            fixture._state.path(),
+        ),
+        ("state", StorageRole::State, fixture._state.path()),
+        ("cache", StorageRole::Cache, fixture.root.as_path()),
+    ] {
+        let relative = path
+            .strip_prefix(boundary)?
+            .iter()
+            .map(|part| part.to_str().ok_or("fixture component must be Unicode"))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("/");
+        let (expected, _) = DirectoryExpectation::inspect(
+            boundary,
+            &domus::domain::LibraryPath::parse(&relative)?,
+        )?;
+        storage.roots.push(StorageRoot {
+            root_id: root_id.into(),
+            binding_revision: 1,
+            role,
+            provider_scope: "application".into(),
+            relative,
+            expected,
+        });
+    }
+    let database = fixture.store.database_path().to_path_buf();
+    drop(fixture.store);
+    let client = FilesystemClient::new(storage.clone(), "a".repeat(64))?;
+    fixture.store = Store::open_scoped(
+        &database,
+        &client,
+        domus::infrastructure::store::StoreOpenMode::Current,
+    )?;
+    let write = |mut value: serde_json::Value| -> TestResult {
+        value["environment"] = json!("single_user");
+        value["listen"] = json!("127.0.0.1:8080");
+        value["origin"] = json!("http://127.0.0.1:8080");
+        value["storage"] = serde_json::to_value(&storage)?;
         std::fs::write(&host_path, serde_json::to_vec(&value)?)?;
         Ok(())
     };

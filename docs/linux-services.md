@@ -135,10 +135,11 @@ Use these paths:
 
 Create only approved new directories. Do not recursively change permissions
 on an existing library. Set `umask 077` before initial state creation.
-Prepare SQLite explicitly with `domus init` under
-the runtime account with all state users stopped. This is initial setup,
-not permission to run concurrent migration. Use absolute Linux paths.
-Prepare and validate the backend JSON separately. Add `production_worker`
+Use `domus init --storage-root <absolute-application-storage>` under the runtime
+account with all state users stopped. It requires fresh empty storage and writes
+`config.json` and `state/state.db`. It never migrates or adopts existing state.
+Use absolute Linux paths. Preserve the generated external storage selection
+when editing and validating the backend JSON. Add `production_worker`
 only when its operations are intended. Its smallest section is:
 
 ```json
@@ -423,6 +424,10 @@ The exporter writes only inside the empty selected root. It creates 8192 scan
 directories and three generated MP3 inputs of about 33 MiB each, plus normalized
 outputs and private state. Allow space for both normalized and published copies.
 The generated credentials are not live credentials.
+The descriptor's `configuration` field names `service.json` inside the generated
+private state directory. The descriptor also records the exact storage selection.
+The checker uses logical publication root keys, not database strings as native
+paths. It renders units for that exact selected configuration.
 The exporter validates the selected package's browser assets and records their
 absolute path in the explicit API configuration. The runner requires that exact
 path. Missing or different browser assets are not a successful installed check.

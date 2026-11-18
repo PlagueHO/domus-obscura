@@ -156,15 +156,17 @@ fn local_artwork_rejects_missing_permission_invalid_files_and_stale_plans_withou
 #[test]
 fn local_artwork_cli_requires_permission_and_separate_exact_hash_approval() -> TestResult {
     use std::process::Command;
-    let fixture = Fixture::build_inner(AudioFormat::Flac, false, false)?;
+    let fixture = Fixture::build_selected(AudioFormat::Flac, false, false)?;
     let image = fixture.scratch.path().join("permitted.png");
     std::fs::write(&image, cover_source()?)?;
-    let database = fixture.database.to_str().ok_or("database path")?;
+    let host = fixture.write_host()?;
+    let host = host.to_str().ok_or("host path")?;
     let job = fixture.job.to_string();
     let version = fixture.version.to_string();
     let args = [
         "artwork-local-prepare",
-        database,
+        "--host",
+        host,
         &job,
         &version,
         image.to_str().ok_or("image path")?,
@@ -182,7 +184,7 @@ fn local_artwork_cli_requires_permission_and_separate_exact_hash_approval() -> T
     assert!(candidate["approved_at"].is_null());
     let id = candidate["id"].as_i64().ok_or("candidate ID")?.to_string();
     let hash = candidate["sha256"].as_str().ok_or("candidate hash")?;
-    let preview = run(&["artwork-preview", database, &job, &version, &id])?;
+    let preview = run(&["artwork-preview", "--host", host, &job, &version, &id])?;
     assert!(preview.status.success(), "{:?}", preview.stderr);
     assert!(preview.stderr.is_empty());
     let retained = fixture.store.artwork_jpeg(
@@ -197,13 +199,14 @@ fn local_artwork_cli_requires_permission_and_separate_exact_hash_approval() -> T
             .approved_artwork(fixture.job, fixture.version)
             .is_err()
     );
-    let missing = run(&["artwork-preview", database, &job, &version, "999999"])?;
+    let missing = run(&["artwork-preview", "--host", host, &job, &version, "999999"])?;
     assert!(!missing.status.success());
     assert!(missing.stdout.is_empty());
     assert!(
         !run(&[
             "artwork-approve",
-            database,
+            "--host",
+            host,
             &job,
             &version,
             &id,
@@ -212,7 +215,7 @@ fn local_artwork_cli_requires_permission_and_separate_exact_hash_approval() -> T
         .status
         .success()
     );
-    let approved = run(&["artwork-approve", database, &job, &version, &id, hash])?;
+    let approved = run(&["artwork-approve", "--host", host, &job, &version, &id, hash])?;
     assert!(approved.status.success(), "{:?}", approved.stderr);
     assert!(
         fixture

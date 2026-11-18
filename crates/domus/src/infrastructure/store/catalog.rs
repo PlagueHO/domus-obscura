@@ -518,11 +518,12 @@ fn catalog_key(source: &str) -> Result<crate::application::services::cache::Cach
 #[cfg(test)]
 mod header_tests {
     use super::*;
+    use crate::infrastructure::permissions::private_test_directory;
 
     #[tokio::test]
     async fn provider_header_persistence_failure_cannot_shorten_completion_backoff() -> Result<()> {
         for seconds in [120, u32::MAX] {
-            let root = tempfile::tempdir()?;
+            let root = private_test_directory()?;
             let mut store = Store::open(&root.path().join("state.db"))?;
             let mut permit = store.claim_catalog_request()?;
             permit.issued -= Duration::from_secs(1);
@@ -553,7 +554,7 @@ mod header_tests {
     #[tokio::test]
     async fn provider_headers_survive_abandonment_and_shorter_completion() -> Result<()> {
         for seconds in [120, u32::MAX] {
-            let root = tempfile::tempdir()?;
+            let root = private_test_directory()?;
             let path = root.path().join("state.db");
             let mut store = Store::open(&path)?;
             let mut permit = store.claim_catalog_request()?;
@@ -582,7 +583,7 @@ mod header_tests {
     #[tokio::test]
     async fn provider_header_claims_are_started_fenced_and_preserve_the_longest_interval()
     -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_test_directory()?;
         let mut store = Store::open(&root.path().join("state.db"))?;
         let mut permit = store.claim_catalog_request()?;
         assert!(permit.record_retry_after(120).await.is_err());
@@ -669,7 +670,7 @@ mod tests {
 
     #[test]
     fn shared_cache_catalog_preserves_exact_scope_freshness_and_read_only_access() -> TestResult {
-        let state = tempfile::tempdir()?;
+        let state = crate::infrastructure::permissions::private_test_directory()?;
         let path = state.path().join("state.db");
         let shared = Arc::new(MemoryCache::default());
         let mut store = Store::open(&path)?.with_cache(shared.clone());
@@ -724,7 +725,7 @@ mod tests {
 
     #[test]
     fn shared_cache_catalog_errors_do_not_fall_back_or_reset_the_consumed_budget() -> TestResult {
-        let state = tempfile::tempdir()?;
+        let state = crate::infrastructure::permissions::private_test_directory()?;
         let path = state.path().join("state.db");
         let mut store = Store::open(&path)?;
         let query = CatalogQuery::artists("generated", 0, 1)?;
@@ -773,7 +774,7 @@ mod tests {
 
     #[test]
     fn shared_cache_catalog_rejects_wrong_response_or_extended_expiry() -> TestResult {
-        let state = tempfile::tempdir()?;
+        let state = crate::infrastructure::permissions::private_test_directory()?;
         let shared = Arc::new(MemoryCache::default());
         let mut store = Store::open(&state.path().join("state.db"))?.with_cache(shared.clone());
         let query = CatalogQuery::artists("generated", 0, 1)?;
@@ -792,7 +793,7 @@ mod tests {
 
     #[test]
     fn uncached_catalog_completion_keeps_fencing_failure_backoff_and_empty_cache() -> TestResult {
-        let directory = tempfile::tempdir()?;
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
         let mut store = Store::open(&directory.path().join("state.db"))?;
         let unstarted = store.claim_catalog_request()?;
         assert!(
@@ -814,7 +815,7 @@ mod tests {
                 .connection
                 .query_row("SELECT count(*) FROM catalog_cache", [], |row| row.get(0))?;
         assert_eq!(count, 0);
-        let other = tempfile::tempdir()?;
+        let other = crate::infrastructure::permissions::private_test_directory()?;
         let mut other = Store::open(&other.path().join("other.db"))?;
         let grant = permit(&mut store)?;
         assert!(
@@ -827,7 +828,7 @@ mod tests {
 
     #[test]
     fn catalog_cache_is_bounded_expiring_and_checksum_verified() -> TestResult {
-        let directory = tempfile::tempdir()?;
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
         let mut store = Store::open(&directory.path().join("state.db"))?;
         for index in 0..70 {
             let query = CatalogQuery::artists(&format!("Fixture {index}"), 0, 25)?;
@@ -874,7 +875,7 @@ mod tests {
 
     #[test]
     fn catalog_permit_is_single_use_and_cache_commit_is_atomic() -> TestResult {
-        let directory = tempfile::tempdir()?;
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
         let mut store = Store::open(&directory.path().join("state.db"))?;
         let mut grant = store.claim_catalog_request()?;
         assert!(grant.check_start().is_err());
@@ -914,7 +915,7 @@ mod tests {
     #[test]
     fn catalog_os_owner_survives_expired_wall_lease_and_cannot_complete_another_database()
     -> TestResult {
-        let directory = tempfile::tempdir()?;
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
         let mut store = Store::open(&directory.path().join("state.db"))?;
         let mut other = Store::open(&directory.path().join("other.db"))?;
         let query = CatalogQuery::artists("Fixture", 0, 25)?;
@@ -940,7 +941,7 @@ mod tests {
 
     #[test]
     fn catalog_backoff_ignores_past_and_future_wall_deadlines() -> TestResult {
-        let directory = tempfile::tempdir()?;
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
         let mut store = Store::open(&directory.path().join("state.db"))?;
         let clock = super::super::catalog_clock::TestClock::new();
         let grant = store.claim_catalog_request()?;

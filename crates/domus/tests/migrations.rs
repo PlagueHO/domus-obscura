@@ -1,5 +1,7 @@
 use domus::infrastructure::store::Store;
-use tempfile::tempdir;
+#[path = "support/private.rs"]
+mod private;
+use private::tempdir;
 
 #[test]
 fn schema_one_upgrades_without_losing_existing_jobs() -> Result<(), Box<dyn std::error::Error>> {

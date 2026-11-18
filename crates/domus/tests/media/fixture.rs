@@ -28,6 +28,7 @@ struct Fixture {
     scratch: TempDir,
     _state: TempDir,
     _library: TempDir,
+    storage: Option<domus::infrastructure::filesystem::StorageConfiguration>,
 }
 
 #[derive(Default)]
@@ -36,12 +37,67 @@ struct FixtureInputs {
     directories: Option<[TempDir; 3]>,
     source: Option<Vec<u8>>,
     defer_acquisition: bool,
+    selected: bool,
+    extra_media: Vec<PathBuf>,
 }
 
 #[allow(dead_code)]
 impl Fixture {
+    fn write_host(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let host = self._state.path().join("host.json");
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or("CLI fixtures require selected storage")?;
+        std::fs::write(
+            &host,
+            serde_json::to_vec(&serde_json::json!({
+                "environment":"single_user", "database":self.database,
+                "listen":"127.0.0.1:8080", "origin":"http://127.0.0.1:8080",
+                "storage":storage,
+            }))?,
+        )?;
+        Ok(host)
+    }
+
     fn new(format: AudioFormat) -> Result<Self, Box<dyn std::error::Error>> {
         Self::build(format, false)
+    }
+
+    fn build_selected(
+        format: AudioFormat,
+        staged: bool,
+        approve_cover: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::build_with_inputs(
+            format,
+            staged,
+            approve_cover,
+            true,
+            None,
+            None,
+            FixtureInputs {
+                selected: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn open_store(&self) -> Result<Store, Box<dyn std::error::Error>> {
+        match &self.storage {
+            Some(storage) => {
+                let client = domus::infrastructure::filesystem::FilesystemClient::new(
+                    storage.clone(),
+                    "a".repeat(64),
+                )?;
+                Ok(Store::open_scoped(
+                    &self.database,
+                    &client,
+                    domus::infrastructure::store::StoreOpenMode::Current,
+                )?)
+            }
+            None => Ok(Store::open_existing(&self.database)?),
+        }
     }
 
     fn build(format: AudioFormat, staged: bool) -> Result<Self, Box<dyn std::error::Error>> {
@@ -149,7 +205,76 @@ impl Fixture {
         };
         let profile = inputs.profile;
         let database = state.path().join("state.db");
-        let mut store = Store::open(&database)?;
+        let initial = Store::open(&database)?;
+        let (mut store, storage) = if inputs.selected {
+            use domus::domain::LibraryPath;
+            use domus::infrastructure::filesystem::{
+                DirectoryExpectation, FilesystemClient, StorageConfiguration, StorageRole,
+                StorageRoot,
+            };
+            drop(initial);
+            let boundary = state
+                .path()
+                .ancestors()
+                .find(|path| library.path().starts_with(path) && scratch.path().starts_with(path))
+                .ok_or("selected fixture has no common provider boundary")?;
+            let mut storage =
+                StorageConfiguration::inspect_initial(state.path(), &LibraryPath::parse("")?)?;
+            storage.providers[0].boundary = boundary.into();
+            storage.roots.clear();
+            for (root_id, role, path) in [
+                ("application", StorageRole::Application, state.path()),
+                ("state", StorageRole::State, state.path()),
+                ("media", StorageRole::Media, library.path()),
+                ("staging", StorageRole::Staging, scratch.path()),
+            ] {
+                let relative = path
+                    .strip_prefix(boundary)?
+                    .iter()
+                    .map(|part| part.to_str().ok_or("fixture component must be Unicode"))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join("/");
+                let (expected, _) =
+                    DirectoryExpectation::inspect(boundary, &LibraryPath::parse(&relative)?)?;
+                storage.roots.push(StorageRoot {
+                    root_id: root_id.into(),
+                    binding_revision: 1,
+                    role,
+                    provider_scope: "application".into(),
+                    relative,
+                    expected,
+                });
+            }
+            for (index, path) in inputs.extra_media.iter().enumerate() {
+                let relative = path
+                    .strip_prefix(boundary)?
+                    .iter()
+                    .map(|part| part.to_str().ok_or("fixture component must be Unicode"))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join("/");
+                let (expected, _) =
+                    DirectoryExpectation::inspect(boundary, &LibraryPath::parse(&relative)?)?;
+                storage.roots.push(StorageRoot {
+                    root_id: format!("extra-media-{index}"),
+                    binding_revision: 1,
+                    role: StorageRole::Media,
+                    provider_scope: "application".into(),
+                    relative,
+                    expected,
+                });
+            }
+            let client = FilesystemClient::new(storage.clone(), "a".repeat(64))?;
+            (
+                Store::open_scoped(
+                    &database,
+                    &client,
+                    domus::infrastructure::store::StoreOpenMode::Current,
+                )?,
+                Some(storage),
+            )
+        } else {
+            (initial, None)
+        };
         let main = add_location(&store, library.path(), "main")?;
         scan_location(&mut store, main)?;
         let mut locations = vec![main];
@@ -317,6 +442,7 @@ impl Fixture {
             scratch,
             _state: state,
             _library: library,
+            storage,
         })
     }
 

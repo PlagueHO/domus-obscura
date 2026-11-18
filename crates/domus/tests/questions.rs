@@ -1,7 +1,9 @@
 use domus::domain::Page;
 use domus::domain::{JobState, Question};
 use domus::infrastructure::store::{JobControlAction, QuestionRecovery, Store};
-use tempfile::tempdir;
+#[path = "support/private.rs"]
+mod private;
+use private::tempdir;
 
 #[test]
 fn questions_and_answers_survive_restart_without_auto_resuming()

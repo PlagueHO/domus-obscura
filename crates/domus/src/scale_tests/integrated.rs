@@ -88,13 +88,11 @@ pub(super) fn prepare(
     use crate::domain::{AudioFormat, OutputSettings};
     use crate::infrastructure::catalog::{CatalogQuery, CatalogResult};
     use crate::infrastructure::store::PlanRequest;
-    fs::create_dir(root.join("staging"))?;
-    crate::infrastructure::private_fixture::directory(&root.join("staging"))?;
     drop(crate::infrastructure::staging::StagingRoot::open(
         store,
         &root.join("staging"),
     )?);
-    let mut credentials = new_file(&root.join("generated-credentials.json"))?;
+    let mut credentials = new_file(&root.join("state").join("generated-credentials.json"))?;
     credentials.write_all(br#"{"username":"scale-user","password":"generated-only"}"#)?;
     #[cfg(unix)]
     {
@@ -124,7 +122,7 @@ pub(super) fn prepare(
         roots.push(json!({"binding_id":binding.binding_id.ok_or("missing generated share binding")?,"alias":alias}));
     }
     config["production_worker"]["acquisition"] = json!({
-        "staging_root":root.join("staging"),"credentials_file":root.join("generated-credentials.json"),
+        "staging_root":root.join("staging"),"credentials_file":root.join("state").join("generated-credentials.json"),
         "server":"8.8.8.8:2242","acknowledge_plaintext_login":true
     });
     config["production_worker"]["sharing"] = json!({
@@ -244,7 +242,10 @@ fn require_completed_scan(scan: &Value) -> TestResult {
 }
 
 fn publication_evidence(root: &Path, album: &Album) -> Result<Value> {
-    let store = Store::open_read_current(&root.join("state").join("state.sqlite"))?;
+    let store = super::selected_store(
+        root,
+        crate::infrastructure::store::StoreOpenMode::ReadCurrent,
+    )?;
     let targets = store.publication_destinations(album.job, album.version)?;
     if targets.len() != 1
         || targets[0].location_id != album.destination
@@ -256,8 +257,7 @@ fn publication_evidence(root: &Path, album: &Album) -> Result<Value> {
         ));
     }
     let target = &targets[0];
-    let root = LibraryDirectory::open(Path::new(&target.root))?;
-    store.check_native_root(&target.root, "media", root.native_root())?;
+    let root = store.open_registered_root(&target.root, "media")?;
     let directory =
         root.open_directory(&crate::domain::LibraryPath::parse(&target.relative_folder)?)?;
     let connection = rusqlite::Connection::open_with_flags(

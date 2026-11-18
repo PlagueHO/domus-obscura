@@ -1,13 +1,62 @@
-//! Windows descriptor I/O for borrowed, already-open file handles.
+//! Native security and filesystem facts for borrowed, already-open handles.
 //!
 //! There are no path APIs or permission-policy decisions. Callers retain their
 //! no-follow component handles, locks, identity checks and authorization.
-//! The implementation uses the documented Win32 SDK ABI, not dependency source.
-//! Unsafe code is limited to the private FFI module and its OS-owned buffers.
+//! Implementations use documented operating-system interfaces, not dependency
+//! source. Unsafe code is limited to private FFI modules and bounded OS buffers.
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod linux;
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
+
+/// Opaque Linux exportfs identity within the caller's trusted provider scope.
+///
+/// The filesystem identifier is native ABI data, not a physical-device identity.
+/// Mount IDs are deliberately excluded because they are transient observations.
+/// These bytes do not prove locality, ancestry or separation from another root.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FilesystemHandle {
+    pub filesystem_id: [u8; 8],
+    pub handle_type: i32,
+    pub bytes: Vec<u8>,
+}
+
+/// Identify this exact borrowed regular file or directory without a pathname.
+///
+/// Uses `name_to_handle_at` with `AT_EMPTY_PATH`, never `open_by_handle_at`.
+/// Unsupported filesystems, unavailable identifiers and syscall restrictions
+/// return errors. There is no inode-only or former-path fallback.
+#[cfg(target_os = "linux")]
+pub fn filesystem_handle(file: &std::fs::File) -> std::io::Result<FilesystemHandle> {
+    linux::filesystem_handle(file)
+}
+
+/// Filesystem facts collected from an existing file or directory handle.
+///
+/// These describe the logical Windows filesystem, not its physical backing.
+/// A remote filesystem does not have a name from the local-volume API.
+/// Callers, not this adapter, decide which filesystem profiles are supported.
+#[cfg(windows)]
+#[derive(Debug, Eq, PartialEq)]
+pub struct FilesystemInformation {
+    pub device_type: u32,
+    pub remote: bool,
+    pub name: Option<String>,
+}
+
+/// Query the actual filesystem without resolving the handle's former path.
+///
+/// An independent synchronous handle keeps query completion and temporary
+/// output buffers confined to this call. The original handle remains borrowed.
+#[cfg(windows)]
+pub fn filesystem_information(file: &std::fs::File) -> std::io::Result<FilesystemInformation> {
+    windows::filesystem_information(file)
+}
 
 /// Read the owner and DACL of this exact borrowed handle as bounded SDDL.
 ///
@@ -65,6 +114,46 @@ mod native_security {
             .and_then(|value| value.split_once("D:"))
             .map(|(owner, _)| owner)
             .ok_or_else(|| io::Error::other("Generated fixture has no owner"))
+    }
+
+    #[test]
+    fn filesystem_query_keeps_the_borrowed_handle_and_ignores_path_replacement() -> io::Result<()> {
+        let root = fixture()?;
+        let path = root.path().join("original");
+        fs::write(&path, b"retained")?;
+        let file = open(&path, 0x8000_0000)?;
+        let before = filesystem_information(&file)?;
+        assert!(!before.remote);
+        assert_eq!(before.device_type, 7);
+        assert!(before.name.as_ref().is_some_and(|name| !name.is_empty()));
+        fs::rename(&path, root.path().join("moved"))?;
+        fs::write(&path, b"replacement")?;
+        assert_eq!(filesystem_information(&file)?, before);
+        assert_eq!(file.metadata()?.len(), 8);
+        assert_eq!(fs::read(path)?, b"replacement");
+        Ok(())
+    }
+
+    #[test]
+    fn filesystem_query_reopens_async_directory_handles_after_rename() -> io::Result<()> {
+        let root = fixture()?;
+        let path = root.path().join("original");
+        fs::create_dir(&path)?;
+        let directory = OpenOptions::new()
+            .access_mode(0x0010_0080)
+            .share_mode(7)
+            .custom_flags(0x4220_0000)
+            .open(&path)?;
+        let before = filesystem_information(&directory)?;
+        assert!(!before.remote);
+        assert_eq!(before.device_type, 7);
+        assert!(before.name.as_ref().is_some_and(|name| !name.is_empty()));
+        fs::rename(&path, root.path().join("moved"))?;
+        fs::write(&path, b"not the retained directory")?;
+        assert_eq!(filesystem_information(&directory)?, before);
+        assert!(directory.metadata()?.is_dir());
+        assert_eq!(fs::read(path)?, b"not the retained directory");
+        Ok(())
     }
 
     #[test]

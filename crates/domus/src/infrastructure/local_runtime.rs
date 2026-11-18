@@ -1,16 +1,16 @@
 //! A single explicit local operation at a time. This is not a scheduler and
 //! never replays an uncertain submission after failure or process restart.
+use super::store::{StoreOpenMode, StoreSource};
 use super::worker::{LocalAcquisition, ResumePublication, SourceFolderRequest, StartLocalDownload};
 use crate::application::services::ServiceConfiguration;
 use crate::{Error, Result};
 use serde::Serialize;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub struct LocalRuntime {
-    database: PathBuf,
+    database: StoreSource,
     configuration: LocalAcquisition,
     services: ServiceConfiguration,
     cache: Option<Arc<dyn crate::application::services::cache::Cache>>,
@@ -22,10 +22,15 @@ pub struct LocalRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
-    fn runtime() -> Result<Arc<LocalRuntime>> {
-        Ok(Arc::new(LocalRuntime {
-            database: PathBuf::from("unused-generated-state"),
+    fn runtime()
+    -> std::result::Result<(tempfile::TempDir, Arc<LocalRuntime>), Box<dyn std::error::Error>> {
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
+        let database =
+            super::super::store::Store::open(&directory.path().join("state.db"))?.source();
+        let runtime = Arc::new(LocalRuntime {
+            database,
             configuration: LocalAcquisition {
                 staging_root: PathBuf::from("unused-generated-staging"),
                 credentials_file: PathBuf::from("unused-generated-credentials"),
@@ -39,12 +44,14 @@ mod tests {
             slot: Arc::new(Semaphore::new(1)),
             last_error: Arc::new(Mutex::new(None)),
             stopping: AtomicBool::new(false),
-        }))
+        });
+        Ok((directory, runtime))
     }
 
     #[tokio::test]
-    async fn publication_recovery_shares_the_download_slot_and_retains_failures() -> Result<()> {
-        let runtime = runtime()?;
+    async fn publication_recovery_shares_the_download_slot_and_retains_failures()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_directory, runtime) = runtime()?;
         let (started, ready) = tokio::sync::oneshot::channel();
         let (release, hold) = std::sync::mpsc::channel();
         runtime.start_operation(3, 2, "Publication recovery", move || {
@@ -96,13 +103,14 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        Err(Error::Internal("fixture operation did not finish"))
+        Err(Error::Internal("fixture operation did not finish").into())
     }
 
     #[tokio::test]
-    async fn shutdown_rejects_new_work_and_drains_success_error_and_panicked_tasks() -> Result<()> {
+    async fn shutdown_rejects_new_work_and_drains_success_error_and_panicked_tasks()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         for outcome in 0..3 {
-            let runtime = runtime()?;
+            let (_directory, runtime) = runtime()?;
             let (started, ready) = tokio::sync::oneshot::channel();
             let (release, hold) = std::sync::mpsc::channel();
             runtime.start_operation(3, 2, "Generated operation", move || {
@@ -187,11 +195,11 @@ pub struct LocalStatus {
 
 impl LocalRuntime {
     pub fn new(
-        database: PathBuf,
+        database: StoreSource,
         configuration: LocalAcquisition,
         services: ServiceConfiguration,
     ) -> Result<Self> {
-        let store = super::store::Store::open_read_snapshot(&database)?;
+        let store = database.open(StoreOpenMode::Snapshot)?;
         configuration.validate(&store, &services)?;
         Ok(Self {
             database,

@@ -18,6 +18,31 @@ fn managed_fixture() -> TestResult<Fixture> {
         generated.signing_key.serialize_pem(),
     )?;
     let mut configuration: Value = serde_json::from_slice(&std::fs::read(&fixture.path)?)?;
+    for name in ["state", "certificates"] {
+        std::fs::create_dir(root.join(name))?;
+        crate::infrastructure::permissions::private_fixture::directory(&root.join(name))
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    let database = root.join("state").join("state.db");
+    drop(Store::open(&database)?);
+    let mut storage =
+        StorageConfiguration::inspect_initial(root, &crate::domain::LibraryPath::parse("state")?)?;
+    let (expected, _) = crate::infrastructure::filesystem::DirectoryExpectation::inspect(
+        root,
+        &crate::domain::LibraryPath::parse("certificates")?,
+    )?;
+    storage
+        .roots
+        .push(crate::infrastructure::filesystem::StorageRoot {
+            root_id: "certificate".into(),
+            binding_revision: 1,
+            role: crate::infrastructure::filesystem::StorageRole::Certificate,
+            provider_scope: "application".into(),
+            relative: "certificates".into(),
+            expected,
+        });
+    configuration["database"] = json!(database);
+    configuration["storage"] = serde_json::to_value(storage)?;
     configuration["environment"] = json!("production");
     configuration["origin"] = json!("https://api.home.example:8443");
     for name in ["tenant_id", "object_id", "client_id"] {
@@ -44,6 +69,33 @@ fn managed_fixture() -> TestResult<Fixture> {
 }
 
 #[test]
+fn certificate_binding_ignores_runtime_locators_but_rejects_changed_credentials_or_policy()
+-> TestResult {
+    let fixture = managed_fixture()?;
+    let store = fixture.source.open_store(StoreOpenMode::ReadCurrent)?;
+    let source = store.source();
+    let mut managed = fixture
+        .source
+        .active
+        .managed_tls
+        .clone()
+        .ok_or("missing managed TLS")?;
+    let hostname = "api.home.example";
+    let original = managed.binding_for(hostname, &source)?;
+    let secret = fixture.directory.path().join("relocated-dns.secret");
+    std::fs::copy(&managed.dns.client_secret_file, &secret)?;
+    managed.dns.client_secret_file = secret.clone();
+    managed.state_directory = fixture.directory.path().join("relocated-certificates");
+    assert_eq!(managed.binding_for(hostname, &source)?, original);
+    std::fs::write(&secret, b"rotated-generated-secret")?;
+    assert_ne!(managed.binding_for(hostname, &source)?, original);
+    std::fs::copy(fixture.directory.path().join("dns.secret"), &secret)?;
+    managed.dns.resource_group = "changed-generated-group".into();
+    assert_ne!(managed.binding_for(hostname, &source)?, original);
+    Ok(())
+}
+
+#[test]
 fn backend_configuration_certificate_status_uses_active_not_saved_revision() -> TestResult {
     let fixture = managed_fixture()?;
     let active_revision = fixture.source.read()?.active_revision;
@@ -55,7 +107,10 @@ fn backend_configuration_certificate_status_uses_active_not_saved_revision() -> 
             "private_key_file":{"action":"keep"}
         }]),
     )?;
-    assert!(fixture.source.save_sections(command)?.errors.is_empty());
+    assert!(fixture.source.validate_sections(command)?.errors.is_empty());
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&fixture.path)?)?;
+    document["tls_mode"] = json!("manual");
+    std::fs::write(&fixture.path, serde_json::to_vec(&document)?)?;
     let visible = fixture.source.certificate_status()?;
     assert_eq!(visible.configuration_revision, active_revision);
     assert_ne!(
@@ -66,7 +121,10 @@ fn backend_configuration_certificate_status_uses_active_not_saved_revision() -> 
         visible.certificate.ok_or("status is missing")?.phase,
         crate::domain::certificates::CertificatePhase::Uninitialized
     );
-    assert!(!fixture.directory.path().join("certificates").exists());
+    assert_eq!(
+        std::fs::read_dir(fixture.directory.path().join("certificates"))?.count(),
+        0
+    );
     let reloaded = ConfigurationService::load(&fixture.path)?.0;
     assert!(reloaded.certificate_status()?.certificate.is_none());
     Ok(())
@@ -83,7 +141,8 @@ fn backend_configuration_certificate_status_rejects_an_unconfirmed_listener_sele
         .as_ref()
         .ok_or("managed settings are missing")?;
     let binding = managed.binding("api.home.example")?;
-    let mut state = crate::infrastructure::certificates::state::StateStore::initialize(
+    let mut state = crate::infrastructure::certificates::state::StateStore::initialize_for(
+        &fixture.source.open_store(StoreOpenMode::Current)?,
         &managed.state_directory,
         &binding,
         AcmeEnvironment::Staging,
@@ -119,7 +178,8 @@ fn backend_configuration_certificate_status_rejects_an_unconfirmed_listener_sele
         .lock()
         .map_err(|_| "fixture selection lock failed")? = Some(original_selection);
     assert_eq!(
-        crate::infrastructure::certificates::state::StateStore::status(
+        crate::infrastructure::certificates::state::StateStore::status_for(
+            &fixture.source.open_store(StoreOpenMode::ReadCurrent)?,
             &managed.state_directory,
             &binding,
             AcmeEnvironment::Staging,
@@ -157,10 +217,17 @@ fn backend_configuration_certificate_status_rejects_an_unconfirmed_listener_sele
     std::fs::write(&first_path, &first_bytes)?;
     let retained: crate::infrastructure::certificates::state::Generation =
         serde_json::from_slice(&first_bytes)?;
-    std::fs::rename(
+    let moved = std::fs::rename(
         &managed.state_directory,
         fixture.directory.path().join("retained-root"),
-    )?;
+    );
+    if let Err(error) = moved {
+        if cfg!(windows) && error.raw_os_error() == Some(32) {
+            assert_eq!(std::fs::read(&first_path)?, first_bytes);
+            return Ok(());
+        }
+        return Err(error.into());
+    }
     let mut replacement = crate::infrastructure::certificates::state::StateStore::initialize(
         &managed.state_directory,
         &binding,
@@ -199,7 +266,10 @@ fn backend_configuration_anonymous_certificate_status_does_not_read_inactive_ref
     std::fs::remove_file(fixture.directory.path().join("entra.secret"))?;
     let source = ConfigurationService::load(&fixture.path)?.0;
     assert!(source.certificate_status()?.certificate.is_none());
-    assert!(!fixture.directory.path().join("certificates").exists());
+    assert_eq!(
+        std::fs::read_dir(fixture.directory.path().join("certificates"))?.count(),
+        0
+    );
     Ok(())
 }
 
@@ -219,7 +289,10 @@ fn backend_configuration_certificate_status_reports_runtime_recovery_without_a_j
             .ok_or("status is missing")?
             .recovery_required
     );
-    assert!(!fixture.directory.path().join("certificates").exists());
+    assert_eq!(
+        std::fs::read_dir(fixture.directory.path().join("certificates"))?.count(),
+        0
+    );
     Ok(())
 }
 
@@ -233,7 +306,8 @@ async fn backend_configuration_certificate_status_reports_owner_restart_failure(
         .ok_or("managed settings are missing")?;
     let hostname = "api.home.example";
     let path = managed.state_directory.join("lifecycle.json");
-    let state = crate::infrastructure::certificates::state::StateStore::initialize(
+    let state = crate::infrastructure::certificates::state::StateStore::initialize_for(
+        &fixture.source.open_store(StoreOpenMode::Current)?,
         &managed.state_directory,
         &managed.binding(hostname)?,
         AcmeEnvironment::Staging,
@@ -252,7 +326,7 @@ async fn backend_configuration_certificate_status_reports_owner_restart_failure(
         configuration,
         hostname: hostname.into(),
         source: std::sync::Arc::new(fixture.source),
-        certificate_guard: None,
+        _certificate_guard: None,
     };
     assert!(super::super::super::renewal_owner(&host).await.is_err());
     assert!(
@@ -306,7 +380,7 @@ async fn backend_configuration_certificate_status_route_is_passive_redacted_and_
     assert!(status["certificate"].get("account").is_none());
     assert!(status["certificate"].get("certificate_key").is_none());
     assert!(!String::from_utf8(bytes.to_vec())?.contains("fixture-private-secret"));
-    assert!(!path.exists());
+    assert_eq!(std::fs::read_dir(&path)?.count(), 0);
     Ok(())
 }
 
@@ -322,14 +396,14 @@ fn backend_configuration_managed_setup_is_passive_and_secret_references_stay_hid
         }]),
     )?;
     assert!(fixture.source.validate_sections(command)?.errors.is_empty());
-    assert!(!directory.exists());
+    assert_eq!(std::fs::read_dir(&directory)?.count(), 0);
     let visible = serde_json::to_string(&fixture.source.read()?)?;
     assert!(!visible.contains("fixture-private-secret"));
     assert!(!visible.contains("dns.secret"));
     assert!(!visible.contains("33333333-3333-3333-3333-333333333333"));
     assert!(visible.contains("\"client_secret_file_configured\":true"));
     assert!(super::super::super::PreparedServer::load(&fixture.path).is_err());
-    assert!(!directory.exists());
+    assert_eq!(std::fs::read_dir(&directory)?.count(), 0);
     Ok(())
 }
 
@@ -345,24 +419,30 @@ fn backend_configuration_mode_changes_retain_inactive_managed_settings() -> Test
             "private_key_file": { "action": "keep" }
         }]),
     )?;
-    let result = fixture.source.save_sections(command)?;
-    assert!(result.errors.is_empty());
-    let saved: Value = serde_json::from_slice(&std::fs::read(&fixture.path)?)?;
-    assert_eq!(saved["managed_tls"], previous["managed_tls"]);
-    assert_eq!(saved["tls_mode"], "manual");
-    assert_eq!(saved["client_secret_file"], previous["client_secret_file"]);
+    let bytes = std::fs::read(&fixture.path)?;
+    let proposed = fixture
+        .source
+        .proposed_update(ConfigurationUpdate::Sections(command.sections), &bytes)
+        .map_err(configuration_error)?;
+    let proposed = serde_json::to_value(proposed)?;
+    assert_eq!(proposed["managed_tls"], previous["managed_tls"]);
+    assert_eq!(proposed["tls_mode"], "manual");
     assert_eq!(
-        fixture.source.read()?.changed_sections,
-        vec![ConfigurationSection::Tls]
+        proposed["client_secret_file"],
+        previous["client_secret_file"]
     );
-    assert!(!fixture.directory.path().join("certificates").exists());
+    assert_eq!(std::fs::read(&fixture.path)?, bytes);
+    assert_eq!(
+        std::fs::read_dir(fixture.directory.path().join("certificates"))?.count(),
+        0
+    );
     Ok(())
 }
 
 #[test]
 fn backend_configuration_certificate_root_separation_keeps_siblings_and_offline_roots() -> TestResult
 {
-    let fixture = managed_fixture()?;
+    let fixture = Fixture::new(false)?;
     let root = fixture.directory.path();
     let store = Store::open_current_existing(&root.join("state.db"))?;
     let media = root.join("media");
@@ -382,7 +462,7 @@ fn backend_configuration_certificate_root_separation_keeps_siblings_and_offline_
 
 #[test]
 fn backend_configuration_bound_certificate_state_excludes_new_media_roots() -> TestResult {
-    let fixture = managed_fixture()?;
+    let fixture = Fixture::new(false)?;
     let root = fixture.directory.path();
     let store = Store::open_current_existing(&root.join("state.db"))?;
     let state = crate::infrastructure::certificates::state::StateStore::initialize(

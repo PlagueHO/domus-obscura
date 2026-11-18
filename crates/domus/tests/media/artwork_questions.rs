@@ -182,7 +182,7 @@ fn artwork_questions_survive_restart_and_resume_real_normalization_without_redow
         (AudioFormat::Mp3, "downloading"),
         (AudioFormat::Flac, "downloading"),
     ] {
-        let mut fixture = Fixture::build_inner(format, true, false)?;
+        let mut fixture = Fixture::build_selected(format, true, false)?;
         if paused_state == "downloading" {
             Connection::open(&fixture.database)?.execute(
                 "UPDATE jobs SET state='downloading' WHERE id=?1",
@@ -206,7 +206,7 @@ fn artwork_questions_survive_restart_and_resume_real_normalization_without_redow
         assert_eq!(decision.paused_state, paused_state);
         assert!(fixture.store.renew_claim(&fixture.claim, 300).is_err());
         assert!(fixture.store.claim(fixture.job, "other", 300)?.is_none());
-        let mut store = Store::open_existing(&fixture.database)?;
+        let mut store = fixture.open_store()?;
         let duplicate = store
             .check_artwork(fixture.job, fixture.version)?
             .ok_or("missing question")?;
@@ -267,7 +267,7 @@ fn artwork_questions_survive_restart_and_resume_real_normalization_without_redow
         assert_eq!(resolved.candidate_id, Some(candidate.id));
         assert_eq!(resolved.sha256.as_deref(), Some(candidate.sha256.as_str()));
         drop(store);
-        let mut store = Store::open_existing(&fixture.database)?;
+        let mut store = fixture.open_store()?;
         assert!(
             store
                 .resume_artwork(decision.question_id, fixture.version + 1)
@@ -304,13 +304,25 @@ fn artwork_questions_survive_restart_and_resume_real_normalization_without_redow
             }))?,
         )?;
         drop(fixture.staging.take());
-        let checked = run(&["worker-check", config.to_str().ok_or("config")?])?;
+        let host = fixture.write_host()?;
+        let host = host.to_str().ok_or("host path")?;
+        let checked = run(&[
+            "worker-check",
+            "--host",
+            host,
+            config.to_str().ok_or("config")?,
+        ])?;
         assert!(
             checked.status.success(),
             "{}",
             String::from_utf8_lossy(&checked.stderr)
         );
-        let output = run(&["worker-once", config.to_str().ok_or("config")?])?;
+        let output = run(&[
+            "worker-once",
+            "--host",
+            host,
+            config.to_str().ok_or("config")?,
+        ])?;
         assert!(
             output.status.success(),
             "{}",
@@ -419,7 +431,7 @@ fn artwork_preparation_pauses_for_permission_background_and_unsupported_input() 
 #[test]
 fn worker_missing_cover_saves_one_question_and_cli_resolves_it_without_starting_work() -> TestResult
 {
-    let mut fixture = Fixture::build_inner(AudioFormat::Flac, true, false)?;
+    let mut fixture = Fixture::build_selected(AudioFormat::Flac, true, false)?;
     release_owner(&fixture)?;
     let credentials = fixture._state.path().join("credentials.json");
     write_credentials(&credentials)?;
@@ -433,9 +445,15 @@ fn worker_missing_cover_saves_one_question_and_cli_resolves_it_without_starting_
         }))?,
     )?;
     let configuration = configuration.to_str().ok_or("config")?;
-    assert!(!run(&["worker-check", configuration])?.status.success());
+    let host = fixture.write_host()?;
+    let host = host.to_str().ok_or("host path")?;
+    assert!(
+        !run(&["worker-check", "--host", host, configuration])?
+            .status
+            .success()
+    );
     assert!(fixture.store.questions(Page::new(0, 20)?)?.is_empty());
-    let output = run(&["worker-once", configuration])?;
+    let output = run(&["worker-once", "--host", host, configuration])?;
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)?.contains("question"));
     let question = fixture
@@ -443,22 +461,21 @@ fn worker_missing_cover_saves_one_question_and_cli_resolves_it_without_starting_
         .questions(Page::new(0, 20)?)?
         .pop()
         .ok_or("question")?;
-    let db = fixture.database.to_str().ok_or("db")?;
     let job = fixture.job.to_string();
     let version = fixture.version.to_string();
     let id = question.id.to_string();
-    let checked = run(&["artwork-check", db, &job, &version])?;
+    let checked = run(&["artwork-check", "--host", host, &job, &version])?;
     assert!(checked.status.success());
     let checked: serde_json::Value = serde_json::from_slice(&checked.stdout)?;
     assert_eq!(checked["question_id"], question.id);
-    let details = run(&["artwork-question", db, &id])?;
+    let details = run(&["artwork-question", "--host", host, &id])?;
     assert!(details.status.success());
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&details.stdout)?["issue"],
         "missing"
     );
     assert!(
-        !run(&["question-answer", db, &id, &version, USE_COVER])?
+        !run(&["question-answer", "--host", host, &id, &version, USE_COVER])?
             .status
             .success()
     );
@@ -466,7 +483,8 @@ fn worker_missing_cover_saves_one_question_and_cli_resolves_it_without_starting_
     std::fs::write(&image, cover_source()?)?;
     let prepared = run(&[
         "artwork-local-prepare",
-        db,
+        "--host",
+        host,
         &job,
         &version,
         image.to_str().ok_or("cover path")?,
@@ -480,7 +498,7 @@ fn worker_missing_cover_saves_one_question_and_cli_resolves_it_without_starting_
     );
     let prepared: serde_json::Value = serde_json::from_slice(&prepared.stdout)?;
     assert!(
-        !run(&["question-answer", db, &id, &version, USE_COVER])?
+        !run(&["question-answer", "--host", host, &id, &version, USE_COVER])?
             .status
             .success()
     );
@@ -488,7 +506,8 @@ fn worker_missing_cover_saves_one_question_and_cli_resolves_it_without_starting_
     assert!(
         run(&[
             "artwork-approve",
-            db,
+            "--host",
+            host,
             &job,
             &version,
             &candidate,
@@ -498,7 +517,7 @@ fn worker_missing_cover_saves_one_question_and_cli_resolves_it_without_starting_
         .success()
     );
     assert!(
-        run(&["question-answer", db, &id, &version, USE_COVER])?
+        run(&["question-answer", "--host", host, &id, &version, USE_COVER])?
             .status
             .success()
     );
@@ -507,7 +526,7 @@ fn worker_missing_cover_saves_one_question_and_cli_resolves_it_without_starting_
         Some("awaiting_input")
     );
     assert!(
-        run(&["artwork-resume", db, &id, &version])?
+        run(&["artwork-resume", "--host", host, &id, &version])?
             .status
             .success()
     );

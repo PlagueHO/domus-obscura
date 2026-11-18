@@ -1,6 +1,8 @@
 use domus::domain::{LibraryPath, Page};
 use domus::infrastructure::store::Store;
-use tempfile::tempdir;
+#[path = "support/private.rs"]
+mod private;
+use private::tempdir;
 
 /// Generated recovery history evidence, not physical file or memory acceptance.
 #[test]

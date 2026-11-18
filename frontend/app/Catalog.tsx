@@ -491,8 +491,6 @@ export function Settings({
   onReload: () => void;
 }) {
   const [savedVersion, setSavedVersion] = useState<number>();
-  const [outputDirty, setOutputDirty] = useState(false);
-  const [rootDirty, setRootDirty] = useState(false);
   const readOnly = policy?.read_only ?? true;
 
   return (
@@ -506,7 +504,6 @@ export function Settings({
       <BackendConfiguration
         onRefreshRelated={onReload}
         relatedLoading={loading}
-        otherDrafts={outputDirty || rootDirty}
         output={
           <ConfigurationCard title="Output policy">
             <Alert error={error} />
@@ -560,7 +557,6 @@ export function Settings({
                   <SystemOutputForm
                     key={settings.version}
                     settings={settings}
-                    onDirty={setOutputDirty}
                     disabled={loading || Boolean(error)}
                     onSaved={(version) => {
                       setSavedVersion(version);
@@ -607,7 +603,6 @@ export function Settings({
               <LibraryRootControls
                 key={locations.map((location) => location.id).join(":")}
                 locations={locations}
-                onDirty={setRootDirty}
                 disabled={loading || Boolean(error)}
                 onChanged={onReload}
               />
@@ -629,12 +624,10 @@ function SystemOutputForm({
   settings,
   disabled,
   onSaved,
-  onDirty,
 }: {
   settings: SettingsVersion;
   disabled: boolean;
   onSaved: (version: number) => void;
-  onDirty: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState<OutputSettings>(settings.settings);
   const [audioPolicy, setAudioPolicy] = useState(settings.policy);
@@ -648,15 +641,6 @@ function SystemOutputForm({
     accepted.every((profile) =>
       settings.audio_profiles.some((descriptor) => descriptor.profile === profile),
     );
-  useEffect(() => {
-    onDirty(
-      !submitted &&
-        (JSON.stringify(draft) !== JSON.stringify(settings.settings) ||
-          JSON.stringify(audioPolicy) !== JSON.stringify(settings.policy)),
-    );
-    return () => onDirty(false);
-  }, [draft, audioPolicy, settings.settings, settings.policy, submitted, onDirty]);
-
   async function save() {
     if (saving || !validAudio) return;
     const version = await request<number>("/api/settings", {
@@ -788,12 +772,10 @@ function LibraryRootControls({
   locations,
   disabled,
   onChanged,
-  onDirty,
 }: {
   locations: Location[];
   disabled: boolean;
   onChanged: () => void;
-  onDirty: (dirty: boolean) => void;
 }) {
   const hasMain = locations.some((location) => location.kind === "main");
   const [root, setRoot] = useState("");
@@ -802,11 +784,6 @@ function LibraryRootControls({
   const [message, setMessage] = useState("");
   const command = useCommand();
   const busy = disabled || command.busy;
-  useEffect(() => {
-    onDirty(!submitted && root.length > 0);
-    return () => onDirty(false);
-  }, [root, submitted, onDirty]);
-
   async function register() {
     if (busy || submitted) return;
     const body: RegisterLocation = { root, kind };

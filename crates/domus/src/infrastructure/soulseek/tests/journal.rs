@@ -20,6 +20,8 @@ struct Fixture {
     location: i64,
     _state: TempDir,
     _library: TempDir,
+    _scratch: Option<TempDir>,
+    storage: Option<crate::infrastructure::filesystem::StorageConfiguration>,
 }
 
 mod files;
@@ -47,10 +49,66 @@ impl Fixture {
         cover: bool,
         select_source: bool,
     ) -> std::result::Result<Self, Box<dyn std::error::Error>> {
+        Self::build_mode(format, size, tracks, cover, select_source, false)
+    }
+
+    fn selected_album(
+        format: AudioFormat,
+        size: i64,
+        tracks: u16,
+        cover: bool,
+    ) -> std::result::Result<Self, Box<dyn std::error::Error>> {
+        Self::selected_build(format, size, tracks, cover, true)
+    }
+
+    fn selected_build(
+        format: AudioFormat,
+        size: i64,
+        tracks: u16,
+        cover: bool,
+        select_source: bool,
+    ) -> std::result::Result<Self, Box<dyn std::error::Error>> {
+        Self::build_mode(format, size, tracks, cover, select_source, true)
+    }
+
+    fn build_mode(
+        format: AudioFormat,
+        size: i64,
+        tracks: u16,
+        cover: bool,
+        select_source: bool,
+        selected: bool,
+    ) -> std::result::Result<Self, Box<dyn std::error::Error>> {
         let state = tempdir()?;
         let library = tempdir()?;
         let database = state.path().join("state.db");
-        let mut store = Store::open(&database)?;
+        let initial = Store::open(&database)?;
+        let scratch = selected.then(tempdir).transpose()?;
+        let (mut store, storage) = if let Some(scratch) = &scratch {
+            use crate::infrastructure::filesystem::{
+                FilesystemClient, StorageRole, fixture_storage,
+            };
+            drop(initial);
+            let storage = fixture_storage(
+                state.path(),
+                &crate::domain::LibraryPath::parse("")?,
+                &[
+                    ("media", StorageRole::Media, library.path()),
+                    ("staging", StorageRole::Staging, scratch.path()),
+                ],
+            )?;
+            let client = FilesystemClient::new(storage.clone(), "a".repeat(64))?;
+            (
+                Store::open_scoped(
+                    &database,
+                    &client,
+                    crate::infrastructure::store::StoreOpenMode::Current,
+                )?,
+                Some(storage),
+            )
+        } else {
+            (initial, None)
+        };
         let location = add_location(&store, library.path(), "main")?;
         scan_location(&mut store, location)?;
         store.save_settings(None, &OutputSettings::default())?;
@@ -153,6 +211,8 @@ impl Fixture {
             location,
             _state: state,
             _library: library,
+            _scratch: scratch,
+            storage,
         })
     }
 }

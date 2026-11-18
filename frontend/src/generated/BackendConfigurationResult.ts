@@ -4,6 +4,6 @@ import type { BackendConfigurationState } from "./BackendConfigurationState";
 
 export type BackendConfigurationResult = { errors: Array<BackendConfigurationIssue>, 
 /**
- * Only a successful save returns saved state. Validation does not save.
+ * Passive validation never returns a replacement saved state.
  */
 state: BackendConfigurationState | null, };

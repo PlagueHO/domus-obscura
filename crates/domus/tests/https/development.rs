@@ -17,7 +17,7 @@ pub(super) fn self_signed() -> TestResult<Certificates> {
 #[tokio::test]
 async fn disabled_provider_roles_stop_api_queries_and_plan_batches_before_effects() -> TestResult {
     use domus::application::services::ServiceConfiguration;
-    let state = tempfile::tempdir()?;
+    let state = private::tempdir()?;
     let database = state.path().join("state.db");
     let configuration = ServiceConfiguration {
         discovery: Vec::new(),
@@ -94,7 +94,7 @@ async fn disabled_provider_roles_stop_api_queries_and_plan_batches_before_effect
 
 #[tokio::test]
 async fn development_https_uses_anonymous_without_sessions_or_entra() -> TestResult {
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     let material = self_signed()?;
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -278,12 +278,12 @@ async fn development_rejects_remote_peers_forwarded_identity_and_remote_origins(
         "https://localhost:8443/path",
         "https://user@localhost:8443",
     ] {
-        let directory = tempfile::tempdir()?;
+        let directory = private::tempdir()?;
         assert!(
             Api::development(origin, Store::open(&directory.path().join("state.db"))?).is_err()
         );
     }
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let api = Api::development(
         "https://localhost:8443",
         Store::open(&directory.path().join("state.db"))?,
@@ -327,6 +327,7 @@ async fn explicit_development_bootstrap_accepts_developer_certificate_not_missin
     let path = state.join("development.json");
     let valid = json!({
         "environment":"development", "database":database, "listen":"127.0.0.1:8443",
+        "storage":domus::infrastructure::filesystem::StorageConfiguration::inspect_initial(state, &domus::domain::LibraryPath::parse("")?)?,
         "origin":"https://localhost:8443", "certificate_file":certificate, "private_key_file":key
     });
     std::fs::write(&path, serde_json::to_vec(&valid)?)?;

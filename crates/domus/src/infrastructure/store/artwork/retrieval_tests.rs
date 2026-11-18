@@ -8,7 +8,7 @@ use serde_json::json;
 #[test]
 fn image_retrieval_persistence_rechecks_plan_original_profile_and_fresh_evidence()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let state = tempfile::tempdir()?;
+    let state = crate::infrastructure::permissions::private_test_directory()?;
     let media = tempfile::tempdir()?;
     let mut store = Store::open(&state.path().join("state.db"))?;
     let location = crate::application::add_location(&store, media.path(), "main")?;

@@ -56,7 +56,7 @@ fn catalog_new_process_keeps_full_saved_backoff_when_wall_deadline_is_past() -> 
     let _process_test_lock = super::CATALOG_PROCESS_TEST_LOCK
         .lock()
         .map_err(|_| "catalog process test lock was poisoned")?;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     let ready = directory.path().join("backoff-ready");
     let mut store = Store::open(&database)?;
@@ -108,7 +108,7 @@ fn catalog_os_ownership_blocks_other_processes_until_owner_exit() -> TestResult 
     let _process_test_lock = super::CATALOG_PROCESS_TEST_LOCK
         .lock()
         .map_err(|_| "catalog process test lock was poisoned")?;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     let ready = directory.path().join("owner-ready");
     let mut store = Store::open(&database)?;

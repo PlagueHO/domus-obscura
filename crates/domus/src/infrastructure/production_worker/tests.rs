@@ -7,10 +7,10 @@ type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 fn runtime(directory: &Path) -> Result<PreparedProductionWorker> {
     let database = directory.join("state.sqlite");
-    drop(Store::open(&database)?);
+    let source = Store::open(&database)?.source();
     Ok(PreparedProductionWorker {
         _lock: ProcessLock::acquire(&database, "worker")?,
-        database,
+        database_source: source,
         configuration: WorkerConfiguration {
             queue_capacity: 64,
             acquisition: None,
@@ -25,7 +25,7 @@ fn runtime(directory: &Path) -> Result<PreparedProductionWorker> {
 async fn worker_lifecycle_reports_ready_and_keeps_native_ownership_until_stop() -> TestResult {
     let temp = super::super::permissions::private_test_directory()?;
     let worker = runtime(temp.path())?;
-    let database = worker.database.clone();
+    let database = worker.database_source.path().to_owned();
     let (ready, mut observed) = tokio::sync::watch::channel(false);
     let lifecycle = super::super::lifecycle::Lifecycle::controlled(move || {
         ready.send_replace(true);
@@ -47,7 +47,7 @@ async fn worker_lifecycle_reports_ready_and_keeps_native_ownership_until_stop() 
 async fn worker_lifecycle_readiness_failure_drains_and_releases_ownership() -> TestResult {
     let temp = super::super::permissions::private_test_directory()?;
     let worker = runtime(temp.path())?;
-    let database = worker.database.clone();
+    let database = worker.database_source.path().to_owned();
     let lifecycle = super::super::lifecycle::Lifecycle::controlled(|| {
         Err(Error::Internal("injected readiness failure"))
     });
@@ -72,7 +72,7 @@ async fn worker_lifecycle_stop_before_start_does_not_admit_work() -> TestResult 
 async fn worker_lifecycle_stop_before_start_skips_sharing_initialization() -> TestResult {
     let temp = super::super::permissions::private_test_directory()?;
     let mut worker = runtime(temp.path())?;
-    let database = worker.database.clone();
+    let database = worker.database_source.path().to_owned();
     worker.configuration.sharing = Some(super::super::sharing::SharingConfiguration {
         policy: crate::domain::sharing::SharePolicy {
             access: crate::domain::sharing::ShareAccess::All,
@@ -98,7 +98,7 @@ async fn worker_lifecycle_stop_before_start_skips_sharing_initialization() -> Te
 fn worker_runtime_runs_a_durable_scan_and_releases_native_ownership_on_stop() -> TestResult {
     let temp = super::super::permissions::private_test_directory()?;
     let worker = runtime(temp.path())?;
-    let mut store = Store::open_current_existing(&worker.database)?;
+    let mut store = worker.database_source.open(StoreOpenMode::Current)?;
     let root = temp.path().join("media");
     std::fs::create_dir(&root)?;
     std::fs::write(root.join("generated.txt"), b"generated scan fixture")?;
@@ -111,7 +111,7 @@ fn worker_runtime_runs_a_durable_scan_and_releases_native_ownership_on_stop() ->
         &"a".repeat(64),
     )?;
     assert!(matches!(
-        ProcessLock::acquire(&worker.database, "worker"),
+        ProcessLock::acquire(worker.database_source.path(), "worker"),
         Err(Error::Busy(_))
     ));
     let stop = Arc::new(AtomicBool::new(false));
@@ -152,7 +152,10 @@ fn worker_folder_refresh_recovers_its_scope_without_scanning_children() -> TestR
     let temp = super::super::permissions::private_test_directory()?;
     let worker = runtime(temp.path())?;
     let stop = Arc::new(AtomicBool::new(true));
-    let mut store = Store::open_current_existing(&worker.database)?.with_worker_stop(stop.clone());
+    let mut store = worker
+        .database_source
+        .open(StoreOpenMode::Current)?
+        .with_worker_stop(stop.clone());
     let root = temp.path().join("media");
     std::fs::create_dir_all(root.join("selected").join("child"))?;
     std::fs::write(root.join("selected").join("direct.txt"), b"generated")?;
@@ -167,7 +170,7 @@ fn worker_folder_refresh_recovers_its_scope_without_scanning_children() -> TestR
         Err(Error::WorkerStopping)
     ));
     stop.store(false, Ordering::Release);
-    let raw = rusqlite::Connection::open(&worker.database)?;
+    let raw = rusqlite::Connection::open(worker.database_source.path())?;
     raw.execute("UPDATE scans SET lease_until=0 WHERE status='running'", [])?;
     let request = store.enqueue_worker(
         WorkerOperation::RefreshFolder {
@@ -211,7 +214,7 @@ fn worker_folder_refresh_recovers_its_scope_without_scanning_children() -> TestR
 fn worker_shutdown_does_not_start_queued_work() -> TestResult {
     let temp = super::super::permissions::private_test_directory()?;
     let worker = runtime(temp.path())?;
-    let mut store = Store::open_current_existing(&worker.database)?;
+    let mut store = worker.database_source.open(StoreOpenMode::Current)?;
     let root = temp.path().join("media");
     std::fs::create_dir(&root)?;
     let location = crate::application::add_location(&store, &root, "main")?;
@@ -232,7 +235,7 @@ fn worker_shutdown_does_not_start_queued_work() -> TestResult {
 fn worker_execute_rejects_configuration_changes_and_leaves_saved_decisions_idle() -> TestResult {
     let temp = super::super::permissions::private_test_directory()?;
     let worker = runtime(temp.path())?;
-    let mut store = Store::open_current_existing(&worker.database)?;
+    let mut store = worker.database_source.open(StoreOpenMode::Current)?;
     let job = store.enqueue(1)?;
     let operation = WorkerOperation::Acquire {
         job_id: job,
@@ -242,7 +245,7 @@ fn worker_execute_rejects_configuration_changes_and_leaves_saved_decisions_idle(
     };
     let run = |binding: &str| {
         execute(
-            &worker.database,
+            &worker.database_source,
             &worker.configuration,
             worker.services.clone(),
             operation.clone(),
@@ -252,7 +255,7 @@ fn worker_execute_rejects_configuration_changes_and_leaves_saved_decisions_idle(
         )
     };
     assert!(matches!(run(&"b".repeat(64)), Err(Error::Conflict(_))));
-    let raw = rusqlite::Connection::open(&worker.database)?;
+    let raw = rusqlite::Connection::open(worker.database_source.path())?;
     raw.execute("UPDATE jobs SET state='awaiting_input' WHERE id=?1", [job])?;
     assert!(matches!(run(&"b".repeat(64)), Err(Error::WorkerWaiting)));
     for state in ["complete", "cancelled"] {
@@ -324,7 +327,10 @@ fn worker_interrupted_scan_keeps_unknown_coverage_and_can_resume() -> TestResult
     let temp = super::super::permissions::private_test_directory()?;
     let worker = runtime(temp.path())?;
     let stop = Arc::new(AtomicBool::new(true));
-    let mut store = Store::open_current_existing(&worker.database)?.with_worker_stop(stop.clone());
+    let mut store = worker
+        .database_source
+        .open(StoreOpenMode::Current)?
+        .with_worker_stop(stop.clone());
     let root = temp.path().join("media");
     std::fs::create_dir(&root)?;
     let location = crate::application::add_location(&store, &root, "main")?;

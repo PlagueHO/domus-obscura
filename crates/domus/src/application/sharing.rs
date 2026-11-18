@@ -1,12 +1,10 @@
 //! Explicit native folder binding. Saving configuration never calls these operations.
 use crate::domain::{LibraryPath, Page};
-use crate::infrastructure::filesystem::{LibraryDirectory, NativeRoot};
+use crate::infrastructure::filesystem::{DirectorySnapshot, LibraryDirectory};
 use crate::infrastructure::store::Store;
 use crate::{Error, Result};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::path::Path;
 
 #[derive(Clone, Debug, Serialize, ts_rs::TS)]
 pub struct ShareFolderInspection {
@@ -31,14 +29,6 @@ pub struct BindShareFolder {
     pub location_id: i64,
     pub relative_path: String,
     pub expected_identity: String,
-}
-
-fn inspection_identity(native: &NativeRoot) -> Result<String> {
-    Ok(format!(
-        "{}:{:x}",
-        native.identity,
-        Sha256::digest(serde_json::to_vec(native)?)
-    ))
 }
 
 pub(crate) fn selected_directory(
@@ -66,8 +56,7 @@ pub(crate) fn selected_directory(
             "share folders require a main or backup library".into(),
         ));
     }
-    let root = LibraryDirectory::open(Path::new(&location.root))?;
-    store.check_native_root(&location.root, "media", root.native_root())?;
+    let root = store.open_registered_root(&location.root, "media")?;
     let selected = root.open_directory(relative)?;
     // The existing root registry rejects native overlap with every private root.
     // Recheck the state directory too, including a moved/aliased database parent.
@@ -82,17 +71,7 @@ pub(crate) fn selected_directory(
             "share folder overlaps application state".into(),
         ));
     }
-    let mut statement = store
-        .sharing_connection()
-        .prepare("SELECT body FROM filesystem_roots WHERE kind <> 'media'")?;
-    for row in statement.query_map([], |row| row.get::<_, String>(0))? {
-        let private: NativeRoot = serde_json::from_str(&row?)?;
-        if selected.native_root().overlaps(&private) {
-            return Err(Error::InvalidInput(
-                "share folder overlaps a private root".into(),
-            ));
-        }
-    }
+    store.check_private_ancestry(&selected)?;
     Ok(selected)
 }
 
@@ -111,13 +90,13 @@ pub fn inspect_share_folder(
         )
         .optional()?;
     let bound = match &saved {
-        Some((_, body)) => serde_json::from_str::<NativeRoot>(body)? == *opened.native_root(),
+        Some((_, body)) => serde_json::from_str::<DirectorySnapshot>(body)? == opened.snapshot(),
         None => false,
     };
     Ok(ShareFolderInspection {
         location_id: request.location_id,
         relative_path: relative.as_str().to_owned(),
-        native_identity: inspection_identity(opened.native_root())?,
+        native_identity: opened.snapshot().identity()?,
         binding_id: saved.map(|(id, _)| id),
         bound,
     })
@@ -130,7 +109,7 @@ pub fn bind_share_folder(
     let _guard = crate::infrastructure::shares::publication_visibility_write(store)?;
     let relative = LibraryPath::parse(&request.relative_path)?;
     let opened = selected_directory(store, request.location_id, &relative)?;
-    if inspection_identity(opened.native_root())? != request.expected_identity {
+    if opened.snapshot().identity()? != request.expected_identity {
         return Err(Error::Conflict(
             "share folder changed; inspect it again".into(),
         ));
@@ -143,7 +122,7 @@ pub fn bind_share_folder(
             |row| row.get(0),
         )
         .optional()?;
-    let body = serde_json::to_string(opened.native_root())?;
+    let body = serde_json::to_string(&opened.snapshot())?;
     if saved.as_ref().is_some_and(|saved| saved != &body) {
         return Err(Error::Conflict(
             "share folder binding changed; automatic rebinding is forbidden".into(),
@@ -179,14 +158,14 @@ pub fn share_bindings(store: &Store, page: Page) -> Result<Vec<ShareFolderInspec
         .collect::<std::result::Result<Vec<_>, _>>()?;
     rows.into_iter()
         .map(|(id, location_id, relative_path, body)| {
-            let native: NativeRoot = serde_json::from_str(&body)?;
+            let snapshot: DirectorySnapshot = serde_json::from_str(&body)?;
             let bound =
                 selected_directory(store, location_id, &LibraryPath::parse(&relative_path)?)
-                    .is_ok_and(|opened| *opened.native_root() == native);
+                    .is_ok_and(|opened| opened.snapshot() == snapshot);
             Ok(ShareFolderInspection {
                 location_id,
                 relative_path,
-                native_identity: inspection_identity(&native)?,
+                native_identity: snapshot.identity()?,
                 binding_id: Some(id),
                 bound,
             })

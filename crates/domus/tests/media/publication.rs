@@ -57,8 +57,8 @@ fn sharing_publication_visibility_retains_failed_exclusions_until_exact_completi
         }],
         ..SharePolicy::default()
     };
-    let build =
-        || ShareCatalog::build(&fixture.database, &policy, Arc::new(AtomicBool::new(false)));
+    let database = fixture.store.source();
+    let build = || ShareCatalog::build(&database, &policy, Arc::new(AtomicBool::new(false)));
     let before = build()?;
     let response = before.check()?;
     assert!(
@@ -144,7 +144,7 @@ fn browser_publication_recovery_requires_exact_retained_journal_and_never_rewrit
         let run = normalized(&mut fixture)?;
         let resume = |run, acknowledge| {
             resume_publication(
-                &fixture.database,
+                &fixture.store.source(),
                 fixture.scratch.path(),
                 fixture.job,
                 fixture.version,
@@ -189,7 +189,7 @@ fn browser_publication_recovery_requires_exact_retained_journal_and_never_rewrit
             |row| row.get(0),
         )?;
         let result = resume_publication(
-            &fixture.database,
+            &fixture.store.source(),
             fixture.scratch.path(),
             fixture.job,
             fixture.version,
@@ -208,7 +208,7 @@ fn browser_publication_recovery_requires_exact_retained_journal_and_never_rewrit
             generation
         );
         let result = resume_publication(
-            &fixture.database,
+            &fixture.store.source(),
             fixture.scratch.path(),
             fixture.job,
             fixture.version,
@@ -1835,9 +1835,10 @@ fn publication_journal_is_atomic_immutable_and_rechecks_claim_source_and_observa
 #[test]
 fn publication_cli_requires_explicit_acknowledgement_and_can_reclaim_completed_staging()
 -> TestResult {
-    let mut fixture = Fixture::build(AudioFormat::Mp3, true)?;
+    let mut fixture = Fixture::build_selected(AudioFormat::Mp3, true, true)?;
     let run = normalized(&mut fixture)?;
     let config = fixture._state.path().join("publish.json");
+    let host = fixture.write_host()?;
     let mut body = json!({
         "database":fixture.database,"staging_root":fixture.scratch.path(),
         "job_id":fixture.job,"plan_version":fixture.version,"normalization_run":run,
@@ -1845,7 +1846,12 @@ fn publication_cli_requires_explicit_acknowledgement_and_can_reclaim_completed_s
     });
     let execute = || {
         Command::new(env!("CARGO_BIN_EXE_domus"))
-            .args(["publish-new-once", config.to_str().unwrap_or("")])
+            .args([
+                "publish-new-once",
+                "--host",
+                host.to_str().unwrap_or(""),
+                config.to_str().unwrap_or(""),
+            ])
             .output()
     };
     std::fs::write(&config, serde_json::to_vec(&body)?)?;
@@ -1879,7 +1885,8 @@ fn publication_cli_requires_explicit_acknowledgement_and_can_reclaim_completed_s
     let status = Command::new(env!("CARGO_BIN_EXE_domus"))
         .args([
             "publication-status",
-            fixture.database.to_str().ok_or("db")?,
+            "--host",
+            host.to_str().ok_or("host path")?,
             &fixture.job.to_string(),
             &fixture.version.to_string(),
         ])

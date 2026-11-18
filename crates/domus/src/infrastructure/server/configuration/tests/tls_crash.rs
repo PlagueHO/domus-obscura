@@ -1,6 +1,6 @@
 //! Process termination evidence for manual HTTPS, not managed activation.
 use super::*;
-use crate::infrastructure::server::{PreparedServer, reload_checkpoint};
+use crate::infrastructure::server::{PreparedServer, tls_checkpoint};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -84,8 +84,8 @@ async fn backend_configuration_tls_crash_child() -> TestResult {
         PathBuf::from(std::env::var_os("DOMUS_TLS_CRASH_CONFIG").ok_or("missing child config")?);
     let boundary = std::env::var("DOMUS_TLS_CRASH_BOUNDARY")?;
     let (_, configuration, _) = ConfigurationService::load(&path)?;
-    reload_checkpoint::CHECKPOINT
-        .set(reload_checkpoint::Checkpoint {
+    tls_checkpoint::CHECKPOINT
+        .set(tls_checkpoint::Checkpoint {
             database: configuration.database.clone(),
             directory: path.parent().ok_or("missing parent")?.into(),
             boundary: boundary.clone(),
@@ -98,11 +98,11 @@ async fn backend_configuration_tls_crash_child() -> TestResult {
                 PreparedServer::load(&path),
                 Err(Error::InvalidInput(message)) if message == "TLS chain must contain 1 through 8 certificates"
             ));
-            reload_checkpoint::reach(&configuration.database, &boundary).await?;
+            tls_checkpoint::reach(&configuration.database, &boundary).await?;
         }
         "managed_staging" | "managed_production" => {
             managed_rejection(&configuration)?;
-            reload_checkpoint::reach(&configuration.database, &boundary).await?;
+            tls_checkpoint::reach(&configuration.database, &boundary).await?;
         }
         _ => return Err("unknown TLS child mode".into()),
     }
@@ -180,35 +180,26 @@ async fn ready(
     }
 }
 
-async fn save_replacement(
-    client: &reqwest::Client,
-    origin: &str,
-    initial: &Value,
-    replacement: &Fixture,
-) -> TestResult<Value> {
-    let response = client
-        .post(format!("{origin}/api/system/configuration/sections/save"))
-        .header("Origin", origin)
-        .header("x-domus-csrf", "1")
-        .json(&json!({
-            "expected_revision": initial["saved_revision"],
-            "sections": [{
-                "section": "tls", "tls_mode": "manual", "managed_tls": null,
-                "certificate_file": replacement.directory.path().join("certificate.pem"),
-                "private_key_file": {"action":"replace", "value": replacement.directory.path().join("hidden-key.pem")}
-            }]
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    let saved: Value = serde_json::from_slice(&response.bytes().await?)?;
-    assert_eq!(saved["errors"], json!([]));
-    let state = saved["state"].clone();
-    assert!(state["saved_revision"].is_string());
-    assert_ne!(state["saved_revision"], initial["saved_revision"]);
-    assert_eq!(state["active_revision"], initial["active_revision"]);
-    assert_eq!(state["restart_required"], true);
-    Ok(state)
+fn operator_replace_tls(fixture: &Fixture, replacement: &Fixture) -> TestResult<Value> {
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&fixture.path)?)?;
+    let certificate = fixture.directory.path().join("replacement-certificate.pem");
+    let private_key = fixture.directory.path().join("replacement-key.pem");
+    std::fs::copy(
+        replacement.directory.path().join("certificate.pem"),
+        &certificate,
+    )?;
+    std::fs::copy(
+        replacement.directory.path().join("hidden-key.pem"),
+        &private_key,
+    )?;
+    document["certificate_file"] = json!(certificate);
+    document["private_key_file"] = json!(private_key);
+    std::fs::write(&fixture.path, serde_json::to_vec(&document)?)?;
+    Ok(json!(
+        ConfigurationService::open(&fixture.path)?
+            .read()?
+            .saved_revision
+    ))
 }
 
 async fn reload(client: &reqwest::Client, origin: &str, revision: &Value) -> TestResult {
@@ -218,105 +209,53 @@ async fn reload(client: &reqwest::Client, origin: &str, revision: &Value) -> Tes
         .header("x-domus-csrf", "1")
         .json(&json!({"expected_revision": revision}))
         .send()
-        .await?
-        .error_for_status()?;
-    let result: Value = serde_json::from_slice(&response.bytes().await?)?;
-    assert_eq!(result["status"], "pending");
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::GONE);
     Ok(())
 }
 
 #[tokio::test]
-async fn backend_configuration_tls_crash_manual_reload_boundaries() -> TestResult {
-    for boundary in [
-        "preparing",
-        "prepared",
-        "handover",
-        "before_report",
-        "reported",
-    ] {
-        let (fixture, address, origin) = manual_fixture()?;
-        let replacement = Fixture::new(false)?;
-        let client = client(address, &[&fixture, &replacement])?;
-        let root = fixture.directory.path();
-        let mut child = OwnedChild::spawn(&fixture, "serve", boundary, "reload")?;
-        let initial = ready(&mut child, &client, &origin, &fixture).await?;
-        let saved = save_replacement(&client, &origin, &initial, &replacement).await?;
-        let saved_bytes = std::fs::read(&fixture.path)?;
-        reload(&client, &origin, &saved["saved_revision"]).await?;
-        child.checkpoint(root, boundary).await?;
-        match boundary {
-            "preparing" | "prepared" => {
-                let live = evidence(&client, &origin, &fixture).await?;
-                assert_eq!(live["active_revision"], initial["active_revision"]);
-                assert_eq!(live["saved_revision"], saved["saved_revision"]);
-                assert_eq!(live["reload"]["status"], "pending");
-                assert_eq!(live["restart_required"], true);
-            }
-            "handover" => {
-                assert!(
-                    client
-                        .get(format!("{origin}/api/system/configuration"))
-                        .send()
-                        .await
-                        .is_err()
-                );
-            }
-            "before_report" | "reported" => {
-                let live = evidence(&client, &origin, &replacement).await?;
-                assert_eq!(live["active_revision"], saved["saved_revision"]);
-                assert_eq!(live["saved_revision"], saved["saved_revision"]);
-                assert_eq!(live["restart_required"], false);
-                assert_eq!(
-                    live["reload"]["status"],
-                    if boundary == "reported" {
-                        "active"
-                    } else {
-                        "pending"
-                    }
-                );
-            }
-            _ => unreachable!(),
-        }
-        child.kill_and_reap()?;
-        assert_eq!(std::fs::read(&fixture.path)?, saved_bytes);
-        let mut restarted = OwnedChild::spawn(&fixture, "serve", "", "restart")?;
-        let recovered = ready(&mut restarted, &client, &origin, &replacement).await?;
-        assert_eq!(recovered["saved_revision"], saved["saved_revision"]);
-        assert_eq!(recovered["active_revision"], saved["saved_revision"]);
-        assert_eq!(recovered["restart_required"], false);
-        assert_eq!(recovered["reload"]["status"], "idle");
-        assert_eq!(std::fs::read(&fixture.path)?, saved_bytes);
-        restarted.kill_and_reap()?;
-    }
+async fn backend_configuration_tls_requires_stopped_operator_edit_and_restart() -> TestResult {
+    let (fixture, address, origin) = manual_fixture()?;
+    let replacement = Fixture::new(false)?;
+    let client = client(address, &[&fixture, &replacement])?;
+    let mut child = OwnedChild::spawn(&fixture, "serve", "", "initial")?;
+    let initial = ready(&mut child, &client, &origin, &fixture).await?;
+    let before = std::fs::read(&fixture.path)?;
+    reload(&client, &origin, &initial["saved_revision"]).await?;
+    assert_eq!(
+        evidence(&client, &origin, &fixture).await?["active_revision"],
+        initial["active_revision"]
+    );
+    assert_eq!(std::fs::read(&fixture.path)?, before);
+    child.kill_and_reap()?;
+    let revision = operator_replace_tls(&fixture, &replacement)?;
+    let saved_bytes = std::fs::read(&fixture.path)?;
+    let mut restarted = OwnedChild::spawn(&fixture, "serve", "", "restart")?;
+    let recovered = ready(&mut restarted, &client, &origin, &replacement).await?;
+    assert_eq!(recovered["saved_revision"], revision);
+    assert_eq!(recovered["active_revision"], revision);
+    assert_eq!(recovered["restart_required"], false);
+    assert_eq!(std::fs::read(&fixture.path)?, saved_bytes);
+    restarted.kill_and_reap()?;
     Ok(())
 }
 
 #[tokio::test]
-async fn backend_configuration_tls_crash_invalid_manual_keeps_live_host_but_rejects_restart()
--> TestResult {
+async fn backend_configuration_tls_invalid_operator_edit_rejects_restart() -> TestResult {
     let (fixture, address, origin) = manual_fixture()?;
     let replacement = Fixture::new(false)?;
     let client = client(address, &[&fixture, &replacement])?;
     let root = fixture.directory.path();
-    let mut child = OwnedChild::spawn(&fixture, "serve", "preparing,rejected", "invalid-reload")?;
-    let initial = ready(&mut child, &client, &origin, &fixture).await?;
-    let saved = save_replacement(&client, &origin, &initial, &replacement).await?;
+    let mut child = OwnedChild::spawn(&fixture, "serve", "", "initial")?;
+    ready(&mut child, &client, &origin, &fixture).await?;
+    child.kill_and_reap()?;
+    operator_replace_tls(&fixture, &replacement)?;
     let saved_bytes = std::fs::read(&fixture.path)?;
-    reload(&client, &origin, &saved["saved_revision"]).await?;
-    child.checkpoint(root, "preparing").await?;
     std::fs::write(
-        replacement.directory.path().join("certificate.pem"),
+        fixture.directory.path().join("replacement-certificate.pem"),
         b"invalid certificate",
     )?;
-    std::fs::write(root.join("release-preparing"), b"continue")?;
-    child.checkpoint(root, "rejected").await?;
-    let live = evidence(&client, &origin, &fixture).await?;
-    assert_eq!(live["active_revision"], initial["active_revision"]);
-    assert_eq!(live["saved_revision"], saved["saved_revision"]);
-    assert_eq!(live["restart_required"], true);
-    assert_eq!(live["reload"]["status"], "failed");
-    child.kill_and_reap()?;
-    std::fs::remove_file(root.join("checkpoint"))?;
     let mut restarted = OwnedChild::spawn(
         &fixture,
         "invalid_start",
@@ -327,7 +266,7 @@ async fn backend_configuration_tls_crash_invalid_manual_keeps_live_host_but_reje
     assert!(std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_err());
     assert_eq!(std::fs::read(&fixture.path)?, saved_bytes);
     assert_eq!(
-        std::fs::read(replacement.directory.path().join("certificate.pem"))?,
+        std::fs::read(fixture.directory.path().join("replacement-certificate.pem"))?,
         b"invalid certificate"
     );
     restarted.kill_and_reap()?;

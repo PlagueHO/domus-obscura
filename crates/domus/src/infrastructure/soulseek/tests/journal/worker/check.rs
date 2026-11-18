@@ -5,7 +5,7 @@ use crate::infrastructure::worker::{PreparedFolder, PreparedSearch};
 fn reviewed_worker_selection_requires_saved_approval_and_records_exact_candidate_without_network()
 -> TestResult {
     use crate::domain::sources::{SourceFileMetadata, SourceFolder};
-    let mut fixture = Fixture::build(AudioFormat::Flac, 1000, 3, true, false)?;
+    let mut fixture = Fixture::selected_build(AudioFormat::Flac, 1000, 3, true, false)?;
     let raw = Connection::open(&fixture.database)?;
     raw.execute("UPDATE jobs SET lease_until=0", [])?;
     let plan = fixture.store.plan(fixture.job, fixture.version)?;
@@ -35,7 +35,10 @@ fn reviewed_worker_selection_requires_saved_approval_and_records_exact_candidate
         fixture
             .store
             .prepare_source_candidate(fixture.job, fixture.version, listing)?;
-    let scratch = tempdir()?;
+    let scratch = fixture
+        ._scratch
+        .as_ref()
+        .ok_or("missing selected staging")?;
     let secret = fixture._state.path().join("credentials.json");
     let config = fixture._state.path().join("reviewed-worker.json");
     credentials(
@@ -46,8 +49,8 @@ fn reviewed_worker_selection_requires_saved_approval_and_records_exact_candidate
     body["source_candidate"] = json!(candidate.id);
     std::fs::write(&config, serde_json::to_vec(&body)?)?;
     let before = local_state(&raw)?;
-    assert!(PreparedWorker::check(&config).is_err());
-    assert!(PreparedWorker::load(&config).is_err());
+    assert!(PreparedWorker::check(&config, &host(&fixture)?).is_err());
+    assert!(PreparedWorker::load(&config, &host(&fixture)?).is_err());
     assert_eq!(local_state(&raw)?, before);
     fixture.store.approve_source_candidate(
         candidate.id,
@@ -56,26 +59,26 @@ fn reviewed_worker_selection_requires_saved_approval_and_records_exact_candidate
         true,
     )?;
     let before = local_state(&raw)?;
-    let report = PreparedWorker::check(&config)?;
+    let report = PreparedWorker::check(&config, &host(&fixture)?)?;
     assert!(report.source_will_be_recorded);
     assert!(!report.network_checked && !report.claim_acquired && !report.staging_checked);
     assert_eq!(local_state(&raw)?, before);
     for value in [json!(0), json!(candidate.id + 1)] {
         body["source_candidate"] = value;
         std::fs::write(&config, serde_json::to_vec(&body)?)?;
-        assert!(PreparedWorker::check(&config).is_err());
+        assert!(PreparedWorker::check(&config, &host(&fixture)?).is_err());
         assert_eq!(local_state(&raw)?, before);
     }
     body["source_candidate"] = json!(candidate.id);
     body["source"] = source_selection();
     std::fs::write(&config, serde_json::to_vec(&body)?)?;
-    assert!(PreparedWorker::check(&config).is_err());
+    assert!(PreparedWorker::check(&config, &host(&fixture)?).is_err());
     assert_eq!(local_state(&raw)?, before);
     body.as_object_mut()
         .ok_or("configuration")?
         .remove("source");
     std::fs::write(&config, serde_json::to_vec(&body)?)?;
-    drop(PreparedWorker::load(&config)?);
+    drop(PreparedWorker::load(&config, &host(&fixture)?)?);
     assert_eq!(
         fixture
             .store
@@ -92,13 +95,13 @@ fn reviewed_worker_selection_requires_saved_approval_and_records_exact_candidate
             .all(|file| file.state == "planned" && file.peer == "fixture-peer")
     );
     raw.execute("UPDATE jobs SET lease_until=0", [])?;
-    assert!(PreparedWorker::check(&config).is_err());
+    assert!(PreparedWorker::check(&config, &host(&fixture)?).is_err());
     body.as_object_mut()
         .ok_or("configuration")?
         .remove("source_candidate");
     std::fs::write(&config, serde_json::to_vec(&body)?)?;
-    assert!(!PreparedWorker::check(&config)?.source_will_be_recorded);
-    drop(PreparedWorker::load(&config)?);
+    assert!(!PreparedWorker::check(&config, &host(&fixture)?)?.source_will_be_recorded);
+    drop(PreparedWorker::load(&config, &host(&fixture)?)?);
     assert_eq!(
         fixture
             .store
@@ -111,7 +114,7 @@ fn reviewed_worker_selection_requires_saved_approval_and_records_exact_candidate
 #[test]
 fn search_preparation_uses_exact_cached_release_private_credentials_and_no_job_effects()
 -> TestResult {
-    let fixture = Fixture::build(AudioFormat::Flac, 1000, 3, true, false)?;
+    let fixture = Fixture::selected_build(AudioFormat::Flac, 1000, 3, true, false)?;
     let secret = fixture._state.path().join("credentials.json");
     let config = fixture._state.path().join("search.json");
     credentials(
@@ -126,7 +129,7 @@ fn search_preparation_uses_exact_cached_release_private_credentials_and_no_job_e
     let raw = Connection::open(&fixture.database)?;
     let before = local_state(&raw)?;
     std::fs::write(&config, serde_json::to_vec(&original)?)?;
-    drop(PreparedSearch::load(&config)?);
+    drop(PreparedSearch::load_with_host(&config, &host(&fixture)?)?);
     for (key, value) in [
         ("services", json!({"acquisition":[]})),
         ("services", json!({"acquisition":["unavailable"]})),
@@ -140,7 +143,7 @@ fn search_preparation_uses_exact_cached_release_private_credentials_and_no_job_e
         let mut config_body = original.clone();
         config_body[key] = value;
         std::fs::write(&config, serde_json::to_vec(&config_body)?)?;
-        assert!(PreparedSearch::load(&config).is_err());
+        assert!(PreparedSearch::load_with_host(&config, &host(&fixture)?).is_err());
         assert_eq!(local_state(&raw)?, before);
     }
     assert_eq!(local_state(&raw)?, before);
@@ -150,7 +153,7 @@ fn search_preparation_uses_exact_cached_release_private_credentials_and_no_job_e
 #[test]
 fn folder_preparation_requires_exact_cached_release_selected_peer_and_no_local_effects()
 -> TestResult {
-    let fixture = Fixture::build(AudioFormat::Flac, 1000, 3, true, false)?;
+    let fixture = Fixture::selected_build(AudioFormat::Flac, 1000, 3, true, false)?;
     let secret = fixture._state.path().join("credentials.json");
     let config = fixture._state.path().join("folder.json");
     credentials(
@@ -165,8 +168,8 @@ fn folder_preparation_requires_exact_cached_release_selected_peer_and_no_local_e
     let raw = Connection::open(&fixture.database)?;
     let before = local_state(&raw)?;
     std::fs::write(&config, serde_json::to_vec(&original)?)?;
-    drop(PreparedFolder::load(&config)?);
-    assert!(PreparedSearch::load(&config).is_err());
+    drop(PreparedFolder::load_with_host(&config, &host(&fixture)?)?);
+    assert!(PreparedSearch::load_with_host(&config, &host(&fixture)?).is_err());
     for (key, value) in [
         ("services", json!({"acquisition":[]})),
         ("services", json!({"acquisition":["other"]})),
@@ -195,7 +198,7 @@ fn folder_preparation_requires_exact_cached_release_selected_peer_and_no_local_e
         let mut body = original.clone();
         body[key] = value;
         std::fs::write(&config, serde_json::to_vec(&body)?)?;
-        assert!(PreparedFolder::load(&config).is_err());
+        assert!(PreparedFolder::load_with_host(&config, &host(&fixture)?).is_err());
         assert_eq!(local_state(&raw)?, before);
     }
     std::fs::write(&config, serde_json::to_vec(&original)?)?;
@@ -203,7 +206,7 @@ fn folder_preparation_requires_exact_cached_release_selected_peer_and_no_local_e
         "UPDATE catalog_cache SET expires_at=fetched_at-86399,fetched_at=fetched_at-86400",
         [],
     )?;
-    assert!(PreparedFolder::load(&config).is_err());
+    assert!(PreparedFolder::load_with_host(&config, &host(&fixture)?).is_err());
     assert_eq!(local_state(&raw)?, before);
     Ok(())
 }
@@ -228,8 +231,11 @@ fn local_state(raw: &Connection) -> rusqlite::Result<String> {
 fn worker_check_reads_new_and_committed_sources_without_claim_network_or_staging_effects()
 -> TestResult {
     for selected in [false, true] {
-        let fixture = Fixture::build(AudioFormat::Flac, 1000, 3, true, selected)?;
-        let scratch = tempdir()?;
+        let fixture = Fixture::selected_build(AudioFormat::Flac, 1000, 3, true, selected)?;
+        let scratch = fixture
+            ._scratch
+            .as_ref()
+            .ok_or("missing selected staging")?;
         let secret = fixture._state.path().join("credentials.json");
         let config = fixture._state.path().join("worker.json");
         credentials(
@@ -247,7 +253,7 @@ fn worker_check_reads_new_and_committed_sources_without_claim_network_or_staging
         let raw = Connection::open(&fixture.database)?;
         let before = local_state(&raw)?;
         for _ in 0..2 {
-            let report = serde_json::to_value(PreparedWorker::check(&config)?)?;
+            let report = serde_json::to_value(PreparedWorker::check(&config, &host(&fixture)?)?)?;
             assert_eq!(
                 report,
                 json!({
@@ -275,8 +281,11 @@ fn worker_check_reads_new_and_committed_sources_without_claim_network_or_staging
 #[test]
 fn worker_check_refuses_uncertainty_stale_observations_and_schema_without_mutation() -> TestResult {
     for fault in ["active", "submitting", "observations", "schema", "control"] {
-        let mut fixture = Fixture::album(AudioFormat::Flac, 1000, 3, true)?;
-        let scratch = tempdir()?;
+        let mut fixture = Fixture::selected_album(AudioFormat::Flac, 1000, 3, true)?;
+        let scratch = fixture
+            ._scratch
+            .as_ref()
+            .ok_or("missing selected staging")?;
         let secret = fixture._state.path().join("credentials.json");
         let config = fixture._state.path().join("worker.json");
         credentials(
@@ -311,7 +320,10 @@ fn worker_check_refuses_uncertainty_stale_observations_and_schema_without_mutati
             _ => unreachable!(),
         }
         let before = local_state(&raw)?;
-        assert!(PreparedWorker::check(&config).is_err(), "fault: {fault}");
+        assert!(
+            PreparedWorker::check(&config, &host(&fixture)?).is_err(),
+            "fault: {fault}"
+        );
         assert_eq!(local_state(&raw)?, before);
         assert_eq!(scratch.path().read_dir()?.count(), 0);
         if fault == "schema" {
@@ -342,7 +354,7 @@ fn worker_check_does_not_create_a_missing_database() -> TestResult {
             "job_id":1,"plan_version":2,"acknowledge_plaintext_login":true,
         }))?,
     )?;
-    assert!(PreparedWorker::check(&config).is_err());
+    assert!(PreparedWorker::check(&config, &host_at(state.path(), &database)?).is_err());
     assert!(!database.exists());
     assert!(!state.path().join("scratch").exists());
     Ok(())

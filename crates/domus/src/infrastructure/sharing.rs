@@ -72,7 +72,7 @@ impl SharingConfiguration {
                 return Err(Error::InvalidInput("sharing needs an absolute credential-file reference, a public server and explicit plaintext-login acknowledgement".into()));
             }
             super::local_file::protect_files(store, &[&account.credentials_file])?;
-            super::worker::read_credentials(&account.credentials_file)?;
+            super::worker::read_credentials(&store.source(), &account.credentials_file)?;
         }
         Ok(())
     }

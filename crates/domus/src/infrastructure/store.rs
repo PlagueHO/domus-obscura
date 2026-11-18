@@ -1,6 +1,6 @@
 use crate::domain::{JobState, LibraryPath, Page, Question};
 use crate::{Error, Result};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -16,6 +16,8 @@ mod inbox;
 mod job_controls;
 mod library;
 mod native_roots;
+#[cfg(test)]
+mod native_storage_tests;
 mod normalization;
 mod planning;
 mod private_roots;
@@ -97,10 +99,92 @@ const MIGRATIONS: &[&str] = &[
 ];
 
 pub struct Store {
-    connection: Connection,
+    connection: native_sqlite::ScopedConnection,
     path: PathBuf,
+    directory: std::sync::Arc<super::filesystem::LibraryDirectory>,
+    filesystem: Option<std::sync::Arc<super::filesystem::FilesystemClient>>,
     cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
     worker_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+#[derive(Clone, Copy)]
+pub enum StoreOpenMode {
+    Create,
+    Existing,
+    Current,
+    ReadCurrent,
+    Snapshot,
+}
+
+/// Independent connections keep the admitted native authority instead of
+/// recapturing a potentially replaced directory from its reported pathname.
+#[derive(Clone)]
+pub struct StoreSource {
+    context: native_sqlite::Context,
+    path: PathBuf,
+    directory: std::sync::Arc<super::filesystem::LibraryDirectory>,
+    filesystem: Option<std::sync::Arc<super::filesystem::FilesystemClient>>,
+}
+
+impl StoreSource {
+    pub(crate) fn read_input(&self, path: &Path, maximum: u64, sensitive: bool) -> Result<Vec<u8>> {
+        super::filesystem::read_local_file_for(self.filesystem.as_ref(), path, maximum, sensitive)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Return the original frozen selection, including offline reservations.
+    /// An unconfigured path-based connection cannot supply role authority.
+    pub fn filesystem(&self) -> Result<&std::sync::Arc<super::filesystem::FilesystemClient>> {
+        self.filesystem
+            .as_ref()
+            .ok_or_else(|| Error::Conflict("state requires an external storage selection".into()))
+    }
+
+    pub(crate) fn state_lock(&self, purpose: &str) -> Result<super::local_file::ProcessLock> {
+        Ok(
+            super::local_file::ProcessLock::acquire_in(self.directory()?, purpose)?
+                .with_context(self.context.clone()),
+        )
+    }
+
+    pub(crate) fn state_read_lock(&self, purpose: &str) -> Result<super::local_file::ProcessLock> {
+        Ok(
+            super::local_file::ProcessLock::acquire_shared_in(self.directory()?, purpose)?
+                .with_context(self.context.clone()),
+        )
+    }
+
+    pub(crate) fn directory(&self) -> Result<&super::filesystem::LibraryDirectory> {
+        self.context.check()?;
+        Ok(&self.directory)
+    }
+
+    pub fn open(&self, mode: StoreOpenMode) -> Result<Store> {
+        let native_mode = match mode {
+            StoreOpenMode::Create => native_sqlite::OpenMode::Create,
+            StoreOpenMode::Existing | StoreOpenMode::Current => native_sqlite::OpenMode::ReadWrite,
+            StoreOpenMode::ReadCurrent | StoreOpenMode::Snapshot => {
+                native_sqlite::OpenMode::ReadOnly
+            }
+        };
+        let store = Store::from_connection(
+            self.context.open(native_mode)?,
+            self.path.clone(),
+            self.directory.clone(),
+            self.filesystem.clone(),
+            matches!(mode, StoreOpenMode::Create)
+                || (self.filesystem.is_none() && matches!(mode, StoreOpenMode::Existing)),
+            matches!(mode, StoreOpenMode::ReadCurrent | StoreOpenMode::Snapshot),
+        )?;
+        if matches!(mode, StoreOpenMode::Snapshot) {
+            store.connection.execute_batch("BEGIN DEFERRED;")?;
+            require_current_schema(&store.connection)?;
+        }
+        Ok(store)
+    }
 }
 
 pub struct ScanClaim {
@@ -214,71 +298,91 @@ fn require_current_schema(connection: &Connection) -> Result<()> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version != MIGRATIONS.len() as i64 {
         return Err(Error::Conflict(
-            "operation requires the current database schema; upgrade separately".into(),
+            "operation requires the current database schema; explicit fresh setup is required"
+                .into(),
         ));
     }
     Ok(())
 }
 
 impl Store {
+    pub(crate) fn selected_filesystem(
+        &self,
+    ) -> Option<&std::sync::Arc<super::filesystem::FilesystemClient>> {
+        self.filesystem.as_ref()
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
-        Self::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-            true,
-        )
+        Self::open_path(path, StoreOpenMode::Create)
     }
 
     pub fn open_existing(path: &Path) -> Result<Self> {
-        Self::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE, true)
+        Self::open_path(path, StoreOpenMode::Existing)
     }
 
     /// Open mutable current-schema state without creating or migrating it.
     pub fn open_current_existing(path: &Path) -> Result<Self> {
-        Self::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE, false)
+        Self::open_path(path, StoreOpenMode::Current)
     }
 
     /// Read a current-schema snapshot without creating or migrating a database.
     /// SQLite may still use its normal WAL shared-memory coordination files.
     pub fn open_read_snapshot(path: &Path) -> Result<Self> {
-        let store = Self::open_read_current(path)?;
-        store.connection.execute_batch("BEGIN DEFERRED;")?;
-        require_current_schema(&store.connection)?;
-        Ok(store)
+        Self::open_path(path, StoreOpenMode::Snapshot)
     }
 
     /// Read-only current-schema connection with no long-lived transaction.
     /// Use for shared-cache reads so file I/O does not occur in a SQL snapshot.
     pub fn open_read_current(path: &Path) -> Result<Self> {
-        super::filesystem::require_local_disk(path)?;
-        let path = std::fs::canonicalize(path)?;
-        super::filesystem::require_local_disk(&path)?;
-        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA query_only = ON;")?;
-        require_current_schema(&connection)?;
-        Ok(Self {
-            connection,
-            path,
-            cache: None,
-            worker_stop: None,
-        })
+        Self::open_path(path, StoreOpenMode::ReadCurrent)
     }
 
-    fn open_with_flags(path: &Path, flags: OpenFlags, upgrade: bool) -> Result<Self> {
-        super::filesystem::require_local_disk(path)?;
-        let resolved = if path.try_exists()? {
-            std::fs::canonicalize(path)?
-        } else {
-            let parent = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            std::fs::canonicalize(parent)?
-        };
-        super::filesystem::require_local_disk(&resolved)?;
-        let mut connection = Connection::open_with_flags(path, flags)?;
+    pub fn open_scoped(
+        path: &Path,
+        client: &std::sync::Arc<super::filesystem::FilesystemClient>,
+        mode: StoreOpenMode,
+    ) -> Result<Self> {
+        let (context, path, directory) =
+            client.sqlite_context(path, matches!(mode, StoreOpenMode::Create))?;
+        StoreSource {
+            context,
+            path,
+            directory,
+            filesystem: Some(client.clone()),
+        }
+        .open(mode)
+    }
+
+    pub fn source(&self) -> StoreSource {
+        StoreSource {
+            context: self.connection.context().clone(),
+            path: self.path.clone(),
+            directory: self.directory.clone(),
+            filesystem: self.filesystem.clone(),
+        }
+    }
+
+    fn from_connection(
+        mut connection: native_sqlite::ScopedConnection,
+        path: PathBuf,
+        directory: std::sync::Arc<super::filesystem::LibraryDirectory>,
+        filesystem: Option<std::sync::Arc<super::filesystem::FilesystemClient>>,
+        upgrade: bool,
+        read_only: bool,
+    ) -> Result<Self> {
         connection.busy_timeout(Duration::from_secs(5))?;
+        if read_only {
+            connection.execute_batch("PRAGMA query_only = ON;")?;
+            require_current_schema(&connection)?;
+            return Ok(Self {
+                connection,
+                path,
+                directory,
+                filesystem,
+                cache: None,
+                worker_stop: None,
+            });
+        }
         if !upgrade {
             require_current_schema(&connection)?;
         }
@@ -303,12 +407,27 @@ impl Store {
             transaction.pragma_update(None, "user_version", next_version)?;
         }
         transaction.commit()?;
+        connection.context().check()?;
         Ok(Self {
             connection,
-            path: std::fs::canonicalize(path)?,
+            path,
+            directory,
+            filesystem,
             cache: None,
             worker_stop: None,
         })
+    }
+
+    fn open_path(path: &Path, mode: StoreOpenMode) -> Result<Self> {
+        let (context, path, directory) =
+            super::filesystem::sqlite_context(path, matches!(mode, StoreOpenMode::Create))?;
+        StoreSource {
+            context,
+            path,
+            directory,
+            filesystem: None,
+        }
+        .open(mode)
     }
 
     /// Use one host-selected cache without changing durable evidence or falling
@@ -389,7 +508,7 @@ impl Store {
             ));
         }
         let root_path = Path::new(root);
-        let (canonical, opened) = super::filesystem::LibraryDirectory::canonical(root_path)?;
+        let (canonical, opened) = self.open_candidate_root(root_path, "media")?;
         let root = canonical
             .to_str()
             .ok_or_else(|| Error::InvalidInput("library root is not valid Unicode".into()))?;
@@ -400,6 +519,9 @@ impl Store {
                 "library root must not contain the application database".into(),
             ));
         }
+        let binding = self.prepare_root_binding(&opened, "media")?;
+        let root = binding.key(root);
+        let root = root.as_str();
         let transaction = self.connection.unchecked_transaction()?;
         native_roots::require_bound_roots(&transaction)?;
         let (count, mains): (i64, i64) = transaction.query_row(
@@ -416,14 +538,22 @@ impl Store {
             .prepare("SELECT root FROM locations UNION ALL SELECT root FROM private_roots")?;
         for existing in statement.query_map([], |row| row.get::<_, String>(0))? {
             let existing = existing?;
-            if root_path.starts_with(&existing) || Path::new(&existing).starts_with(root_path) {
+            if self.filesystem.is_none()
+                && (root_path.starts_with(&existing) || Path::new(&existing).starts_with(root_path))
+            {
                 return Err(Error::InvalidInput(
                     "library locations must not overlap media or reserved private roots".into(),
                 ));
             }
         }
         drop(statement);
-        native_roots::register(&transaction, root, "media", opened.native_root())?;
+        native_roots::register(
+            &transaction,
+            root,
+            "media",
+            &binding,
+            self.filesystem.as_deref(),
+        )?;
         transaction.execute(
             "INSERT INTO locations(root, kind) VALUES (?1, ?2)",
             params![root, kind],

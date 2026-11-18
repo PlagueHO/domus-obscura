@@ -22,7 +22,7 @@ use crate::infrastructure::filesystem::{LibraryDirectory, native_root_identity};
 use crate::infrastructure::lifecycle::Lifecycle;
 use crate::infrastructure::production_worker::PreparedProductionWorker;
 use crate::infrastructure::server::PreparedServer;
-use crate::infrastructure::store::{ScanClaim, Store};
+use crate::infrastructure::store::{ScanClaim, Store, StoreOpenMode};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -346,6 +346,7 @@ fn prepare_with_audio(command: &Command, full_transfer: bool) -> TestResult<Valu
     for child in ["media", "media/catalog", "outside", "unavailable", "state"] {
         fs::create_dir(command.root.join(child))?;
     }
+    crate::infrastructure::private_fixture::directory(&command.root.join("state"))?;
     let (mp3, flac, jpeg) = tagged_media()?;
     let large = command
         .integrated
@@ -401,9 +402,50 @@ fn prepare_with_audio(command: &Command, full_transfer: bool) -> TestResult<Valu
     let link_error = create_link(&command.root)
         .err()
         .map(|error| error.to_string());
-    let mut store = Store::open(&command.root.join("state").join("state.sqlite"))?;
-    let destination = if command.integrated {
+    let database = command.root.join("state").join("state.sqlite");
+    drop(Store::open(&database)?);
+    use crate::infrastructure::filesystem::{FilesystemClient, StorageRole, fixture_storage};
+    let mut roots = vec![
+        ("media", StorageRole::Media, command.root.join("media")),
+        (
+            "unavailable",
+            StorageRole::Media,
+            command.root.join("unavailable"),
+        ),
+    ];
+    if command.integrated {
         fs::create_dir(command.root.join("destination"))?;
+        fs::create_dir(command.root.join("staging"))?;
+        crate::infrastructure::private_fixture::directory(&command.root.join("staging"))?;
+        roots.extend([
+            (
+                "destination",
+                StorageRole::Media,
+                command.root.join("destination"),
+            ),
+            ("sharing", StorageRole::Media, command.root.join("sharing")),
+            (
+                "staging",
+                StorageRole::Staging,
+                command.root.join("staging"),
+            ),
+        ]);
+    }
+    let storage = fixture_storage(
+        &command.root.join("state"),
+        &crate::domain::LibraryPath::parse("")?,
+        &roots
+            .iter()
+            .map(|(id, role, path)| (*id, *role, path.as_path()))
+            .collect::<Vec<_>>(),
+    )?;
+    let client = FilesystemClient::new(storage.clone(), "a".repeat(64))?;
+    let mut store = Store::open_scoped(
+        &database,
+        &client,
+        crate::infrastructure::store::StoreOpenMode::Current,
+    )?;
+    let destination = if command.integrated {
         let id =
             crate::application::add_location(&store, &command.root.join("destination"), "main")?;
         crate::application::scan_location(&mut store, id)?;
@@ -421,6 +463,7 @@ fn prepare_with_audio(command: &Command, full_transfer: bool) -> TestResult<Valu
     let origin = format!("http://{address}");
     let mut config = json!({
         "environment":"single_user", "system_settings_read_only":false,
+        "storage":storage,
         "database":store.database_path(), "listen":address, "origin":origin,
         "production_worker":{"queue_capacity":64, "acquisition":null, "sharing":null}
     });
@@ -437,7 +480,7 @@ fn prepare_with_audio(command: &Command, full_transfer: bool) -> TestResult<Valu
         )?;
     }
     let configuration = serde_json::to_vec_pretty(&config)?;
-    let mut output = new_file(&command.root.join("host.json"))?;
+    let mut output = new_file(&command.root.join("state").join("host.json"))?;
     output.write_all(&configuration)?;
     output.sync_all()?;
     let fixture = Fixture {
@@ -460,7 +503,7 @@ fn prepare_with_audio(command: &Command, full_transfer: bool) -> TestResult<Valu
     output.sync_all()?;
     Ok(json!({
         "event":"result", "role":"prepare", "fixture":fixture,
-        "configuration":command.root.join("host.json"),
+        "configuration":command.root.join("state").join("host.json"),
         "integrated_transfer_sharing":false, "memory_acceptance":false,
         "actual_os_denial":false
     }))
@@ -479,7 +522,9 @@ fn load_fixture(root: &Path) -> TestResult<Fixture> {
     if fixture.version != 1 || fixture.root_identity != native_root_identity(root)? {
         return Err("scale manifest does not identify this generated root".into());
     }
-    let mut configuration = opened.open_file(std::ffi::OsStr::new("host.json"))?;
+    let mut configuration = opened
+        .open_directory(&crate::domain::LibraryPath::parse("state")?)?
+        .open_file(std::ffi::OsStr::new("host.json"))?;
     bytes.clear();
     (&mut configuration)
         .take(MAX_LINE + 1)
@@ -492,9 +537,16 @@ fn load_fixture(root: &Path) -> TestResult<Fixture> {
     Ok(fixture)
 }
 
+fn selected_store(root: &Path, mode: StoreOpenMode) -> Result<Store> {
+    crate::infrastructure::server::configuration::ConfigurationService::open(
+        &root.join("state").join("host.json"),
+    )?
+    .open_store(mode)
+}
+
 fn inspect(root: &Path, verify: bool) -> TestResult<Value> {
     let fixture = load_fixture(root)?;
-    let store = Store::open_read_current(&root.join("state").join("state.sqlite"))?;
+    let store = selected_store(root, StoreOpenMode::ReadCurrent)?;
     let connection = rusqlite::Connection::open_with_flags(
         root.join("state").join("state.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -548,6 +600,7 @@ fn inspect(root: &Path, verify: bool) -> TestResult<Value> {
     )?;
     let configuration: Value = serde_json::from_reader(
         LibraryDirectory::open(root)?
+            .open_directory(&crate::domain::LibraryPath::parse("state")?)?
             .open_file(std::ffi::OsStr::new("host.json"))?
             .take(MAX_LINE + 1),
     )?;
@@ -690,7 +743,7 @@ fn run_host(command: &Command, reader: &mut impl BufRead, channel: Channel) -> T
             .map_err(|_| "scale checkpoint already configured")?;
     }
     let run_lifecycle = lifecycle.clone();
-    let config = command.root.join("host.json");
+    let config = command.root.join("state").join("host.json");
     // Match the normal foreground runtime choices; do not lower concurrency for
     // the measurement. Blocking native work remains in the production adapters.
     let (finished, result) = std::sync::mpsc::sync_channel(1);
@@ -751,7 +804,7 @@ fn stale_claim(command: &Command) -> TestResult<Value> {
         .scan_owner
         .as_ref()
         .ok_or("scan_owner is required")?;
-    let mut store = Store::open_current_existing(&command.root.join("state").join("state.sqlite"))?;
+    let mut store = selected_store(&command.root, StoreOpenMode::Current)?;
     let connection = rusqlite::Connection::open_with_flags(
         command.root.join("state").join("state.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -966,8 +1019,9 @@ fn exercise(command: &Command, channel: &Channel) -> TestResult<Value> {
 
 fn fault(command: &Command) -> TestResult<Value> {
     let fixture = load_fixture(&command.root)?;
-    let _worker_guard = PreparedProductionWorker::load(&command.root.join("host.json"))?;
-    let store = Store::open_read_current(&command.root.join("state").join("state.sqlite"))?;
+    let _worker_guard =
+        PreparedProductionWorker::load(&command.root.join("state").join("host.json"))?;
+    let store = selected_store(&command.root, StoreOpenMode::ReadCurrent)?;
     if store.worker_status(64)?.online {
         return Err("stop the worker before changing the generated unavailable root".into());
     }
@@ -1108,7 +1162,7 @@ mod tests {
         prepare(&c)?;
         assert!(prepare(&c).is_err());
         let fixture = load_fixture(&root)?;
-        let mut store = Store::open_current_existing(&root.join("state").join("state.sqlite"))?;
+        let mut store = selected_store(&root, StoreOpenMode::Current)?;
         crate::application::scan_location(&mut store, fixture.location_id)?;
         crate::application::scan_location(&mut store, fixture.unavailable_location_id)?;
         let report = inspect(&root, true)?;
@@ -1146,17 +1200,21 @@ mod tests {
                     .is_none()
             );
         }
+        drop(store);
         let mut c = c;
         c.action = Some("unavailable".into());
         fault(&c)?;
+        let mut store = selected_store(&root, StoreOpenMode::Current)?;
         assert!(
             crate::application::scan_location(&mut store, fixture.unavailable_location_id).is_err()
         );
         let report = inspect(&root, false)?;
         assert_eq!(report["locations"][1]["location"]["coverage"], "incomplete");
         assert_eq!(report["locations"][1]["present_files"], 1);
+        drop(store);
         c.action = Some("restore".into());
         fault(&c)?;
+        let mut store = selected_store(&root, StoreOpenMode::Current)?;
         crate::application::scan_location(&mut store, fixture.unavailable_location_id)?;
         assert_eq!(verify_files(&root, 130)?, 130);
         fs::write(root.join("outside").join("sentinel.txt"), b"changed")?;

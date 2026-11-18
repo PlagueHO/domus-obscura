@@ -146,11 +146,11 @@ def unit_name(run_id, role):
     return f"domus-acceptance-{run_id}-{role}.service"
 
 
-def render(template, root, package, account, group, run_id):
+def render(template, root, package, account, group, run_id, configuration):
     replacements = {
         "User=domus-obscura": f"User={account}",
         "Group=domus-obscura": f"Group={group}",
-        "/var/lib/domus-obscura/config/service.json": str(root / "service.json"),
+        "/var/lib/domus-obscura/config/service.json": str(configuration),
         "/var/lib/domus-obscura": str(root),
         "/opt/domus-obscura": str(package),
         "domus-obscura-api.service": unit_name(run_id, "api"),
@@ -162,6 +162,9 @@ def render(template, root, package, account, group, run_id):
 
 
 def fixture_configuration(root, fixture, package):
+    configuration = Path(fixture["database"]).parent / "service.json"
+    require(fixture["configuration"] == str(configuration),
+            "configuration must stay in the selected private state")
     acquisition = {
         "staging_root": fixture["staging"],
         "credentials_file": str(Path(fixture["database"]).parent / "generated-credentials.json"),
@@ -177,11 +180,12 @@ def fixture_configuration(root, fixture, package):
             "artist_images": [],
         },
         "database": fixture["database"], "listen": "127.0.0.1:8080",
+        "storage": fixture["storage"],
         "origin": "http://127.0.0.1:8080",
         "browser_assets": str(package / "browser"),
         "production_worker": {"queue_capacity": 64, "acquisition": acquisition, "sharing": None},
     }
-    require(json.loads(read(root / "service.json")) == expected,
+    require(json.loads(read(configuration)) == expected,
             "configuration is not the generated offline fixture")
     require(json.loads(read(Path(acquisition["credentials_file"]))) == {
         "username": "generated-service-fixture", "password": "not-a-live-credential",
@@ -237,7 +241,7 @@ def environment(root, run_id, package):
                 "normalization_run", "scan_files"):
         require(type(fixture[key]) is int and 0 < fixture[key] < 2 ** 63,
                 "invalid fixture identifier or count")
-    for key in ("database", "scan_root", "library", "staging"):
+    for key in ("database", "scan_root", "library", "staging", "configuration"):
         require(isinstance(fixture[key], str), "fixture path must be text")
         require(
             checked_path(fixture[key]).is_relative_to(root),
@@ -259,6 +263,7 @@ class Suite:
             role: render(
                 read(self.package / "systemd" / f"domus-obscura-{role}.service").decode(),
                 self.root, self.package, account.pw_name, group, run_id,
+                self.fixture["configuration"],
             )
             for role in self.units
         }
@@ -377,7 +382,8 @@ class Suite:
             ).fetchall()
         require(len(rows) == 4, "missing publication files")
         for row in rows:
-            path = checked_path(str(Path(row[0]) / row[1] / row[3]))
+            require(row[0] == "storage-root:media", "output root differs from selected fixture")
+            path = checked_path(str(Path(self.fixture["library"]) / row[1] / row[3]))
             require(path.is_relative_to(Path(self.fixture["library"])), "output escaped fixture")
             require(row[2] is not None and row[6] is not None, "missing publication receipt")
             require(path.stat().st_size == row[4] and digest(path) == row[5], "output hash differs")
@@ -488,7 +494,7 @@ class Suite:
             require(self.active(), "work finished before the signal; not active recovery evidence")
             held = self.snapshot()
             code, output = command([str(self.package / "domus"), "worker",
-                                    str(self.root / "service.json")], timeout=15, success=False)
+                                    self.fixture["configuration"]], timeout=15, success=False)
             require(code != 0 and "another process owns this worker or account" in output,
                     "native ownership exclusion was not confirmed")
             self.report["checks"]["active_work_and_native_ownership"] = "passed"

@@ -44,14 +44,12 @@ function Invoke-Domus([string[]] $Arguments) {
     }
 }
 
-foreach ($name in @('state', 'library', 'staging')) {
-    New-Item -ItemType Directory -Path (Join-Path $root $name) | Out-Null
+$application = Join-Path $root 'application'
+Invoke-Domus -Arguments @('init', '--storage-root', $application)
+$configurationFile = Join-Path $application 'config.json'
+foreach ($directory in @((Join-Path $root 'library'), (Join-Path $application 'staging'), (Join-Path $application 'secrets'))) {
+    New-Item -ItemType Directory -Path $directory | Out-Null
 }
-$database = Join-Path $root 'state\domus.db'
-Invoke-Domus -Arguments @('init', $database)
-Invoke-Domus -Arguments @('location-add', $database, (Join-Path $root 'library'), 'main')
-Invoke-Domus -Arguments @('scan', $database, '1')
-Invoke-Domus -Arguments @('staging-init', $database, (Join-Path $root 'staging'))
 
 $key = [Security.Cryptography.ECDsa]::Create([Security.Cryptography.ECCurve+NamedCurves]::nistP256)
 try {
@@ -72,8 +70,8 @@ try {
         [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($eku, $false))
     $certificate = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5), [DateTimeOffset]::UtcNow.AddDays(90))
     try {
-        [IO.File]::WriteAllText((Join-Path $root 'certificate.pem'), $certificate.ExportCertificatePem() + "`n")
-        [IO.File]::WriteAllText((Join-Path $root 'private-key.pem'), $key.ExportPkcs8PrivateKeyPem() + "`n")
+        [IO.File]::WriteAllText((Join-Path $application 'secrets\certificate.pem'), $certificate.ExportCertificatePem() + "`n")
+        [IO.File]::WriteAllText((Join-Path $application 'secrets\private-key.pem'), $key.ExportPkcs8PrivateKeyPem() + "`n")
     } finally {
         $certificate.Dispose()
     }
@@ -81,27 +79,30 @@ try {
     $key.Dispose()
 }
 
-$settingsFile = Join-Path $root 'settings.json'
-$settings = & $executable settings $database | ConvertFrom-Json
+$configuration = Get-Content -LiteralPath $configurationFile -Raw | ConvertFrom-Json -AsHashtable
+$configuration.environment = 'development'
+$configuration.system_settings_read_only = $false
+$configuration.listen = "127.0.0.1:$Port"
+$configuration.origin = "https://localhost:$Port"
+$configuration.certificate_file = Join-Path $application 'secrets\certificate.pem'
+$configuration.private_key_file = Join-Path $application 'secrets\private-key.pem'
+$configuration.browser_assets = $assets
+[IO.File]::WriteAllText($configurationFile, ($configuration | ConvertTo-Json -Depth 20) + "`n")
+
+Invoke-Domus -Arguments @('location-add', '--host', $configurationFile, (Join-Path $root 'library'), 'main')
+Invoke-Domus -Arguments @('scan', '--host', $configurationFile, '1')
+Invoke-Domus -Arguments @('staging-init', '--host', $configurationFile, (Join-Path $application 'staging'))
+
+$settingsFile = Join-Path $application 'settings.json'
+$settings = & $executable settings --host $configurationFile | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Could not read settings.' }
 if ($null -eq $settings) {
     # Use the default exported contract, not a separate path/tag policy.
     $defaults = & $executable settings-default
     if ($LASTEXITCODE -ne 0) { throw 'Could not read default settings.' }
     [IO.File]::WriteAllText($settingsFile, ($defaults -join "`n") + "`n")
-    Invoke-Domus -Arguments @('settings-save', $database, '0', $settingsFile)
+    Invoke-Domus -Arguments @('settings-save', '--host', $configurationFile, '0', $settingsFile)
 }
-$configuration = [ordered]@{
-    environment = 'development'
-    database = $database
-    listen = "127.0.0.1:$Port"
-    origin = "https://localhost:$Port"
-    certificate_file = Join-Path $root 'certificate.pem'
-    private_key_file = Join-Path $root 'private-key.pem'
-    browser_assets = $assets
-}
-$configurationFile = Join-Path $root 'service.local.json'
-[IO.File]::WriteAllText($configurationFile, ($configuration | ConvertTo-Json -Depth 8) + "`n")
 Write-Host "Created anonymous development setup: $root"
 Write-Host "Certificate trust was NOT changed. Certificate valid for 90 days."
 Write-Host "Open https://localhost:$Port after starting:"

@@ -4,11 +4,25 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use std::ffi::OsStr;
 use std::fs::{self, Metadata};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+mod binding;
 mod identity;
+mod selection;
+mod state;
+pub use binding::{DirectoryExpectation, DirectoryIdentityProfile, RetainedDirectory};
 pub(crate) use identity::NativeRoot;
 pub(crate) use identity::file_id as native_file_identity;
+pub(crate) use selection::DirectorySnapshot;
+#[cfg(test)]
+pub(crate) use selection::fixture_storage;
+pub use selection::{
+    FilesystemClient, LogicalRootBinding, ProviderMapping, RootRevision, StorageConfiguration,
+    StorageLease, StorageRole, StorageRoot, TopologyAssurance,
+};
+pub(crate) use state::initialize_selection;
+pub(crate) use state::sqlite_context;
 
 /// Read the native identity from the actual no-follow directory handle.
 /// This is an identity comparison value, not proof against ID reuse or cloning.
@@ -16,14 +30,104 @@ pub fn native_root_identity(path: &Path) -> Result<String> {
     Ok(LibraryDirectory::canonical(path)?.1.native.identity)
 }
 
+/// Read a bounded operator-selected local file through no-follow handles.
+/// Sensitive files require private permissions on the actual opened file.
+pub fn read_local_file(path: &Path, maximum: u64, sensitive: bool) -> Result<Vec<u8>> {
+    read_local_file_for(None, path, maximum, sensitive)
+}
+
+pub(crate) fn read_local_file_for(
+    filesystem: Option<&std::sync::Arc<FilesystemClient>>,
+    path: &Path,
+    maximum: u64,
+    sensitive: bool,
+) -> Result<Vec<u8>> {
+    require_local_path(path)?;
+    validate_native_reference(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::InvalidInput("service file parent is missing".into()))?;
+    let directory = LibraryDirectory::open(parent)?;
+    if let Some(filesystem) = filesystem {
+        filesystem.require_private_input(&directory)?;
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::InvalidInput("service file name is missing".into()))?;
+    read_file_in(&directory, name, maximum, sensitive)
+}
+
+pub(crate) fn read_file_in(
+    directory: &LibraryDirectory,
+    name: &OsStr,
+    maximum: u64,
+    sensitive: bool,
+) -> Result<Vec<u8>> {
+    let limit = maximum
+        .checked_add(1)
+        .ok_or_else(|| Error::InvalidInput("local file size limit is too large".into()))?;
+    directory.require_local()?;
+    let file = directory.open_file(name)?;
+    require_local_file(&file)?;
+    super::permissions::FilePermissions::current()?.check(&file, sensitive)?;
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum {
+        return Err(Error::InvalidInput(
+            "service file exceeds its size limit".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 pub(crate) fn require_local_disk(path: &Path) -> Result<()> {
+    require_local_path(path)?;
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let parent = || {
+        path.parent()
+            .ok_or(Error::InvalidInput("storage path has no parent".into()))
+    };
+    let (root, existing_file) = match fs::symlink_metadata(&path) {
+        Ok(metadata) if is_unsafe_link(&metadata) => {
+            return Err(Error::InvalidInput(
+                "local storage must not use a symlink or reparse point".into(),
+            ));
+        }
+        Ok(metadata) if metadata.is_dir() => (path.as_path(), false),
+        Ok(metadata) if metadata.is_file() => (parent()?, true),
+        Ok(_) => {
+            return Err(Error::InvalidInput(
+                "local storage requires a regular file or directory".into(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (parent()?, false),
+        Err(error) => return Err(error.into()),
+    };
+    let directory = LibraryDirectory::open(root)?;
+    directory.require_local()?;
+    if existing_file {
+        let name = path
+            .file_name()
+            .ok_or(Error::InvalidInput("storage file has no name".into()))?;
+        require_local_file(&directory.open_file(name)?)?;
+    }
+    Ok(())
+}
+
+/// Validate spelling without opening a reference that can be inactive or not
+/// created yet. Active access must also check the actual opened filesystem.
+pub(crate) fn require_local_path(path: &Path) -> Result<()> {
     #[cfg(windows)]
     let remote = matches!(
         path.components().next(),
-        Some(std::path::Component::Prefix(prefix)) if !matches!(
+        Some(Component::Prefix(prefix)) if !matches!(
             prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
         )
     );
@@ -32,6 +136,62 @@ pub(crate) fn require_local_disk(path: &Path) -> Result<()> {
     if remote {
         return Err(Error::InvalidInput(
             "application state and secrets must use local disk paths".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_native_reference(path: &Path) -> Result<()> {
+    if !path.is_absolute() || path.components().any(|component| {
+        matches!(component, Component::Normal(name) if name.to_str().is_none_or(|name| name.contains(':') || name.chars().any(char::is_control)))
+    }) {
+        return Err(Error::InvalidInput(
+            "storage references require absolute paths without alternate streams".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FilesystemClass {
+    Local,
+    Remote,
+    Unknown,
+}
+
+/// Inspect the opened filesystem, never its path spelling or physical disks.
+pub(crate) fn filesystem_class(file: &std::fs::File) -> Result<FilesystemClass> {
+    #[cfg(windows)]
+    {
+        let information = native_file_security::filesystem_information(file)?;
+        Ok(if information.remote {
+            FilesystemClass::Remote
+        } else if information.device_type == 7 && information.name.as_deref() == Some("NTFS") {
+            FilesystemClass::Local
+        } else {
+            FilesystemClass::Unknown
+        })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let information = rustix::fs::fstatfs(file).map_err(std::io::Error::from)?;
+        Ok(match information.f_type as u64 {
+            0xef53 => FilesystemClass::Local,
+            0x6969 | 0xff53_4d42 | 0xfe53_4d42 => FilesystemClass::Remote,
+            _ => FilesystemClass::Unknown,
+        })
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = file;
+        Ok(FilesystemClass::Unknown)
+    }
+}
+
+pub(crate) fn require_local_file(file: &std::fs::File) -> Result<()> {
+    if filesystem_class(file)? != FilesystemClass::Local {
+        return Err(Error::InvalidInput(
+            "application state and secrets require a verified supported local filesystem".into(),
         ));
     }
     Ok(())
@@ -113,11 +273,26 @@ pub(crate) fn is_unsafe_cap_link(metadata: &cap_std::fs::Metadata) -> bool {
 pub(crate) struct LibraryDirectory {
     directory: Dir,
     native: NativeRoot,
+    parents: Vec<Dir>,
+    names: Vec<std::ffi::OsString>,
+    selection: Option<selection::DirectorySelection>,
+}
+
+impl std::ops::Deref for LibraryDirectory {
+    type Target = Dir;
+
+    fn deref(&self) -> &Dir {
+        &self.directory
+    }
 }
 
 impl LibraryDirectory {
+    pub(crate) fn require_local(&self) -> Result<()> {
+        require_local_file(&self.directory_file()?)
+    }
+
     pub(crate) fn canonical(path: &Path) -> Result<(PathBuf, Self)> {
-        let mut opened = Self::open(path)?;
+        let opened = Self::open(path)?;
         let root = fs::canonicalize(path)?;
         let verified = Self::open(&root)?;
         if opened.native.identity != verified.native.identity {
@@ -125,22 +300,70 @@ impl LibraryDirectory {
                 "library root changed while resolving its canonical name".into(),
             ));
         }
-        opened.native = verified.native;
-        Ok((root, opened))
+        Ok((root, verified))
     }
 
     pub(crate) fn native_root(&self) -> &NativeRoot {
         &self.native
     }
 
-    pub(crate) fn into_directory(self) -> Dir {
-        self.directory
+    pub(crate) fn snapshot(&self) -> DirectorySnapshot {
+        match &self.selection {
+            Some(selection) => selection.snapshot(),
+            None => DirectorySnapshot::Native(self.native.clone()),
+        }
+    }
+
+    pub(crate) fn reopen_at(&self, path: &Path) -> Result<Self> {
+        let current = match &self.selection {
+            Some(selection) => selection.reopen()?,
+            None => Self::open(path)?,
+        };
+        if current.native_root() != self.native_root() {
+            return Err(Error::Conflict("retained directory binding changed".into()));
+        }
+        Ok(current)
+    }
+
+    /// Clone a metadata/permission query handle. Retain this directory as the
+    /// authority while using the returned file; it does not carry ancestor pins.
+    pub(crate) fn directory_file(&self) -> std::io::Result<std::fs::File> {
+        Ok(self.directory.try_clone()?.into_std_file())
+    }
+
+    pub(crate) fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(Self {
+            directory: self.directory.try_clone()?,
+            native: self.native.clone(),
+            parents: self
+                .parents
+                .iter()
+                .map(Dir::try_clone)
+                .collect::<std::io::Result<Vec<_>>>()?,
+            names: self.names.clone(),
+            selection: self.selection.clone(),
+        })
+    }
+
+    /// Keep the complete retained chain when existing capability-based
+    /// consumers descend into application-controlled child directories.
+    pub(crate) fn open_dir_nofollow(&self, path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let relative = path
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("directory identifier must be Unicode"))?;
+        let opened = LibraryPath::parse(relative).and_then(|path| self.open_directory(&path));
+        opened.map_err(|error| match error {
+            Error::Io(error) => error,
+            error => std::io::Error::other(error),
+        })
     }
 
     pub(crate) fn open(path: &Path) -> Result<Self> {
         if !path.is_absolute() {
             return Err(Error::InvalidInput("library root must be absolute".into()));
         }
+        validate_native_reference(path)?;
 
         let mut components = path.components().peekable();
         let mut anchor = PathBuf::new();
@@ -153,6 +376,7 @@ impl LibraryDirectory {
         let directory = Dir::open_ambient_dir(anchor, cap_std::ambient_authority())?;
         Self::check_directory(&directory)?;
         let mut ancestors = vec![directory];
+        let mut names = Vec::new();
         for component in components {
             match component {
                 Component::Normal(name) => {
@@ -160,10 +384,12 @@ impl LibraryDirectory {
                         Error::InvalidInput("library root has no filesystem anchor".into())
                     })?;
                     ancestors.push(Self::open_child(parent, Path::new(name))?);
+                    names.push(name.to_owned());
                 }
                 Component::ParentDir => {
                     if ancestors.len() > 1 {
                         ancestors.pop();
+                        names.pop();
                     }
                 }
                 Component::CurDir => {}
@@ -178,7 +404,13 @@ impl LibraryDirectory {
         let directory = ancestors
             .pop()
             .ok_or_else(|| Error::InvalidInput("library root has no filesystem anchor".into()))?;
-        Ok(Self { directory, native })
+        Ok(Self {
+            directory,
+            native,
+            parents: ancestors,
+            names,
+            selection: None,
+        })
     }
 
     fn check_directory(directory: &Dir) -> Result<()> {
@@ -198,15 +430,62 @@ impl LibraryDirectory {
     }
 
     pub(crate) fn open_directory(&self, relative: &LibraryPath) -> Result<Self> {
-        let mut directory = self.directory.try_clone()?;
-        let mut native = self.native.clone();
+        let mut names = self.names.clone();
+        let mut selection = self.selection.clone();
+        let mut ancestors = self
+            .parents
+            .iter()
+            .map(Dir::try_clone)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        ancestors.push(self.directory.try_clone()?);
         if !relative.as_str().is_empty() {
             for component in relative.as_str().split('/') {
-                directory = Self::open_child(&directory, Path::new(component))?;
-                native.child(&directory)?;
+                let parent = ancestors
+                    .last()
+                    .ok_or(Error::Internal("directory has no retained parent"))?;
+                ancestors.push(Self::open_child(parent, Path::new(component))?);
+                if let Some(selection) = &mut selection {
+                    let child = ancestors
+                        .last()
+                        .ok_or(Error::Internal("directory has no retained child"))?;
+                    selection.descend(component, &child.try_clone()?.into_std_file())?;
+                }
+                names.push(component.into());
             }
         }
-        Ok(Self { directory, native })
+        let native = NativeRoot::read(&ancestors)?;
+        let directory = ancestors
+            .pop()
+            .ok_or(Error::Internal("directory has no retained handle"))?;
+        Ok(Self {
+            directory,
+            native,
+            parents: ancestors,
+            names,
+            selection,
+        })
+    }
+
+    pub(crate) fn sqlite_chain(&self) -> Result<native_sqlite::DirectoryChain> {
+        if self.names.len() != self.parents.len() {
+            return Err(Error::Internal("retained directory chain is incomplete"));
+        }
+        let anchor = self.parents.first().unwrap_or(&self.directory);
+        let components = self
+            .names
+            .iter()
+            .zip(
+                self.parents
+                    .iter()
+                    .skip(1)
+                    .chain((!self.names.is_empty()).then_some(&self.directory)),
+            )
+            .map(|(name, directory)| Ok((name.clone(), directory.try_clone()?.into_std_file())))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        Ok(native_sqlite::DirectoryChain::new(
+            anchor.try_clone()?.into_std_file(),
+            components,
+        )?)
     }
 
     pub(crate) fn entries(&self) -> std::io::Result<cap_std::fs::ReadDir> {
@@ -241,6 +520,10 @@ mod tests;
 #[cfg(test)]
 #[path = "filesystem/boundary_prototype.rs"]
 mod boundary_prototype;
+
+#[cfg(test)]
+#[path = "filesystem/logical_binding_prototype.rs"]
+mod logical_binding_prototype;
 
 #[cfg(test)]
 #[path = "filesystem/topology_prototype.rs"]
