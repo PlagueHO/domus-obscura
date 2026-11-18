@@ -26,6 +26,9 @@ mod album;
 #[path = "local_test/library.rs"]
 mod library;
 
+#[path = "../tests/support/private.rs"]
+mod private;
+
 struct Fixture {
     store: Store,
     location: i64,
@@ -80,7 +83,7 @@ async fn album_audio(
 
 impl Fixture {
     fn new() -> Result<Self> {
-        let directory = tempfile::tempdir()?;
+        let directory = private::tempdir()?;
         let media = directory.path().join("sample-library");
         let album = media.join("S").join("SAMPLE ARTIST").join("SAMPLE ALBUM");
         std::fs::create_dir_all(&album)?;
