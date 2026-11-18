@@ -9,6 +9,9 @@ deferred in [#17](https://github.com/PlagueHO/domus-obscura/issues/17) and
 [#18](https://github.com/PlagueHO/domus-obscura/issues/18).
 
 Use this guide for foreground operation, maintenance, backup, and recovery.
+The [Docker guide](docker.md) applies the same state, binding, and approval rules
+to a Linux image on Windows or Linux Docker hosts. Container creation is not
+startup, mount, or recovery acceptance.
 The [process-crash checks](crash-recovery.md) describe generated cross-process
 recovery evidence and its separate OS/power-loss and native-service limits.
 The [Windows guide](windows-services.md) and [Linux guide](linux-services.md)

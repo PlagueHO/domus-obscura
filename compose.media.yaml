@@ -1,0 +1,17 @@
+services:
+  api:
+    volumes:
+      - type: bind
+        source: ${DOMUS_MEDIA_ROOT:?Set an existing absolute host media directory}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+  worker:
+    volumes:
+      - type: bind
+        source: ${DOMUS_MEDIA_ROOT:?Set an existing absolute host media directory}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false

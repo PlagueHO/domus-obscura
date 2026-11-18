@@ -1,0 +1,160 @@
+name: Docker distribution
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: Run on an existing approved Windows Docker Desktop runner
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: Build and check Linux image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 packaging/docker/check.py self-test
+      - run: python3 packaging/docker/test_health.py
+      - run: docker compose config --quiet
+      - run: python3 packaging/docker/check.py build
+      - run: python3 packaging/docker/check.py check --report target/docker-linux.json
+      - name: Retain host evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docker-linux-${{ github.sha }}
+          path: target/docker-linux.json
+          if-no-files-found: warn
+      - run: docker save domus-obscura:local --output target/domus-container.tar
+      - name: Retain the exact tested candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docker-image-${{ github.sha }}
+          path: target/domus-container.tar
+          compression-level: 0
+          if-no-files-found: error
+
+  windows:
+    name: Check the same image on Windows Docker Desktop
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.windows)
+    needs: linux
+    runs-on: [self-hosted, Windows, X64, docker-desktop]
+    environment: docker-windows-validation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: docker-image-${{ github.sha }}
+          path: target
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: docker-linux-${{ github.sha }}
+          path: target
+      - name: Load and check the candidate
+        shell: pwsh
+        run: |
+          docker load --input target\domus-container.tar
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate load failed.' }
+          python packaging\docker\check.py check --report target\docker-windows.json
+          if ($LASTEXITCODE -ne 0) { throw 'Windows Docker host checks failed.' }
+          python packaging\docker\check.py validate-evidence --linux-report target\docker-linux.json --windows-report target\docker-windows.json
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate evidence differs between hosts.' }
+      - name: Retain Windows host evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docker-windows-${{ github.sha }}
+          path: target/docker-windows.json
+          if-no-files-found: warn
+
+  publish:
+    name: Publish the approved tested release
+    if: github.event_name == 'release'
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    environment: docker-release
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      GHCR_IMAGE: ghcr.io/plagueho/domus-obscura
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require an existing release review gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p target
+          gh api "repos/$GITHUB_REPOSITORY/environments/docker-release" > target/release-environment.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          environment = json.loads(Path("target/release-environment.json").read_text())
+          if not any(rule.get("type") == "required_reviewers" and rule.get("reviewers") for rule in environment.get("protection_rules", [])):
+              raise SystemExit("Configure required reviewers on docker-release before publication")
+          PY
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: docker-image-${{ github.sha }}
+          path: target
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: docker-linux-${{ github.sha }}
+          path: target
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: docker-windows-${{ github.sha }}
+          path: target
+      - run: docker load --input target/domus-container.tar
+      - run: python3 packaging/docker/check.py validate-evidence --linux-report target/docker-linux.json --windows-report target/docker-windows.json
+      - name: Check the loaded candidate and release version
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, tomllib
+          from pathlib import Path
+          report = json.loads(Path("target/docker-linux.json").read_text())
+          image = json.loads(subprocess.check_output(["docker", "image", "inspect", "domus-obscura:local"]))[0]
+          version = tomllib.loads(Path("crates/domus/Cargo.toml").read_text())["package"]["version"]
+          tag = os.environ["RELEASE_TAG"]
+          if not re.fullmatch(r"v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag):
+              raise SystemExit("Unsupported release tag")
+          if tag.removeprefix("v") != version or image["Config"]["Labels"]["org.opencontainers.image.version"] != version:
+              raise SystemExit("Release and candidate versions differ")
+          if image["Id"] != report["image_id"] or report["revision"] != os.environ["GITHUB_SHA"]:
+              raise SystemExit("Loaded candidate differs from the tested release")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write("IMAGE_VERSION=" + version + "\n")
+          PY
+      - name: Publish without rebuilding
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker tag domus-obscura:local "$GHCR_IMAGE:$IMAGE_VERSION"
+          docker push "$GHCR_IMAGE:$IMAGE_VERSION"
+          if [ "${{ github.event.release.prerelease }}" = "false" ] && [ "${IMAGE_VERSION#*-}" = "$IMAGE_VERSION" ]; then
+            docker tag domus-obscura:local "$GHCR_IMAGE:latest"
+            docker push "$GHCR_IMAGE:latest"
+          fi
+      - name: Verify public pull and record its digest
+        run: |
+          anonymous="$(mktemp -d)"
+          docker --config "$anonymous" pull "$GHCR_IMAGE:$IMAGE_VERSION"
+          docker image inspect "$GHCR_IMAGE:$IMAGE_VERSION" --format '{{json .RepoDigests}}' >> "$GITHUB_STEP_SUMMARY"
+      - name: End registry login
+        if: always()
+        run: docker logout ghcr.io

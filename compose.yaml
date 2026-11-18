@@ -1,0 +1,37 @@
+name: domus-obscura
+
+x-runtime: &runtime
+  image: ${DOMUS_IMAGE:-domus-obscura:local}
+  platform: linux/amd64
+  user: "1000:1000"
+  init: true
+  read_only: true
+  network_mode: host
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 2m
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,noexec,size=64m
+  volumes:
+    - state:/data
+    - cache:/cache
+    - staging:/staging
+
+services:
+  api:
+    <<: *runtime
+    command: [serve]
+  worker:
+    <<: *runtime
+    profiles: [worker]
+    command: [worker, /data/DomusObscura/service.json]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+volumes:
+  state:
+  cache:
+  staging:

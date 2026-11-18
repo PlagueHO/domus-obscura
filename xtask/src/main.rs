@@ -106,12 +106,29 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             windows_package::verify(root)?;
             windows_package::smoke(root)
         }
-        Some("package-linux") => {
+        Some("package-linux") | Some("package-linux-container") => {
+            let revision = if args[0] == "package-linux-container" {
+                if args.len() != 2 {
+                    return Err("package-linux-container requires the source commit".into());
+                }
+                Some(args[1].as_str())
+            } else {
+                None
+            };
             linux_package::require_host()?;
             toolchains()?;
             contracts(true)?;
             pnpm(&["--dir", "frontend", "run", "build:app"])?;
-            linux_package::build()
+            linux_package::build(revision)
+        }
+        Some("docker-build") | Some("docker-check") => {
+            execute(
+                if cfg!(windows) { "python" } else { "python3" },
+                &[
+                    "packaging/docker/check.py",
+                    if args[0] == "docker-build" { "build" } else { "check" },
+                ],
+            )
         }
         Some("package-check-linux") => {
             linux_package::require_host()?;
@@ -194,7 +211,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         Some("scale-physical") => physical_scale::run(false),
         Some("scale-physical-full") => physical_scale::run(true),
         _ => Err(
-            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|scale-physical|scale-physical-full|build|smoke|package-windows|installer-windows|package-check|package-linux|package-check-linux|local-test|local-test-build|browser-build|browser>"
+            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|scale-physical|scale-physical-full|build|smoke|package-windows|installer-windows|package-check|package-linux|package-linux-container <commit>|package-check-linux|docker-build|docker-check|local-test|local-test-build|browser-build|browser>"
                 .into(),
         ),
     }
