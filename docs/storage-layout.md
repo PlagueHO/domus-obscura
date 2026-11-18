@@ -2,7 +2,7 @@
 
 ## Status
 
-**Storage policy agreed; production implementation in final validation.** The user
+**Storage policy agreed and implemented.** The user
 selected one private application directory with overridable child folders and
 separate media libraries. Primary and backup libraries can be local folders,
 network file shares, or other native filesystem locations. They are not limited
@@ -25,7 +25,8 @@ before SQLite initialization. External expected state authority remains separate
 from SQLite. Selected API, worker and CLI sources share the same admission
 policy. SQLite temporary storage stays in the admitted private state directory.
 Concurrent containers and recreation passed against generated retained storage
-on Docker Desktop. Final repository checks and native Ubuntu CI remain required.
+on Docker Desktop. Issue #68 and its attached acceptance evidence record
+per-revision checks and separate native Windows and Linux results.
 This agreement does not authorize data deletion or changes to existing media.
 
 The user confirmed that the application is not released and has no existing
@@ -145,17 +146,18 @@ into this file.
 **Confirmed state-bootstrap exception:** The operator-approved expected native
 state-root binding belongs in `config.json`. It is startup trust information,
 not mutable application policy or a copy of SQLite records.
-Startup must verify this expectation before SQLite can create coordination files,
-recover or migrate. The provider scope and persistent identity format still need
-verification within the operator-trusted logical provider scope. This does not
-require physical-device discovery. A copied database or owner marker must not
+Startup verifies complete boundary expectations before opening SQLite. The
+external expectation also binds the persistent coordination-file identity.
+The native adapter retains that admitted authority through database owners and
+verifies locality within the operator-trusted logical provider scope. This does
+not require physical-device discovery. A copied database or owner marker must not
 authorize a replacement root.
 Changing the binding requires explicit operator action and coordinated restart.
-The [proposed logical binding model](storage.md#proposed-logical-binding-document-and-admission-model)
-defines a test-only document, exact topology assurances and setup/rebinding
-steps. Its portable observations are synthetic. An isolated Windows extension
-now checks actual retained directory identities, but does not establish storage
-locality or production startup enforcement.
+The [historical logical binding experiments](storage.md#proposed-logical-binding-document-and-admission-model)
+record the earlier test-only model. The
+[production selection](storage.md#initial-production-selection) defines current
+authority, exact topology assurances, fresh setup and stopped-host changes.
+The experiments alone do not authorize production access or automatic rebinding.
 
 Operator edits alone do not synchronize running processes. Each process can
 retain a different active snapshot after an edit or a partial restart.
@@ -173,8 +175,8 @@ components are stopped. The SQLite editing-policy flag remains independent.
 Existing configuration paths, old locks and pending files are preserved.
 Personal fresh setup now uses the agreed root name and relative state path.
 Existing nonempty storage without `config.json` remains refused.
-Optional role configuration, external state bootstrap and the full configurable
-layout remain incomplete.
+Optional role defaults, external state bootstrap and role overrides now use the
+shared selected-client policy. Admission still requires a supported layout.
 
 ## Confirmed decisions
 
@@ -188,10 +190,11 @@ layout remain incomplete.
 | Incompatible development state | Breaking changes are allowed. Report incompatibility and offer explicit fresh setup. Migration is not required for disposable pre-production state. Never reset or delete automatically.                                              |
 | Initial Docker support         | Start with documented, verified layouts: one persistent application-storage mount shared by API and worker, plus separate media mounts. Admit private child-folder overrides only where their arrangement passes the required checks. |
 | SQLite temporary files         | Use a fixed private `sqlite-tmp` child beneath the selected state directory. It follows a state-directory override. Do not add an independent setting or use the OS temporary directory as a fallback.                                |
-| State bootstrap binding        | Keep the operator-approved expected native state-root binding in `config.json`, outside SQLite. Verify it before any creating, coordinating, recovering or migrating database open. Its durable provider scope remains a proof gate.  |
+| State bootstrap binding        | Keep the operator-approved complete state boundary and expected coordination-file identity in `config.json`, outside SQLite. Verify the admitted authority before opening SQLite. Never adopt an existing native binding.             |
 
-These decisions close the earlier product questions. They do not fix the
-existing-code findings in the separate implementation compatibility review.
+These decisions close the earlier product questions. The separate implementation
+compatibility review records historical findings; current acceptance evidence
+belongs to issue #68.
 
 The temporary-folder decision adds a location, not a new cleanup command.
 SQLite manages its own temporary files. Do not delete unknown files or uncertain
