@@ -82,6 +82,11 @@ The private application directory is `C:\DomusDev\application`. Its generated
 `config.json` keeps the external storage selection. The generated library is
 `C:\DomusDev\library`, outside the application directory. The script makes the
 development system policy editable before it saves the initial output settings.
+Before registration, it inspects the generated media and staging roots and adds
+their role definitions and provider mappings. It binds each private/media topology
+assurance to the complete selection with the Rust digest command. These assurances
+apply only to this fresh generated layout. The temporary selection JSON stays in
+private application storage and is removed after the digest command.
 
 Open `https://localhost:8443`. Use the same hostname and port as `origin`.
 The application uses the real guarded API, not `frontend/local-test`.

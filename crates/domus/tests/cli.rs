@@ -71,6 +71,113 @@ fn initialized_storage(
     Ok((root.join("state").join("state.db"), host))
 }
 
+#[cfg(windows)]
+#[test]
+fn local_setup_script_selects_generated_media_and_staging_before_registration()
+-> Result<(), Box<dyn std::error::Error>> {
+    use domus::infrastructure::filesystem::{StorageConfiguration, StorageRole};
+
+    let fixture = tempdir()?;
+    let repository = fixture.path().join("repository");
+    let scripts = repository.join("scripts");
+    let binaries = repository.join("target").join("debug");
+    let assets = repository.join("frontend").join("dist-app");
+    for path in [&scripts, &binaries, &assets] {
+        std::fs::create_dir_all(path)?;
+    }
+    let script = scripts.join("local-setup.ps1");
+    std::fs::write(&script, include_str!("../../../scripts/local-setup.ps1"))?;
+    std::fs::copy(env!("CARGO_BIN_EXE_domus"), binaries.join("domus.exe"))?;
+    std::fs::write(assets.join("index.html"), b"generated setup test assets")?;
+    let root = fixture.path().join("fresh setup");
+    let setup = || {
+        Command::new("pwsh")
+            .args(["-NoProfile", "-NonInteractive", "-File"])
+            .arg(&script)
+            .arg("-Directory")
+            .arg(&root)
+            .output()
+    };
+    let output = setup()?;
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let application = root.join("application");
+    let host = application.join("config.json");
+    let configuration = std::fs::read(&host)?;
+    let value: serde_json::Value = serde_json::from_slice(&configuration)?;
+    let storage: StorageConfiguration = serde_json::from_value(value["storage"].clone())?;
+    let media = storage
+        .roots
+        .iter()
+        .find(|root| root.role == StorageRole::Media)
+        .ok_or("media root was not selected")?;
+    assert_eq!(
+        storage
+            .providers
+            .iter()
+            .find(|provider| provider.scope == media.provider_scope)
+            .ok_or("media provider was not selected")?
+            .boundary,
+        root.join("library")
+    );
+    assert!(
+        storage
+            .roots
+            .iter()
+            .any(|root| root.role == StorageRole::Staging)
+    );
+    let digest = storage.selection_digest()?;
+    for private in storage
+        .roots
+        .iter()
+        .filter(|root| root.role != StorageRole::Media)
+    {
+        assert!(storage.topology_assurances.iter().any(|assurance| {
+            assurance.selection_digest == digest
+                && ((assurance.left.root_id == private.root_id
+                    && assurance.left.binding_revision == private.binding_revision
+                    && assurance.right.root_id == media.root_id
+                    && assurance.right.binding_revision == media.binding_revision)
+                    || (assurance.right.root_id == private.root_id
+                        && assurance.right.binding_revision == private.binding_revision
+                        && assurance.left.root_id == media.root_id
+                        && assurance.left.binding_revision == media.binding_revision))
+        }));
+    }
+    assert!(
+        !application
+            .join("secrets")
+            .join("setup-storage-selection.json")
+            .exists()
+    );
+    let output = run(&["location", "--host", host.to_str().ok_or("host path")?, "1"])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run(&["settings", "--host", host.to_str().ok_or("host path")?])?;
+    assert!(output.status.success());
+    assert!(!serde_json::from_slice::<serde_json::Value>(&output.stdout)?.is_null());
+
+    let database = application.join("state").join("state.db");
+    let state = std::fs::read(&database)?;
+    let sentinel = root.join("library").join("keep.txt");
+    std::fs::write(&sentinel, b"preserve generated existing media")?;
+    assert!(!setup()?.status.success());
+    assert_eq!(std::fs::read(&host)?, configuration);
+    assert_eq!(std::fs::read(&database)?, state);
+    assert_eq!(
+        std::fs::read(&sentinel)?,
+        b"preserve generated existing media"
+    );
+    Ok(())
+}
+
 #[test]
 fn fresh_cli_setup_preserves_existing_configuration_and_orphaned_storage()
 -> Result<(), Box<dyn std::error::Error>> {
