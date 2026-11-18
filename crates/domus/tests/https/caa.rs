@@ -77,7 +77,7 @@ async fn shared_cache_caa_service_reopens_file_responses_without_sqlite_bodies_o
         cache_root.path(),
         CacheLimits::default(),
     )?);
-    let service = CaaArtworkService::new(&database, client.clone()).with_cache(cache.clone());
+    let service = CaaArtworkService::new(store.source(), client.clone()).with_cache(cache.clone());
     let request = ArtworkRequest {
         provider: "cover-art-archive".into(),
         release: EntityRef {
@@ -112,7 +112,7 @@ async fn shared_cache_caa_service_reopens_file_responses_without_sqlite_bodies_o
         CacheLimits::default(),
     )?);
     let service =
-        Arc::new(CaaArtworkService::new(&database, client).with_cache(reopened_cache.clone()));
+        Arc::new(CaaArtworkService::new(store.source(), client).with_cache(reopened_cache.clone()));
     assert!(matches!(
         service.fetch(request.clone()).await?.content,
         ArtworkContent::Image { .. }
@@ -281,7 +281,7 @@ async fn caa_https_fetches_exact_listing_and_original_image_through_budgeted_red
             .resolve(SHARD, shard.address)
             .redirect(reqwest::redirect::Policy::limited(20)),
     )?;
-    let state = tempfile::tempdir()?;
+    let state = private::tempdir()?;
     let mut store = Store::open(&state.path().join("state.db"))?;
     let fetched = client
         .fetch(&mut store, CaaRequest::listing(RELEASE)?)
@@ -326,10 +326,10 @@ async fn caa_https_fetches_exact_listing_and_original_image_through_budgeted_red
             ArtworkContent, ArtworkProvider, ArtworkRequest, EntityRef,
         };
         use domus::infrastructure::services::CaaArtworkService;
-        let service_state = tempfile::tempdir()?;
+        let service_state = private::tempdir()?;
         let service_database = service_state.path().join("state.db");
-        drop(Store::open(&service_database)?);
-        let service = CaaArtworkService::new(&service_database, client.clone());
+        let source = Store::open(&service_database)?.source();
+        let service = CaaArtworkService::new(source, client.clone());
         let request = ArtworkRequest {
             provider: "cover-art-archive".into(),
             release: EntityRef {
@@ -358,7 +358,10 @@ async fn caa_https_fetches_exact_listing_and_original_image_through_budgeted_red
             2
         );
         drop(service);
-        let service = CaaArtworkService::new(&service_database, client.clone());
+        let service = CaaArtworkService::new(
+            Store::open_current_existing(&service_database)?.source(),
+            client.clone(),
+        );
         assert!(matches!(
             service.fetch(request.clone()).await?.content,
             ArtworkContent::Image { .. }
@@ -388,7 +391,7 @@ async fn caa_https_fetches_exact_listing_and_original_image_through_budgeted_red
             .tls_danger_accept_invalid_certs(true)
             .tls_danger_accept_invalid_hostnames(true),
     )?;
-    let state = tempfile::tempdir()?;
+    let state = private::tempdir()?;
     let mut store = Store::open(&state.path().join("state.db"))?;
     assert!(
         unsafe_client
@@ -540,7 +543,7 @@ async fn caa_https_rejects_unsafe_redirects_bad_metadata_and_preserves_backoff()
     )?;
     for selected in 0..=14 {
         mode.store(selected, Ordering::SeqCst);
-        let state = tempfile::tempdir()?;
+        let state = private::tempdir()?;
         let mut store = Store::open(&state.path().join("state.db"))?;
         let fetched = client
             .fetch(&mut store, CaaRequest::listing(RELEASE)?)
@@ -616,7 +619,7 @@ async fn caa_image_transport_enforces_exact_eight_mib_and_chunked_body_limits() 
     let listing = domus::infrastructure::caa::CaaListing::parse(RELEASE, &body)?;
     for selected in 0..5 {
         mode.store(selected, Ordering::SeqCst);
-        let state = tempfile::tempdir()?;
+        let state = private::tempdir()?;
         let mut store = Store::open(&state.path().join("state.db"))?;
         let fetched = client
             .fetch(&mut store, CaaRequest::image(&listing, IMAGE)?)

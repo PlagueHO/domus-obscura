@@ -3,7 +3,10 @@ use domus::domain::{EditionSelection, JobState, OutputSettings, Page, PlannedTra
 use domus::infrastructure::store::{JobClaim, PlanRequest, SourceFile, Store};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use tempfile::{TempDir, tempdir};
+#[path = "support/private.rs"]
+mod private;
+use private::tempdir;
+use tempfile::TempDir;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

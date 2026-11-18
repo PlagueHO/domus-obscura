@@ -1,10 +1,11 @@
 [workspace]
-members = ["crates/domus", "crates/native-file-delete", "crates/native-file-security", "xtask"]
-exclude = ["third_party/file-id-0.2.3"]
+members = ["crates/domus", "crates/native-file-delete", "crates/native-file-security", "crates/native-sqlite", "xtask"]
+exclude = ["third_party/file-id-0.2.3", "third_party/libsqlite3-sys-0.38.2"]
 resolver = "3"
 
 [patch.crates-io]
 file-id = { path = "third_party/file-id-0.2.3" }
+libsqlite3-sys = { path = "third_party/libsqlite3-sys-0.38.2" }
 
 [workspace.package]
 edition = "2024"
@@ -46,6 +47,7 @@ ts-rs = "12.0.1"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 rcgen = "0.14.10"
 instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "time"] }
+libc = "0.2.191"
 http-body-util = "0.1.3"
 hickory-resolver = { version = "0.25.2", default-features = false, features = ["system-config", "tokio"] }
 x509-parser = { version = "0.18.1", default-features = false, features = ["verify"] }

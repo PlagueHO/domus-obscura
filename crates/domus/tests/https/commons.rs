@@ -70,7 +70,7 @@ fn client(
     host: &str,
 ) -> TestResult<CommonsClient> {
     Ok(CommonsClient::from_builder(
-        database.into(),
+        Store::open_read_current(database)?.source(),
         cache,
         reqwest::Client::builder()
             .tls_certs_only([reqwest::Certificate::from_pem(material.ca.as_bytes())?])
@@ -143,7 +143,7 @@ async fn artist_images_commons_tls_checks_exact_metadata_and_reuses_file_cache_a
         ])
         .resolve(COMMONS, server.address)
         .resolve(UPLOAD, upload_server.address);
-    let first = CommonsClient::from_builder(database.clone(), cache.clone(), http)?;
+    let first = CommonsClient::from_builder(store.source(), cache.clone(), http)?;
     let evidence = first
         .inspect(FILE.into())
         .await?

@@ -7,7 +7,6 @@ use crate::infrastructure::store::{
     RecoveryOperation, RecoveryPreview, ReplacementFile, Store,
 };
 use crate::{Error, Result};
-use cap_fs_ext::DirExt;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -95,9 +94,7 @@ fn retained_evidence(
     };
     let root = open_root(store, &binding)?;
     verify_visible(&root, &binding)?;
-    let directory = root
-        .open_directory(&LibraryPath::parse(&binding.directory)?)?
-        .into_directory();
+    let directory = root.open_directory(&LibraryPath::parse(&binding.directory)?)?;
     let (identity, files) = recovery_files::inspect(&directory, &expected)?;
     if identity != binding.directory_identity {
         return Err(conflict());
@@ -184,7 +181,8 @@ pub fn continue_recovery(
     }
     if cleanup {
         let binding = store.recovery_binding(operation.id)?;
-        let staging = StagingRoot::open(store, Path::new(&binding.root))?;
+        let path = store.registered_root_path(&binding.root, &binding.root_kind)?;
+        let staging = StagingRoot::open(store, &path)?;
         run_operation(store, id, Some(&staging))
     } else {
         run_operation(store, id, None)
@@ -318,9 +316,8 @@ fn directory_item(ordinal: usize, artifact: i64, path: &str, identity: &str) -> 
 }
 
 fn open_root(store: &Store, binding: &RecoveryBinding) -> Result<LibraryDirectory> {
-    let root = LibraryDirectory::open(Path::new(&binding.root))?;
-    store.check_native_root(&binding.root, &binding.root_kind, root.native_root())?;
-    if root.native_root().identity != binding.root_identity {
+    let root = store.open_registered_root(&binding.root, &binding.root_kind)?;
+    if store.root_binding_identity(&binding.root, &binding.root_kind)? != binding.root_identity {
         return Err(conflict());
     }
     Ok(root)
@@ -328,9 +325,7 @@ fn open_root(store: &Store, binding: &RecoveryBinding) -> Result<LibraryDirector
 
 fn verify_visible(root: &LibraryDirectory, binding: &RecoveryBinding) -> Result<()> {
     if let Some(path) = &binding.visible_directory {
-        let directory = root
-            .open_directory(&LibraryPath::parse(path)?)?
-            .into_directory();
+        let directory = root.open_directory(&LibraryPath::parse(path)?)?;
         let (identity, _) = recovery_files::inspect(&directory, &binding.visible_files)?;
         if Some(&identity) != binding.visible_identity.as_ref() {
             return Err(conflict());
@@ -366,14 +361,11 @@ fn verify_published_destinations(store: &Store, job: i64, version: i64) -> Resul
             ));
         }
         let expected = store.recovery_publication_files(destination.id)?;
-        let root = LibraryDirectory::open(Path::new(&destination.root))?;
-        store.check_native_root(&destination.root, "media", root.native_root())?;
-        if root.native_root().identity != destination.root_identity {
+        let root = store.open_registered_root(&destination.root, "media")?;
+        if store.root_binding_identity(&destination.root, "media")? != destination.root_identity {
             return Err(conflict());
         }
-        let directory = root
-            .open_directory(&LibraryPath::parse(&destination.relative_folder)?)?
-            .into_directory();
+        let directory = root.open_directory(&LibraryPath::parse(&destination.relative_folder)?)?;
         let (identity, _) = recovery_files::inspect(&directory, &expected)?;
         if Some(identity) != destination.album_identity {
             return Err(conflict());
@@ -412,12 +404,9 @@ fn run_operation(
                 continue;
             }
             let path = LibraryPath::parse(&item.path)?;
-            let parent = checked_root
-                .open_directory(&LibraryPath::parse(path.parent())?)?
-                .into_directory();
+            let parent = checked_root.open_directory(&LibraryPath::parse(path.parent())?)?;
             if path.parent() == binding.directory
-                && native_file_identity(&parent.try_clone()?.into_std_file())?
-                    != binding.directory_identity
+                && native_file_identity(&parent.directory_file()?)? != binding.directory_identity
             {
                 return Err(conflict());
             }
@@ -432,7 +421,7 @@ fn run_operation(
                         // Verify before intent, then the native adapter verifies again before unlink.
                         if item.directory {
                             let dir = parent.open_dir_nofollow(&item.file.name)?;
-                            if native_file_identity(&dir.into_std_file())? != item.file.identity {
+                            if native_file_identity(&dir.directory_file()?)? != item.file.identity {
                                 return Err(conflict());
                             }
                         } else if recovery_files::file(&parent, &item.file.name)? != item.file {
@@ -493,7 +482,7 @@ fn check_layout(
     items: &[RecoveryItem],
 ) -> Result<()> {
     let directory = match root.open_directory(&LibraryPath::parse(&binding.directory)?) {
-        Ok(directory) => Some(directory.into_directory()),
+        Ok(directory) => Some(directory),
         Err(Error::Io(error))
             if error.kind() == std::io::ErrorKind::NotFound
                 && items.iter().any(|i| {
@@ -509,9 +498,7 @@ fn check_layout(
         Err(error) => return Err(error),
     };
     if let Some(directory) = directory {
-        if native_file_identity(&directory.try_clone()?.into_std_file())?
-            != binding.directory_identity
-        {
+        if native_file_identity(&directory.directory_file()?)? != binding.directory_identity {
             return Err(conflict());
         }
         for (index, child) in directory.entries()?.enumerate() {
@@ -528,7 +515,7 @@ fn check_layout(
     for item in items.iter().filter(|i| !i.directory) {
         let path = LibraryPath::parse(&item.path)?;
         let parent = match root.open_directory(&LibraryPath::parse(path.parent())?) {
-            Ok(parent) => parent.into_directory(),
+            Ok(parent) => parent,
             Err(Error::Io(error))
                 if error.kind() == std::io::ErrorKind::NotFound && item.state == "removed" =>
             {

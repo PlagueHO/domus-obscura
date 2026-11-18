@@ -171,7 +171,14 @@ The follow-up working tree is based on
 `44a4c67a6bc59d0577d99d42947f6ffbfdbacd1e`. Its local results are not CI
 evidence or a result for a committed follow-up revision.
 
-`backend_configuration_tls_crash_manual_reload_boundaries` terminates owned
+The following reload tests describe historical evidence. Host JSON activation
+now requires a coordinated stop, operator edit, validation and restart.
+`backend_configuration_tls_requires_stopped_operator_edit_and_restart` checks
+the replacement certificate through real TLS after restart.
+`backend_configuration_tls_invalid_operator_edit_rejects_restart` rejects
+invalid saved TLS without anonymous fallback. The managed rejection test remains.
+
+The former `backend_configuration_tls_crash_manual_reload_boundaries` terminated owned
 server children at `preparing`, `prepared`, `handover`, `before_report`, and
 `reported`. Fresh processes use the same saved configuration. Real TLS
 handshakes check the served certificate. Saved and active revisions remain

@@ -7,7 +7,7 @@ use crate::application::services::{
 };
 use crate::domain::credit_text;
 use crate::infrastructure::catalog::{CatalogQuery, CatalogResult, MusicBrainzClient};
-use crate::infrastructure::store::Store;
+use crate::infrastructure::store::{Store, StoreOpenMode, StoreSource};
 use crate::{Error, Result};
 use futures_util::future::BoxFuture;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -386,7 +386,7 @@ impl CatalogProvider for MusicBrainzService {
 }
 
 pub struct CaaArtworkService {
-    database: std::path::PathBuf,
+    database: StoreSource,
     client: super::caa::CaaHttpClient,
     slots: Arc<Semaphore>,
     cache_slots: Arc<Semaphore>,
@@ -394,9 +394,9 @@ pub struct CaaArtworkService {
 }
 
 impl CaaArtworkService {
-    pub fn new(database: &std::path::Path, client: super::caa::CaaHttpClient) -> Self {
+    pub fn new(database: StoreSource, client: super::caa::CaaHttpClient) -> Self {
         Self {
-            database: database.into(),
+            database,
             client,
             slots: Arc::new(Semaphore::new(4)),
             cache_slots: Arc::new(Semaphore::new(4)),
@@ -445,7 +445,7 @@ impl ArtworkProvider for CaaArtworkService {
             let cached_listing = listing_request.clone();
             let cached = tokio::task::spawn_blocking(move || {
                 let _slot = cache_slot;
-                let mut store = Store::open_current_existing(&path)?;
+                let mut store = path.open(StoreOpenMode::Current)?;
                 if let Some(cache) = cache {
                     store = store.with_cache(cache);
                 }
@@ -470,7 +470,7 @@ impl ArtworkProvider for CaaArtworkService {
             // Keep that work on a blocking thread with an independent connection.
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let mut store = Store::open_current_existing(&path)?;
+                let mut store = path.open(StoreOpenMode::Current)?;
                 if let Some(cache) = cache {
                     store = store.with_cache(cache);
                 }
@@ -632,7 +632,7 @@ impl ServiceHost {
         > = Vec::new();
         if !configuration.artist_images.is_empty() {
             artist_providers.push(Arc::new(super::commons::CommonsClient::new(
-                store.database_path().to_owned(),
+                store.source(),
                 store
                     .cache()
                     .ok_or(Error::Internal("artist photo cache disappeared"))?,
@@ -642,8 +642,7 @@ impl ServiceHost {
             configuration.clone(),
             artist_providers,
         )?;
-        let mut artwork =
-            CaaArtworkService::new(store.database_path(), super::caa::CaaHttpClient::new()?);
+        let mut artwork = CaaArtworkService::new(store.source(), super::caa::CaaHttpClient::new()?);
         let slots = Arc::new(Semaphore::new(4));
         artwork.slots = slots.clone();
         if let Some(cache) = store.cache() {
@@ -671,34 +670,39 @@ impl ServiceHost {
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HostConfiguration {
+pub(crate) struct HostConfiguration {
+    source: super::server::configuration::ConfigurationService,
     database: std::path::PathBuf,
-    #[serde(default)]
     services: ServiceConfiguration,
     cache: Option<super::cache::CacheConfiguration>,
 }
 
-/// CLI host configuration is local operator input, not part of tool arguments.
-fn read_host(configuration: &std::path::Path) -> Result<HostConfiguration> {
-    let host: HostConfiguration =
-        serde_json::from_slice(&super::local_file::read_local(configuration, 16384, false)?)
-            .map_err(|_| Error::InvalidInput("invalid service host configuration".into()))?;
-    host.services.validate_builtins()?;
-    if !host.database.is_absolute() {
-        return Err(Error::InvalidInput(
-            "service database must be an absolute local path".into(),
-        ));
+impl HostConfiguration {
+    pub(crate) fn read_input(&self, path: &std::path::Path, maximum: u64) -> Result<Vec<u8>> {
+        self.source.read_input(path, maximum, false)
     }
-    Ok(host)
+}
+
+/// CLI host configuration is local operator input, not part of tool arguments.
+pub(crate) fn read_host(configuration: &std::path::Path) -> Result<HostConfiguration> {
+    let (source, configuration, _) =
+        super::server::configuration::ConfigurationService::load(configuration)?;
+    Ok(HostConfiguration {
+        source,
+        database: configuration.database,
+        services: configuration.services,
+        cache: configuration.cache,
+    })
 }
 
 fn open_host(host: HostConfiguration, files: &[&std::path::Path]) -> Result<ServiceHost> {
-    let store = Store::open_read_snapshot(&host.database)?;
+    let store = host
+        .source
+        .open_store(super::store::StoreOpenMode::ReadCurrent)?;
     super::local_file::protect_files(&store, files)?;
+    let source = store.source();
     drop(store);
-    let mut store = Store::open_current_existing(&host.database)?;
+    let mut store = source.open(super::store::StoreOpenMode::Current)?;
     if let Some(configuration) = host.cache {
         let cache = configuration.open(&mut store, files)?;
         store = store.with_cache(cache);
@@ -727,21 +731,45 @@ pub fn prepare_cli_catalog_plan(
     release: &str,
     request_file: &std::path::Path,
 ) -> Result<super::store::StoredPlan> {
-    let request =
-        serde_json::from_slice(&super::local_file::read_local(request_file, 16384, false)?)
-            .map_err(|_| Error::InvalidInput("invalid catalog plan request".into()))?;
-    let (mut store, services) = load_cli_store(configuration, &[request_file])?;
+    let host = read_host(configuration)?;
+    let request = serde_json::from_slice(&host.read_input(request_file, 16384)?)
+        .map_err(|_| Error::InvalidInput("invalid catalog plan request".into()))?;
+    let (mut store, services) = open_cli_store(host, configuration, &[request_file], false)?;
     services.require(Capability::Metadata, "musicbrainz")?;
     crate::application::catalog::prepare_cached_catalog_plan(&mut store, release, request)
 }
 
 pub(crate) fn load_cli_source_store(
+    host: HostConfiguration,
     configuration: &std::path::Path,
     database: &std::path::Path,
     protected: &[&std::path::Path],
 ) -> Result<Store> {
-    let host = read_host(configuration)?;
     host.services.require(Capability::Acquisition, "soulseek")?;
+    require_same_database(&host, database)?;
+    Ok(open_cli_store(host, configuration, protected, true)?.0)
+}
+
+pub(crate) fn load_cli_operation_store(
+    host: HostConfiguration,
+    configuration: &std::path::Path,
+    database: &std::path::Path,
+    protected: &[&std::path::Path],
+    mode: super::store::StoreOpenMode,
+) -> Result<Store> {
+    require_same_database(&host, database)?;
+    let store = host
+        .source
+        .open_store(super::store::StoreOpenMode::ReadCurrent)?;
+    let mut files = vec![configuration];
+    files.extend_from_slice(protected);
+    super::local_file::protect_files(&store, &files)?;
+    let source = store.source();
+    drop(store);
+    source.open(mode)
+}
+
+fn require_same_database(host: &HostConfiguration, database: &std::path::Path) -> Result<()> {
     let identity = |path: &std::path::Path| -> Result<String> {
         let parent = super::filesystem::LibraryDirectory::open(
             path.parent()
@@ -758,7 +786,7 @@ pub(crate) fn load_cli_source_store(
             "source and host configurations must identify the same database".into(),
         ));
     }
-    Ok(open_cli_store(host, configuration, protected, true)?.0)
+    Ok(())
 }
 
 fn open_cli_store(
@@ -769,7 +797,10 @@ fn open_cli_store(
 ) -> Result<(Store, ServiceConfiguration)> {
     let mut files = vec![configuration];
     files.extend_from_slice(protected);
-    let mut store = Store::open_read_current(&host.database)?;
+    let mut store = host
+        .source
+        .open_store(super::store::StoreOpenMode::ReadCurrent)?;
+    let source = store.source();
     super::local_file::protect_files(&store, &files)?;
     let cache = host
         .cache
@@ -777,7 +808,7 @@ fn open_cli_store(
         .transpose()?;
     if !read_only {
         drop(store);
-        store = Store::open_current_existing(&host.database)?;
+        store = source.open(super::store::StoreOpenMode::Current)?;
     }
     if let Some(cache) = cache {
         store = store.with_cache(cache);
@@ -789,10 +820,9 @@ pub fn load_call(
     configuration: &std::path::Path,
     request_file: &std::path::Path,
 ) -> Result<(ServiceHost, crate::application::services::ServiceRequest)> {
-    use super::local_file::read_local;
     let host = read_host(configuration)?;
     let request: crate::application::services::ServiceRequest =
-        serde_json::from_slice(&read_local(request_file, 16384, false)?)
+        serde_json::from_slice(&host.read_input(request_file, 16384)?)
             .map_err(|_| Error::InvalidInput("invalid service request".into()))?;
     request.validate()?;
     Ok((open_host(host, &[configuration, request_file])?, request))
@@ -874,7 +904,7 @@ mod provider_wait_tests {
 
     #[tokio::test]
     async fn provider_completion_is_not_rejected_by_database_admission() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = crate::infrastructure::permissions::private_test_directory()?;
         let database = ServiceStore::new(Store::open(&root.path().join("state.db"))?);
         let _slots = database
             .slots
@@ -895,7 +925,7 @@ mod provider_wait_tests {
 
     #[tokio::test]
     async fn provider_host_shares_capacity_between_musicbrainz_and_caa() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = crate::infrastructure::permissions::private_test_directory()?;
         let host = ServiceHost::new(
             Store::open(&root.path().join("state.db"))?,
             Default::default(),

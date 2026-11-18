@@ -7,7 +7,7 @@ mod check;
 #[test]
 fn worker_acquisition_and_scan_claims_are_independent_and_waiting_work_stays_idle() -> TestResult {
     use crate::infrastructure::production_worker::WorkerOperation;
-    let mut fixture = Fixture::album(AudioFormat::Flac, 1000, 1, true)?;
+    let mut fixture = Fixture::selected_album(AudioFormat::Flac, 1000, 1, true)?;
     let binding = "a".repeat(64);
     let request = fixture.store.enqueue_worker(
         WorkerOperation::Acquire {
@@ -59,6 +59,43 @@ fn worker_acquisition_and_scan_claims_are_independent_and_waiting_work_stays_idl
     Ok(())
 }
 
+fn host(fixture: &Fixture) -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let path = fixture._state.path().join("selected-host.json");
+    if !path.try_exists()? {
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "environment":"single_user", "database":fixture.database,
+                "listen":"127.0.0.1:8080", "origin":"http://127.0.0.1:8080",
+                "storage":fixture.storage.as_ref().ok_or("missing selected fixture storage")?,
+            }))?,
+        )?;
+    }
+    Ok(path)
+}
+
+fn host_at(
+    root: &Path,
+    database: &Path,
+) -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let path = root.join("selected-host.json");
+    if !path.try_exists()? {
+        let storage = crate::infrastructure::filesystem::StorageConfiguration::inspect_initial(
+            root,
+            &crate::domain::LibraryPath::parse("")?,
+        )?;
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "environment":"single_user", "database":database,
+                "listen":"127.0.0.1:8080", "origin":"http://127.0.0.1:8080",
+                "storage":storage,
+            }))?,
+        )?;
+    }
+    Ok(path)
+}
+
 fn credentials(path: &Path, body: &[u8]) -> TestResult {
     std::fs::write(path, body)?;
     #[cfg(unix)]
@@ -96,8 +133,11 @@ fn source_selection() -> serde_json::Value {
 #[test]
 fn worker_journals_an_explicit_complete_source_before_network_and_never_replaces_it() -> TestResult
 {
-    let fixture = Fixture::build(AudioFormat::Flac, 1000, 3, true, false)?;
-    let scratch = tempdir()?;
+    let fixture = Fixture::selected_build(AudioFormat::Flac, 1000, 3, true, false)?;
+    let scratch = fixture
+        ._scratch
+        .as_ref()
+        .ok_or("missing selected staging")?;
     let secret = fixture._state.path().join("credentials.json");
     let config = fixture._state.path().join("worker.json");
     credentials(
@@ -109,7 +149,7 @@ fn worker_journals_an_explicit_complete_source_before_network_and_never_replaces
     std::fs::write(&config, serde_json::to_vec(&body)?)?;
     let raw = Connection::open(&fixture.database)?;
     raw.execute("UPDATE jobs SET lease_until=0", [])?;
-    let worker = PreparedWorker::load(&config)?;
+    let worker = PreparedWorker::load(&config, &host(&fixture)?)?;
     let files = fixture
         .store
         .transfers(fixture.job, fixture.version, Page::new(0, 200)?)?;
@@ -130,12 +170,12 @@ fn worker_journals_an_explicit_complete_source_before_network_and_never_replaces
     raw.execute("UPDATE jobs SET lease_until=0", [])?;
     body["source"]["peer"] = json!("different-peer");
     std::fs::write(&config, serde_json::to_vec(&body)?)?;
-    assert!(PreparedWorker::load(&config).is_err());
+    assert!(PreparedWorker::load(&config, &host(&fixture)?).is_err());
     body.as_object_mut()
         .ok_or("config object")?
         .remove("source");
     std::fs::write(&config, serde_json::to_vec(&body)?)?;
-    let worker = PreparedWorker::load(&config)?;
+    let worker = PreparedWorker::load(&config, &host(&fixture)?)?;
     drop(worker);
     let events: i64 = raw.query_row(
         "SELECT count(*) FROM events WHERE event_type='acquisition_prepared'",
@@ -167,8 +207,11 @@ fn invalid_source_selection_leaves_queued_job_claim_and_staging_unchanged() -> T
         "peer",
         "unknown",
     ] {
-        let fixture = Fixture::build(AudioFormat::Flac, 1000, 3, true, false)?;
-        let scratch = tempdir()?;
+        let fixture = Fixture::selected_build(AudioFormat::Flac, 1000, 3, true, false)?;
+        let scratch = fixture
+            ._scratch
+            .as_ref()
+            .ok_or("missing selected staging")?;
         let secret = fixture._state.path().join("credentials.json");
         let config = fixture._state.path().join("worker.json");
         credentials(
@@ -202,7 +245,10 @@ fn invalid_source_selection_leaves_queued_job_claim_and_staging_unchanged() -> T
         raw.execute("UPDATE jobs SET lease_until=0", [])?;
         let generation: i64 =
             raw.query_row("SELECT claim_generation FROM jobs", [], |row| row.get(0))?;
-        assert!(PreparedWorker::load(&config).is_err(), "fault: {fault}");
+        assert!(
+            PreparedWorker::load(&config, &host(&fixture)?).is_err(),
+            "fault: {fault}"
+        );
         assert_eq!(
             fixture.store.job_state(fixture.job)?.as_deref(),
             Some("queued")
@@ -225,8 +271,11 @@ fn invalid_source_selection_leaves_queued_job_claim_and_staging_unchanged() -> T
 
 #[test]
 fn missing_worker_cover_pauses_before_claim_source_or_staging_effects() -> TestResult {
-    let fixture = Fixture::build(AudioFormat::Flac, 1000, 3, false, false)?;
-    let scratch = tempdir()?;
+    let fixture = Fixture::selected_build(AudioFormat::Flac, 1000, 3, false, false)?;
+    let scratch = fixture
+        ._scratch
+        .as_ref()
+        .ok_or("missing selected staging")?;
     let secret = fixture._state.path().join("credentials.json");
     let config = fixture._state.path().join("worker.json");
     credentials(
@@ -238,7 +287,7 @@ fn missing_worker_cover_pauses_before_claim_source_or_staging_effects() -> TestR
     std::fs::write(&config, serde_json::to_vec(&body)?)?;
     let raw = Connection::open(&fixture.database)?;
     raw.execute("UPDATE jobs SET lease_until=0", [])?;
-    let error = match PreparedWorker::load(&config) {
+    let error = match PreparedWorker::load(&config, &host(&fixture)?) {
         Err(error) => error,
         Ok(_) => return Err("missing cover must pause".into()),
     };
@@ -267,8 +316,11 @@ fn missing_worker_cover_pauses_before_claim_source_or_staging_effects() -> TestR
 
 #[test]
 fn source_event_failure_rolls_back_all_files_and_can_resume_before_network() -> TestResult {
-    let fixture = Fixture::build(AudioFormat::Flac, 1000, 3, true, false)?;
-    let scratch = tempdir()?;
+    let fixture = Fixture::selected_build(AudioFormat::Flac, 1000, 3, true, false)?;
+    let scratch = fixture
+        ._scratch
+        .as_ref()
+        .ok_or("missing selected staging")?;
     let secret = fixture._state.path().join("credentials.json");
     let config = fixture._state.path().join("worker.json");
     credentials(
@@ -284,7 +336,7 @@ fn source_event_failure_rolls_back_all_files_and_can_resume_before_network() -> 
          CREATE TRIGGER fail_selection BEFORE INSERT ON events
          WHEN NEW.event_type='acquisition_prepared' BEGIN SELECT RAISE(ABORT,'injected'); END;",
     )?;
-    assert!(PreparedWorker::load(&config).is_err());
+    assert!(PreparedWorker::load(&config, &host(&fixture)?).is_err());
     assert_eq!(
         fixture.store.job_state(fixture.job)?.as_deref(),
         Some("searching")
@@ -296,7 +348,7 @@ fn source_event_failure_rolls_back_all_files_and_can_resume_before_network() -> 
             .is_empty()
     );
     raw.execute_batch("DROP TRIGGER fail_selection; UPDATE jobs SET lease_until=0;")?;
-    let worker = PreparedWorker::load(&config)?;
+    let worker = PreparedWorker::load(&config, &host(&fixture)?)?;
     drop(worker);
     assert_eq!(
         fixture
@@ -310,8 +362,11 @@ fn source_event_failure_rolls_back_all_files_and_can_resume_before_network() -> 
 
 #[test]
 fn worker_loads_an_approved_selected_album_without_opening_any_network_socket() -> TestResult {
-    let fixture = Fixture::album(AudioFormat::Flac, 1000, 3, true)?;
-    let scratch = tempdir()?;
+    let fixture = Fixture::selected_album(AudioFormat::Flac, 1000, 3, true)?;
+    let scratch = fixture
+        ._scratch
+        .as_ref()
+        .ok_or("missing selected staging")?;
     let secret = fixture._state.path().join("credentials.json");
     let config = fixture._state.path().join("worker.json");
     credentials(
@@ -324,7 +379,7 @@ fn worker_loads_an_approved_selected_album_without_opening_any_network_socket() 
     )?;
     let raw = Connection::open(&fixture.database)?;
     raw.execute("UPDATE jobs SET lease_until=0", [])?;
-    let worker = PreparedWorker::load(&config)?;
+    let worker = PreparedWorker::load(&config, &host(&fixture)?)?;
     let files = fixture
         .store
         .transfers(fixture.job, fixture.version, Page::new(0, 200)?)?;
@@ -339,7 +394,7 @@ fn worker_loads_an_approved_selected_album_without_opening_any_network_socket() 
         |row| row.get(0),
     )?;
     assert!(live);
-    assert!(PreparedWorker::load(&config).is_err());
+    assert!(PreparedWorker::load(&config, &host(&fixture)?).is_err());
     drop(worker);
     Ok(())
 }
@@ -347,8 +402,11 @@ fn worker_loads_an_approved_selected_album_without_opening_any_network_socket() 
 #[test]
 fn worker_configuration_rejects_missing_acknowledgement_private_servers_and_bad_ids() -> TestResult
 {
-    let fixture = Fixture::album(AudioFormat::Flac, 1000, 1, true)?;
-    let scratch = tempdir()?;
+    let fixture = Fixture::selected_album(AudioFormat::Flac, 1000, 1, true)?;
+    let scratch = fixture
+        ._scratch
+        .as_ref()
+        .ok_or("missing selected staging")?;
     let secret = fixture._state.path().join("credentials.json");
     let config = fixture._state.path().join("worker.json");
     credentials(
@@ -374,7 +432,7 @@ fn worker_configuration_rejects_missing_acknowledgement_private_servers_and_bad_
         let mut changed = original.clone();
         changed[field] = value;
         std::fs::write(&config, serde_json::to_vec(&changed)?)?;
-        let error = PreparedWorker::load(&config)
+        let error = PreparedWorker::load(&config, &host(&fixture)?)
             .err()
             .ok_or("invalid worker config accepted")?;
         assert!(
@@ -396,8 +454,11 @@ fn worker_rejects_credentials_in_media_roots_or_unreadable_private_credentials()
         "oversize",
         "unapproved",
     ] {
-        let fixture = Fixture::album(AudioFormat::Flac, 1000, 1, fault != "unapproved")?;
-        let scratch = tempdir()?;
+        let fixture = Fixture::selected_album(AudioFormat::Flac, 1000, 1, fault != "unapproved")?;
+        let scratch = fixture
+            ._scratch
+            .as_ref()
+            .ok_or("missing selected staging")?;
         let secret = if fault == "media" {
             fixture._library.path().join("credentials.json")
         } else {
@@ -417,7 +478,7 @@ fn worker_rejects_credentials_in_media_roots_or_unreadable_private_credentials()
             serde_json::to_vec(&configuration(&fixture, scratch.path(), &secret))?,
         )?;
         Connection::open(&fixture.database)?.execute("UPDATE jobs SET lease_until=0", [])?;
-        let error = PreparedWorker::load(&config)
+        let error = PreparedWorker::load(&config, &host(&fixture)?)
             .err()
             .ok_or("invalid worker setup accepted")?;
         assert!(!error.to_string().contains("fixture-secret"));
@@ -432,8 +493,11 @@ fn worker_rejects_credentials_in_media_roots_or_unreadable_private_credentials()
 #[test]
 fn worker_loads_uncertainty_for_reconciliation_and_sealed_input_needs_no_login() -> TestResult {
     let source = media::flac();
-    let mut fixture = Fixture::album(AudioFormat::Flac, source.len() as i64, 1, true)?;
-    let scratch = tempdir()?;
+    let mut fixture = Fixture::selected_album(AudioFormat::Flac, source.len() as i64, 1, true)?;
+    let scratch = fixture
+        ._scratch
+        .as_ref()
+        .ok_or("missing selected staging")?;
     let secret = fixture._state.path().join("credentials.json");
     let config = fixture._state.path().join("worker.json");
     credentials(
@@ -456,7 +520,7 @@ fn worker_loads_uncertainty_for_reconciliation_and_sealed_input_needs_no_login()
     staging.receive(&transfer, &mut std::io::Cursor::new(source))?;
     drop(staging);
     Connection::open(&fixture.database)?.execute("UPDATE jobs SET lease_until=0", [])?;
-    let worker = PreparedWorker::load(&config)?;
+    let worker = PreparedWorker::load(&config, &host(&fixture)?)?;
     assert_eq!(
         fixture
             .store
@@ -505,7 +569,7 @@ fn worker_loads_uncertainty_for_reconciliation_and_sealed_input_needs_no_login()
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     assert!(matches!(
         crate::infrastructure::worker::publish_worker(
-            &fixture.database,
+            &fixture.store.source(),
             scratch.path(),
             fixture.job,
             fixture.version,
@@ -599,7 +663,7 @@ fn worker_loads_uncertainty_for_reconciliation_and_sealed_input_needs_no_login()
     fixture.store.release_job_claim(&publication_claim)?;
     stop.store(false, std::sync::atomic::Ordering::Release);
     let published = crate::infrastructure::worker::publish_worker(
-        &fixture.database,
+        &fixture.store.source(),
         scratch.path(),
         fixture.job,
         fixture.version,
@@ -619,8 +683,11 @@ fn worker_loads_uncertainty_for_reconciliation_and_sealed_input_needs_no_login()
 #[test]
 fn worker_account_ownership_excludes_search_and_folder_commands_until_drop() -> TestResult {
     use crate::infrastructure::worker::{PreparedFolder, PreparedSearch};
-    let fixture = Fixture::album(AudioFormat::Flac, 1000, 1, true)?;
-    let scratch = tempdir()?;
+    let fixture = Fixture::selected_album(AudioFormat::Flac, 1000, 1, true)?;
+    let scratch = fixture
+        ._scratch
+        .as_ref()
+        .ok_or("missing selected staging")?;
     let secret = fixture._state.path().join("credentials.json");
     let config = fixture._state.path().join("worker.json");
     credentials(
@@ -632,7 +699,7 @@ fn worker_account_ownership_excludes_search_and_folder_commands_until_drop() -> 
         serde_json::to_vec(&configuration(&fixture, scratch.path(), &secret))?,
     )?;
     Connection::open(&fixture.database)?.execute("UPDATE jobs SET lease_until=0", [])?;
-    let worker = PreparedWorker::load(&config)?;
+    let worker = PreparedWorker::load(&config, &host(&fixture)?)?;
     let search = fixture._state.path().join("search.json");
     let folder = fixture._state.path().join("folder.json");
     let mut body = json!({
@@ -642,19 +709,28 @@ fn worker_account_ownership_excludes_search_and_folder_commands_until_drop() -> 
     std::fs::write(&search, serde_json::to_vec(&body)?)?;
     body["folder"] = json!({"peer":"fixture-peer","remote_folder":"Peer\\Album","format":"flac"});
     std::fs::write(&folder, serde_json::to_vec(&body)?)?;
-    assert!(matches!(PreparedSearch::load(&search), Err(Error::Busy(_))));
-    assert!(matches!(PreparedFolder::load(&folder), Err(Error::Busy(_))));
+    assert!(matches!(
+        PreparedSearch::load_with_host(&search, &host(&fixture)?),
+        Err(Error::Busy(_))
+    ));
+    assert!(matches!(
+        PreparedFolder::load_with_host(&folder, &host(&fixture)?),
+        Err(Error::Busy(_))
+    ));
     drop(worker);
-    drop(PreparedSearch::load(&search)?);
-    drop(PreparedFolder::load(&folder)?);
+    drop(PreparedSearch::load_with_host(&search, &host(&fixture)?)?);
+    drop(PreparedFolder::load_with_host(&folder, &host(&fixture)?)?);
     Ok(())
 }
 
 #[test]
 fn worker_reconnect_attempts_are_bounded_and_terminal_login_errors_are_not_retried() -> TestResult {
     for transient in [false, true] {
-        let fixture = Fixture::album(AudioFormat::Flac, 1000, 1, true)?;
-        let scratch = tempdir()?;
+        let fixture = Fixture::selected_album(AudioFormat::Flac, 1000, 1, true)?;
+        let scratch = fixture
+            ._scratch
+            .as_ref()
+            .ok_or("missing selected staging")?;
         let secret = fixture._state.path().join("credentials.json");
         let config = fixture._state.path().join("worker.json");
         credentials(
@@ -666,7 +742,7 @@ fn worker_reconnect_attempts_are_bounded_and_terminal_login_errors_are_not_retri
             serde_json::to_vec(&configuration(&fixture, scratch.path(), &secret))?,
         )?;
         Connection::open(&fixture.database)?.execute("UPDATE jobs SET lease_until=0", [])?;
-        let worker = PreparedWorker::load(&config)?;
+        let worker = PreparedWorker::load(&config, &host(&fixture)?)?;
         let mut attempts = 0;
         let error = worker
             .run_with_test_login(&mut |_, username, _| {

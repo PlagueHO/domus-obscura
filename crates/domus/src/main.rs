@@ -1,71 +1,69 @@
-use domus::application::{add_location, scan_location};
-use domus::domain::{LibraryPath, OutputSettings, Page};
-use domus::infrastructure::store::{PlanRequest, Store};
+use domus::domain::OutputSettings;
+use domus::infrastructure::store::PlanRequest;
 use domus::{Error, Result};
-use std::io::{Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
+
+mod state_cli;
 
 const USAGE: &str = "Usage:
   domus version
   domus contracts <output-directory>
-  domus init <local-database>
+  domus init --storage-root <absolute-application-storage>
   domus api-preview <absolute-configuration-file>
   domus serve [absolute-configuration-file]
+  domus serve --storage-root <absolute-application-storage>
   domus systemd-service <api|worker> <absolute-configuration-file>
   domus windows-service <api|worker> <absolute-configuration-file>
   domus windows-service-policy <api|worker> <enable|disable>
+  domus configuration-check <absolute-configuration-file>
   domus certificate-status <absolute-configuration-file>
   domus certificate-bootstrap <absolute-configuration-file>
   domus certificate-recover <absolute-configuration-file> <resume|pending|bindings|cleanup|cleanup-owned|archive|generation|restart>
   domus certificate-recover <absolute-configuration-file> <order|write|receipt> <verified-evidence>
   domus worker <absolute-configuration-file>
-  domus worker-once <absolute-configuration-file>
-  domus worker-check <absolute-configuration-file>
-  domus publish-new-once <absolute-configuration-file>
-  domus publication-status <local-database> <job-id> <plan-version>
-  domus source-search <absolute-configuration-file>
-  domus source-folder <absolute-configuration-file>
+  domus worker-once --host <absolute-host-configuration-file> <absolute-configuration-file>
+  domus worker-check --host <absolute-host-configuration-file> <absolute-configuration-file>
+  domus publish-new-once --host <absolute-host-configuration-file> <absolute-configuration-file>
+  domus publication-status --host <absolute-host-configuration-file> <job-id> <plan-version>
   domus source-search --host <absolute-host-configuration-file> <absolute-configuration-file>
   domus source-folder --host <absolute-host-configuration-file> <absolute-configuration-file>
-  domus source-candidate-prepare <local-database> <job-id> <plan-version> <absolute-listing-json>
-  domus source-candidate <local-database> <candidate-id>
-  domus source-candidate-approve <local-database> <candidate-id> <plan-version> <review-sha256> --reviewed-exact-edition-and-permitted-download
+  domus source-candidate-prepare --host <absolute-host-configuration-file> <job-id> <plan-version> <absolute-listing-json>
+  domus source-candidate --host <absolute-host-configuration-file> <candidate-id>
+  domus source-candidate-approve --host <absolute-host-configuration-file> <candidate-id> <plan-version> <review-sha256> --reviewed-exact-edition-and-permitted-download
   domus service-call <absolute-host-configuration-file> <absolute-request-file>
   domus mcp-stdio <absolute-host-configuration-file>
-  domus catalog-release <local-database> <release-id>
-  domus catalog-plan-prepare <local-database> <release-id> <request-json>
   domus catalog-release --host <absolute-host-configuration-file> <release-id>
   domus catalog-plan-prepare --host <absolute-host-configuration-file> <release-id> <absolute-request-json>
-  domus settings <local-database>
+  domus settings --host <absolute-host-configuration-file>
   domus settings-default
-  domus staging-init <local-database> <absolute-root>
-  domus settings-save <local-database> <expected-version-or-0> <settings-json>
-  domus job-create <local-database>
-  domus job-history <local-database> <job-id> <plan-version> <after-id> <limit>
-  domus job-control <local-database> <job-id> <plan-version> <pause|cancel>
-  domus job-control-status <local-database> <control-id>
-  domus job-control-continue <local-database> <control-id> <plan-version>
-  domus plan-prepare <local-database> <request-json>
-  domus plan <local-database> <job-id> <plan-version>
-  domus plan-approve <local-database> <job-id> <plan-version>
-  domus artwork-local-prepare <local-database> <job-id> <plan-version> <absolute-image-file> <background-json> --permitted-local-cover
-  domus artwork-preview <local-database> <job-id> <plan-version> <candidate-id>
-  domus artwork-caa-prepare <local-database> <job-id> <plan-version> <image-id> <background-json> --permitted-caa-cover
+  domus staging-init --host <absolute-host-configuration-file> <absolute-root>
+  domus settings-save --host <absolute-host-configuration-file> <expected-version-or-0> <settings-json>
+  domus job-create --host <absolute-host-configuration-file>
+  domus job-history --host <absolute-host-configuration-file> <job-id> <plan-version> <after-id> <limit>
+  domus job-control --host <absolute-host-configuration-file> <job-id> <plan-version> <pause|cancel>
+  domus job-control-status --host <absolute-host-configuration-file> <control-id>
+  domus job-control-continue --host <absolute-host-configuration-file> <control-id> <plan-version>
+  domus plan-prepare --host <absolute-host-configuration-file> <request-json>
+  domus plan --host <absolute-host-configuration-file> <job-id> <plan-version>
+  domus plan-approve --host <absolute-host-configuration-file> <job-id> <plan-version>
+  domus artwork-local-prepare --host <absolute-host-configuration-file> <job-id> <plan-version> <absolute-image-file> <background-json> --permitted-local-cover
+  domus artwork-preview --host <absolute-host-configuration-file> <job-id> <plan-version> <candidate-id>
   domus artwork-caa-prepare --host <absolute-host-configuration-file> <job-id> <plan-version> <image-id> <background-json> --permitted-caa-cover
-  domus artwork-evidence <local-database> <job-id> <plan-version> <candidate-id>
-  domus artwork-check <local-database> <job-id> <plan-version>
-  domus artwork-question <local-database> <question-id>
-  domus artwork-resume <local-database> <question-id> <plan-version>
-  domus question-answer <local-database> <question-id> <plan-version> <offered-choice>
-  domus artwork-approve <local-database> <job-id> <plan-version> <candidate-id> <preview-sha256>
-  domus location-add <local-database> <absolute-root> <main|backup>
-  domus location <local-database> <location-id>
+  domus artwork-evidence --host <absolute-host-configuration-file> <job-id> <plan-version> <candidate-id>
+  domus artwork-check --host <absolute-host-configuration-file> <job-id> <plan-version>
+  domus artwork-question --host <absolute-host-configuration-file> <question-id>
+  domus artwork-resume --host <absolute-host-configuration-file> <question-id> <plan-version>
+  domus question-answer --host <absolute-host-configuration-file> <question-id> <plan-version> <offered-choice>
+  domus artwork-approve --host <absolute-host-configuration-file> <job-id> <plan-version> <candidate-id> <preview-sha256>
+  domus location-add --host <absolute-host-configuration-file> <absolute-root> <main|backup>
+  domus location --host <absolute-host-configuration-file> <location-id>
   domus root-identity <absolute-root>
-  domus location-bind <local-database> <location-id> <expected-native-identity>
-  domus staging-bind <local-database> <absolute-root> <expected-native-identity>
-  domus scan <local-database> <location-id>
-  domus browse <local-database> <location-id> <relative-folder> <after-id> <limit>
+  domus storage-root-inspect <absolute-provider-boundary> <provider-scope> <root-id> <binding-revision> <application|state|cache|staging|certificate|media> <library-relative-path>
+  domus location-bind --host <absolute-host-configuration-file> <location-id> <expected-native-identity>
+  domus staging-bind --host <absolute-host-configuration-file> <absolute-root> <expected-native-identity>
+  domus scan --host <absolute-host-configuration-file> <location-id>
+  domus browse --host <absolute-host-configuration-file> <location-id> <relative-folder> <after-id> <limit>
 
 serve without configuration uses single-user anonymous HTTP on loopback.
 serve with configuration and api-preview never downgrade failed secure configuration.
@@ -75,7 +73,10 @@ It requires separate Soulseek credentials and explicit plaintext-login acknowled
 source-search uses the same login acknowledgement for metadata-only outgoing peer search.
 source-folder reads one selected peer folder and assesses names; it never approves or downloads.
 catalog-release loads the exact MusicBrainz release through the durable provider budget.
---host selects existing configured state and an already-bound cache without migration or fallback.
+--host requires the main host configuration and its external storage selection.
+State commands never accept a bare database path or migrate existing state.
+Provider commands use an already-bound selected cache without fallback.
+init creates fresh private storage without loading services or opening a listener.
 service-call runs catalog discovery, metadata, artwork listing or image caching through configured services.
 It cannot approve plans, download audio or publish media.
 publish-new-once explicitly copies verified staging into new primary/backup album folders.
@@ -84,7 +85,22 @@ No command enables media sharing or media serving.
 The database must be outside every configured media root.";
 
 fn run(args: &[String]) -> Result<()> {
+    if state_cli::run(args)? {
+        return Ok(());
+    }
     match args {
+        [command, configuration] if command == "configuration-check" => {
+            let source = domus::infrastructure::server::configuration::ConfigurationService::open(
+                Path::new(configuration),
+            )?;
+            let result = source.validate_saved()?;
+            println!("{}", serde_json::to_string(&result)?);
+            if !result.errors.is_empty() {
+                return Err(Error::InvalidInput(
+                    "host configuration validation failed".into(),
+                ));
+            }
+        }
         #[cfg(target_os = "linux")]
         [command, role, configuration] if command == "systemd-service" => {
             domus::infrastructure::systemd::run(role, Path::new(configuration))?;
@@ -136,12 +152,6 @@ fn run(args: &[String]) -> Result<()> {
         }
         [command] if command == "settings-default" => {
             println!("{}", serde_json::to_string(&OutputSettings::default())?);
-        }
-        [command, database, root] if command == "staging-init" => {
-            let mut store = Store::open_current_existing(Path::new(database))?;
-            let _staging =
-                domus::infrastructure::staging::StagingRoot::open(&mut store, Path::new(root))?;
-            println!("Private staging initialized and native identity bound.");
         }
         [command] if command == "version" => {
             println!("Domus Obscura {}", env!("CARGO_PKG_VERSION"))
@@ -230,14 +240,6 @@ fn run(args: &[String]) -> Result<()> {
                 (
                     "ConfigurationSectionCommand.ts",
                     domus::infrastructure::server::configuration::ConfigurationSectionCommand::export_to_string(&config),
-                ),
-                (
-                    "ConfigurationReloadCommand.ts",
-                    domus::infrastructure::server::configuration::ConfigurationReloadCommand::export_to_string(&config),
-                ),
-                (
-                    "ConfigurationReloadState.ts",
-                    domus::infrastructure::server::configuration::ConfigurationReloadState::export_to_string(&config),
                 ),
                 (
                     "ServiceConfiguration.ts",
@@ -631,12 +633,27 @@ fn run(args: &[String]) -> Result<()> {
                 }
             }
         }
-        [command, database] if command == "init" => {
-            Store::open(Path::new(database))?;
-            println!("Database initialized.");
+        [command, flag, root] if command == "init" && flag == "--storage-root" => {
+            let configuration = domus::infrastructure::server::PreparedServer::initialize_local_at(
+                Path::new(root),
+            )?;
+            println!(
+                "Fresh application storage initialized: {}",
+                configuration.display()
+            );
         }
         [command] if command == "serve" => {
             let prepared = domus::infrastructure::server::PreparedServer::local()?;
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .max_blocking_threads(4)
+                .enable_all()
+                .build()?
+                .block_on(prepared.run())?;
+        }
+        [command, option, root] if command == "serve" && option == "--storage-root" => {
+            let prepared =
+                domus::infrastructure::server::PreparedServer::local_at(Path::new(root))?;
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .max_blocking_threads(4)
@@ -654,9 +671,11 @@ fn run(args: &[String]) -> Result<()> {
                 .build()?
                 .block_on(prepared.run())?;
         }
-        [command, configuration] if command == "worker-once" => {
-            let worker =
-                domus::infrastructure::worker::PreparedWorker::load(Path::new(configuration))?;
+        [command, flag, host, configuration] if command == "worker-once" && flag == "--host" => {
+            let worker = domus::infrastructure::worker::PreparedWorker::load(
+                Path::new(configuration),
+                Path::new(host),
+            )?;
             let outcome = worker.run()?;
             println!("{}", serde_json::to_string(&outcome)?);
         }
@@ -669,24 +688,21 @@ fn run(args: &[String]) -> Result<()> {
                 .build()?
                 .block_on(worker.run())?;
         }
-        [command, configuration] if command == "worker-check" => {
-            let report =
-                domus::infrastructure::worker::PreparedWorker::check(Path::new(configuration))?;
+        [command, flag, host, configuration] if command == "worker-check" && flag == "--host" => {
+            let report = domus::infrastructure::worker::PreparedWorker::check(
+                Path::new(configuration),
+                Path::new(host),
+            )?;
             println!("{}", serde_json::to_string(&report)?);
         }
-        [command, configuration] if command == "publish-new-once" => {
-            let outcome =
-                domus::infrastructure::worker::publish_new_once(Path::new(configuration))?;
+        [command, flag, host, configuration]
+            if command == "publish-new-once" && flag == "--host" =>
+        {
+            let outcome = domus::infrastructure::worker::publish_new_once(
+                Path::new(configuration),
+                Path::new(host),
+            )?;
             println!("{}", serde_json::to_string(&outcome)?);
-        }
-        [command, database, job, version] if command == "publication-status" => {
-            let store = Store::open_read_snapshot(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(
-                    &store.publication_destinations(number(job)?, number(version)?)?
-                )?
-            );
         }
         [command, flag, host, configuration] if command == "source-search" && flag == "--host" => {
             let search = domus::infrastructure::worker::PreparedSearch::load_with_host(
@@ -702,16 +718,6 @@ fn run(args: &[String]) -> Result<()> {
             )?;
             println!("{}", serde_json::to_string(&folder.run()?)?);
         }
-        [command, configuration] if command == "source-search" => {
-            let search =
-                domus::infrastructure::worker::PreparedSearch::load(Path::new(configuration))?;
-            println!("{}", serde_json::to_string(&search.run()?)?);
-        }
-        [command, configuration] if command == "source-folder" => {
-            let folder =
-                domus::infrastructure::worker::PreparedFolder::load(Path::new(configuration))?;
-            println!("{}", serde_json::to_string(&folder.run()?)?);
-        }
         [command, flag, configuration, release]
             if command == "catalog-release" && flag == "--host" =>
         {
@@ -720,20 +726,6 @@ fn run(args: &[String]) -> Result<()> {
             let query = CatalogQuery::release(release)?;
             let (store, services) = load_cli_store(Path::new(configuration), &[])?;
             let host = ServiceHost::new(store, services)?;
-            let result = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(host.musicbrainz.query(query, CatalogQuery::parse_release))?;
-            println!("{}", serde_json::to_string(&result)?);
-        }
-        [command, database, release] if command == "catalog-release" => {
-            use domus::infrastructure::catalog::CatalogQuery;
-            use domus::infrastructure::services::ServiceHost;
-            let query = CatalogQuery::release(release)?;
-            let host = ServiceHost::new(
-                Store::open_existing(Path::new(database))?,
-                Default::default(),
-            )?;
             let result = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
@@ -753,39 +745,6 @@ fn run(args: &[String]) -> Result<()> {
         }
         [command, configuration] if command == "mcp-stdio" => {
             domus::infrastructure::mcp::run_stdio(Path::new(configuration))?;
-        }
-        [command, database, job, version, listing] if command == "source-candidate-prepare" => {
-            let candidate = domus::infrastructure::worker::prepare_source_candidate_file(
-                Path::new(database),
-                number(job)?,
-                number(version)?,
-                Path::new(listing),
-            )?;
-            println!("{}", serde_json::to_string(&candidate)?);
-        }
-        [command, database, id] if command == "source-candidate" => {
-            let store =
-                domus::infrastructure::store::Store::open_read_snapshot(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.source_candidate(number(id)?)?)?
-            );
-        }
-        [command, database, id, version, hash, acknowledgement]
-            if command == "source-candidate-approve"
-                && acknowledgement == "--reviewed-exact-edition-and-permitted-download" =>
-        {
-            let mut store =
-                domus::infrastructure::store::Store::open_current_existing(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.approve_source_candidate(
-                    number(id)?,
-                    number(version)?,
-                    hash,
-                    true
-                )?)?
-            );
         }
         [
             command,
@@ -815,171 +774,6 @@ fn run(args: &[String]) -> Result<()> {
                 store.prepare_cached_caa_artwork_or_ask(job, version, image, background, true)?;
             println!("{}", serde_json::to_string(&candidate)?);
         }
-        [
-            command,
-            database,
-            job,
-            version,
-            image,
-            background,
-            acknowledgement,
-        ] if command == "artwork-local-prepare" && acknowledgement == "--permitted-local-cover" => {
-            let background: Option<[u8; 3]> = serde_json::from_str(background).map_err(|_| {
-                Error::InvalidInput("background must be null or an RGB byte array".into())
-            })?;
-            let mut store = Store::open_existing(Path::new(database))?;
-            let candidate = store.prepare_local_artwork_or_ask(
-                number(job)?,
-                number(version)?,
-                Path::new(image),
-                background,
-                true,
-            )?;
-            println!("{}", serde_json::to_string(&candidate)?);
-        }
-        [
-            command,
-            database,
-            job,
-            version,
-            image,
-            background,
-            acknowledgement,
-        ] if command == "artwork-caa-prepare" && acknowledgement == "--permitted-caa-cover" => {
-            let background: Option<[u8; 3]> = serde_json::from_str(background).map_err(|_| {
-                Error::InvalidInput("background must be null or an RGB byte array".into())
-            })?;
-            let mut store = Store::open_existing(Path::new(database))?;
-            let candidate = store.prepare_cached_caa_artwork_or_ask(
-                number(job)?,
-                number(version)?,
-                image,
-                background,
-                true,
-            )?;
-            println!("{}", serde_json::to_string(&candidate)?);
-        }
-        [command, database, job, version] if command == "artwork-check" => {
-            let mut store = Store::open_existing(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.check_artwork(number(job)?, number(version)?)?)?
-            );
-        }
-        [command, database, id] if command == "artwork-question" => {
-            let store = Store::open_read_snapshot(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.artwork_decision(number(id)?)?)?
-            );
-        }
-        [command, database, id, version] if command == "artwork-resume" => {
-            let mut store = Store::open_existing(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.resume_artwork(number(id)?, number(version)?)?)?
-            );
-        }
-        [command, database, job, version, action] if command == "job-control" => {
-            let action = match action.as_str() {
-                "pause" => domus::infrastructure::store::JobControlAction::Pause,
-                "cancel" => domus::infrastructure::store::JobControlAction::Cancel,
-                _ => {
-                    return Err(domus::Error::InvalidInput(
-                        "job control must be pause or cancel".into(),
-                    ));
-                }
-            };
-            let job = number(job)?;
-            let version = number(version)?;
-            let mut store = Store::open_current_existing(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.request_job_control(job, version, action)?)?
-            );
-        }
-        [command, database, id] if command == "job-control-status" => {
-            let store = Store::open_read_snapshot(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.job_control(number(id)?)?)?
-            );
-        }
-        [command, database, job, version, after, limit] if command == "job-history" => {
-            let job = number(job)?;
-            let version = number(version)?;
-            let page = Page::new(number(after)?, number(limit)?)?;
-            let store = Store::open_read_snapshot(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.plan_events(job, version, page)?)?
-            );
-        }
-        [command, database, id, version] if command == "job-control-continue" => {
-            let id = number(id)?;
-            let version = number(version)?;
-            let mut store = Store::open_current_existing(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.continue_job_control(id, version)?)?
-            );
-        }
-        [command, database, id, version, choice] if command == "question-answer" => {
-            let mut store = Store::open_existing(Path::new(database))?;
-            store.answer(number(id)?, number(version)?, choice)?;
-        }
-        [command, database, job, version, candidate] if command == "artwork-evidence" => {
-            let store = Store::open_read_snapshot(Path::new(database))?;
-            // A missing candidate is an error, not a legacy-evidence result.
-            store.artwork_jpeg(number(job)?, number(version)?, number(candidate)?)?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.artwork_caa_evidence(
-                    number(job)?,
-                    number(version)?,
-                    number(candidate)?,
-                )?)?
-            );
-        }
-        [command, database, job, version, candidate, hash] if command == "artwork-approve" => {
-            let mut store = Store::open_existing(Path::new(database))?;
-            store.approve_artwork(number(job)?, number(version)?, number(candidate)?, hash)?;
-            println!("Artwork approved.");
-        }
-        [command, database, job, version, candidate] if command == "artwork-preview" => {
-            let store = Store::open_read_snapshot(Path::new(database))?;
-            let cover = store.artwork_jpeg(number(job)?, number(version)?, number(candidate)?)?;
-            let mut output = std::io::stdout().lock();
-            output.write_all(cover.bytes())?;
-            output.flush()?;
-        }
-        [command, database] if command == "settings" => {
-            let store = Store::open_existing(Path::new(database))?;
-            println!("{}", serde_json::to_string(&store.settings()?)?);
-        }
-        [command, database, expected, file] if command == "settings-save" => {
-            let expected: i64 = number(expected)?;
-            if expected < 0 {
-                return Err(Error::InvalidInput(
-                    "settings version must be nonnegative".into(),
-                ));
-            }
-            let settings: OutputSettings = json_file(file, 16384)?;
-            let mut store = Store::open_existing(Path::new(database))?;
-            println!(
-                "{}",
-                store.save_settings((expected != 0).then_some(expected), &settings)?
-            );
-        }
-        [command, database] if command == "job-create" => {
-            let mut store = Store::open_existing(Path::new(database))?;
-            println!("{}", store.enqueue(1)?);
-        }
-        [command, database, file] if command == "plan-prepare" => {
-            let request: PlanRequest = json_file(file, 2 * 1024 * 1024)?;
-            let mut store = Store::open_existing(Path::new(database))?;
-            println!("{}", serde_json::to_string(&store.prepare_plan(request)?)?);
-        }
         [command, flag, configuration, release, file]
             if command == "catalog-plan-prepare" && flag == "--host" =>
         {
@@ -990,32 +784,21 @@ fn run(args: &[String]) -> Result<()> {
             )?;
             println!("{}", serde_json::to_string(&plan)?);
         }
-        [command, database, release, file] if command == "catalog-plan-prepare" => {
-            use domus::application::catalog::{CatalogPlanRequest, prepare_cached_catalog_plan};
-            let request: CatalogPlanRequest = json_file(file, 16384)?;
-            let mut store = Store::open_existing(Path::new(database))?;
-            let plan = prepare_cached_catalog_plan(&mut store, release, request)?;
-            println!("{}", serde_json::to_string(&plan)?);
-        }
-        [command, database, job, version] if command == "plan" => {
-            let store = Store::open_existing(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.plan(number(job)?, number(version)?)?)?
-            );
-        }
-        [command, database, job, version] if command == "plan-approve" => {
-            let mut store = Store::open_existing(Path::new(database))?;
-            store.approve_plan(number(job)?, number(version)?)?;
-            println!("Plan approved. No transfer or file operation started.");
-        }
-        [command, database, root, kind] if command == "location-add" => {
-            let store = Store::open_existing(Path::new(database))?;
-            println!("{}", add_location(&store, Path::new(root), kind)?);
-        }
-        [command, database, location] if command == "scan" => {
-            let mut store = Store::open_existing(Path::new(database))?;
-            println!("{}", scan_location(&mut store, number(location)?)?);
+        [command, boundary, scope, root_id, revision, role, relative]
+            if command == "storage-root-inspect" =>
+        {
+            use domus::infrastructure::filesystem::{StorageRole, StorageRoot};
+            let role: StorageRole = serde_json::from_value(serde_json::Value::String(role.clone()))
+                .map_err(|_| Error::InvalidInput("invalid storage role".into()))?;
+            let root = StorageRoot::inspect(
+                root_id,
+                number(revision)?,
+                role,
+                scope,
+                Path::new(boundary),
+                &domus::domain::LibraryPath::parse(relative)?,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&root)?);
         }
         [command, root] if command == "root-identity" => {
             println!(
@@ -1023,51 +806,18 @@ fn run(args: &[String]) -> Result<()> {
                 domus::infrastructure::filesystem::native_root_identity(Path::new(root))?
             );
         }
-        [command, database, location, expected] if command == "location-bind" => {
-            let store = Store::open_existing(Path::new(database))?;
-            store.bind_location(number(location)?, expected)?;
-            println!("Native library root identity bound. No media operation started.");
-        }
-        [command, database, root, expected] if command == "staging-bind" => {
-            let store = Store::open_existing(Path::new(database))?;
-            store.bind_staging_root(Path::new(root), expected)?;
-            println!("Native staging root identity bound. No file operation started.");
-        }
-        [command, database, location] if command == "location" => {
-            let store = Store::open_existing(Path::new(database))?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.location(number(location)?)?)?
-            );
-        }
-        [command, database, location, folder, after, limit] if command == "browse" => {
-            let store = Store::open_existing(Path::new(database))?;
-            let page = Page::new(number(after)?, number(limit)?)?;
-            println!(
-                "{}",
-                serde_json::to_string(&store.browse(
-                    number(location)?,
-                    &LibraryPath::parse(folder)?,
-                    page
-                )?)?
-            );
-        }
         _ => return Err(Error::InvalidInput(USAGE.into())),
     }
     Ok(())
 }
 
-fn json_file<T: serde::de::DeserializeOwned>(path: &str, maximum: usize) -> Result<T> {
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take((maximum + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > maximum {
-        return Err(Error::InvalidInput(format!(
-            "JSON input exceeds {maximum} bytes"
-        )));
-    }
-    Ok(serde_json::from_slice(&bytes)?)
+fn json_file<T: serde::de::DeserializeOwned>(
+    source: &domus::infrastructure::server::configuration::ConfigurationService,
+    path: &str,
+    maximum: usize,
+) -> Result<T> {
+    let bytes = source.read_input(Path::new(path), maximum as u64, false)?;
+    serde_json::from_slice(&bytes).map_err(|_| Error::InvalidInput("invalid JSON input".into()))
 }
 
 fn number<T: std::str::FromStr>(value: &str) -> Result<T> {

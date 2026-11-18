@@ -22,7 +22,7 @@ impl BoundRoot {
         let opened = LibraryDirectory::open(path)?;
         let identity = opened.native_root().identity.clone();
         crate::infrastructure::FilePermissions::current()?
-            .check(&opened.into_directory().into_std_file(), true)?;
+            .check(&opened.directory_file()?, true)?;
         Ok(Self {
             path: path.to_owned(),
             identity,
@@ -34,7 +34,7 @@ impl BoundRoot {
         Ok(())
     }
 
-    fn open(&self) -> Result<cap_std::fs::Dir, Box<dyn std::error::Error>> {
+    fn open(&self) -> Result<LibraryDirectory, Box<dyn std::error::Error>> {
         eprintln!(
             "lab root check: path={}, expected={}",
             self.path.display(),
@@ -60,17 +60,17 @@ impl BoundRoot {
             )
             .into());
         }
-        let directory = opened.into_directory();
+        let directory = opened;
         let handle = with_path_context(
             "clone bound root handle",
             &self.path,
-            directory.try_clone(),
+            directory.directory_file(),
         )?;
         with_path_context(
             "check bound root permissions",
             &self.path,
             crate::infrastructure::FilePermissions::current()?
-                .check(&handle.into_std_file(), true),
+                .check(&handle, true),
         )?;
         Ok(directory)
     }
@@ -713,7 +713,7 @@ fn prepare_volume(
 }
 
 struct Filler {
-    directory: cap_std::fs::Dir,
+    directory: LibraryDirectory,
     identity: String,
 }
 

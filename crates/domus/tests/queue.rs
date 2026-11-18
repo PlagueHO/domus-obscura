@@ -1,7 +1,9 @@
 use domus::domain::Page;
 use domus::infrastructure::store::{QueueSelection, Store};
 use rusqlite::{Connection, params};
-use tempfile::tempdir;
+#[path = "support/private.rs"]
+mod private;
+use private::tempdir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

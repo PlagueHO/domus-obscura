@@ -8,11 +8,11 @@ use crate::domain::sharing::{ShareAccess, ShareLimits, SharePolicy};
 use crate::infrastructure::local_file::ProcessLock;
 use crate::infrastructure::shares::{ShareCatalog, SharedFile};
 use crate::infrastructure::sharing::{SharingAccount, SharingConfiguration};
+use crate::infrastructure::store::{StoreOpenMode, StoreSource};
 use crate::{Error, Result};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddrV4, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
@@ -39,7 +39,7 @@ pub(super) struct SharedPeer {
 pub(crate) struct Account {
     session: Mutex<SoulseekSession>,
     configuration: SharingAccount,
-    database: PathBuf,
+    database: StoreSource,
     username: String,
     _lock: ProcessLock,
     reconnect: Mutex<super::ReconnectBudget>,
@@ -47,9 +47,11 @@ pub(crate) struct Account {
 }
 
 impl Account {
-    fn new(database: &Path, configuration: SharingAccount) -> Result<Arc<Self>> {
-        let credentials =
-            crate::infrastructure::worker::read_credentials(&configuration.credentials_file)?;
+    fn new(database: &StoreSource, configuration: SharingAccount) -> Result<Arc<Self>> {
+        let credentials = crate::infrastructure::worker::read_credentials(
+            database,
+            &configuration.credentials_file,
+        )?;
         let lock = crate::infrastructure::worker::account_lock(database, &credentials)?;
         let socket =
             super::connect(configuration.server, IO_TIMEOUT).map_err(Error::SoulseekTransport)?;
@@ -57,7 +59,7 @@ impl Account {
         Ok(Arc::new(Self {
             session: Mutex::new(session),
             configuration,
-            database: database.into(),
+            database: database.clone(),
             username: credentials.username,
             _lock: lock,
             reconnect: Mutex::new(super::ReconnectBudget::default()),
@@ -151,13 +153,15 @@ impl Account {
                 "sharing reconnect budget exhausted or failure is not retryable",
             ))?;
         std::thread::sleep(delay);
-        let store = crate::infrastructure::store::Store::open_read_current(&self.database)?;
+        let store = self.database.open(StoreOpenMode::ReadCurrent)?;
         crate::infrastructure::local_file::protect_files(
             &store,
             &[&self.configuration.credentials_file],
         )?;
-        let credentials =
-            crate::infrastructure::worker::read_credentials(&self.configuration.credentials_file)?;
+        let credentials = crate::infrastructure::worker::read_credentials(
+            &self.database,
+            &self.configuration.credentials_file,
+        )?;
         if credentials.username != self.username {
             return Err(Error::Conflict(
                 "sharing account changed during reconnect".into(),
@@ -373,7 +377,7 @@ pub(crate) struct SharingRuntime {
 
 impl SharingRuntime {
     pub(crate) fn start(
-        database: &Path,
+        database: &StoreSource,
         configuration: &SharingConfiguration,
         acquisition: Option<&crate::infrastructure::worker::LocalAcquisition>,
         stop: Arc<std::sync::atomic::AtomicBool>,
@@ -1163,20 +1167,15 @@ impl Drop for BrowseSlot<'_> {
 }
 
 struct Spool {
-    directory: cap_std::fs::Dir,
+    directory: crate::infrastructure::filesystem::LibraryDirectory,
     name: String,
     file: std::fs::File,
     maximum: u64,
     bytes: u64,
 }
 
-fn check_spool_budget(database: &Path, limits: &ShareLimits) -> Result<()> {
-    let directory = crate::infrastructure::filesystem::LibraryDirectory::open(
-        database
-            .parent()
-            .ok_or(Error::Internal("sharing database parent missing"))?,
-    )?
-    .into_directory();
+fn check_spool_budget(database: &StoreSource, limits: &ShareLimits) -> Result<()> {
+    let directory = database.directory()?;
     let mut retained = 0u64;
     let mut count = 0u32;
     for entry in directory.entries()? {
@@ -1232,14 +1231,9 @@ impl Spool {
         Self::at(&context.account.database, &context.policy.limits)
     }
 
-    fn at(database: &Path, limits: &ShareLimits) -> Result<Self> {
+    fn at(database: &StoreSource, limits: &ShareLimits) -> Result<Self> {
         use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-        let directory = crate::infrastructure::filesystem::LibraryDirectory::open(
-            database
-                .parent()
-                .ok_or(Error::Internal("sharing database parent missing"))?,
-        )?
-        .into_directory();
+        let directory = database.directory()?.try_clone()?;
         let name = format!(".domus-share-{}-{}.pending", std::process::id(), token()?);
         let mut options = cap_std::fs::OpenOptions::new();
         options
@@ -1812,7 +1806,7 @@ mod tests {
                     server: "127.0.0.1:2234".parse()?,
                     acknowledge_plaintext_login: true,
                 },
-                database: database.clone(),
+                database: _store.source(),
                 username: "generated-user".into(),
                 _lock: ProcessLock::acquire(&database, "test-account")?,
                 reconnect: Mutex::new(super::super::ReconnectBudget::default()),
@@ -1829,7 +1823,11 @@ mod tests {
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let context = Arc::new(Context {
                 account,
-                catalog: Mutex::new(ShareCatalog::build(&database, &policy, stop.clone())?),
+                catalog: Mutex::new(ShareCatalog::build(
+                    &_store.source(),
+                    &policy,
+                    stop.clone(),
+                )?),
                 policy,
                 stop,
                 queue: Mutex::new(Queue {
@@ -1909,8 +1907,10 @@ mod tests {
 
     #[test]
     fn sharing_disabled_starts_no_listener_database_or_account() -> TestResult {
-        let directory = tempfile::tempdir()?;
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
         let database = directory.path().join("unused.sqlite");
+        let source = crate::infrastructure::store::Store::open(&database)?.source();
+        std::fs::remove_file(&database)?;
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let configuration = SharingConfiguration {
             policy: SharePolicy::default(),
@@ -1919,7 +1919,7 @@ mod tests {
         };
         assert!(
             SharingRuntime::start(
-                &database,
+                &source,
                 &configuration,
                 None,
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2150,8 +2150,9 @@ mod tests {
 
     #[test]
     fn sharing_retained_spools_cannot_escape_the_configured_disk_budget() -> TestResult {
-        let directory = tempfile::tempdir()?;
+        let directory = crate::infrastructure::permissions::private_test_directory()?;
         let database = directory.path().join("state.sqlite");
+        let database = crate::infrastructure::store::Store::open(&database)?.source();
         let limits = ShareLimits {
             compressed_bytes: 1024,
             concurrent_browses: 2,
@@ -2173,6 +2174,7 @@ mod tests {
         const FILES: u32 = 60_000;
         let directory = crate::infrastructure::permissions::private_fixture::tempdir()?;
         let database = directory.path().join("state.sqlite");
+        let database = crate::infrastructure::store::Store::open(&database)?.source();
         let limits = ShareLimits::default();
         let spool = Spool::at(&database, &limits)?;
         let compressed = flate2::write::ZlibEncoder::new(spool, flate2::Compression::fast());

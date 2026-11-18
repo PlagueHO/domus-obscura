@@ -5,6 +5,7 @@ use crate::application::{
 };
 use crate::domain::sharing::{ShareAccess, ShareRoot};
 use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use crate::infrastructure::permissions::private_fixture;
 
@@ -28,6 +29,8 @@ impl Fixture {
         let state = directory.path().join("state");
         std::fs::create_dir(&media)?;
         std::fs::create_dir(&state)?;
+        private_fixture::directory(&state)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         let database = state.join("domus.sqlite");
         let store = Store::open(&database)?;
         let location = add_location(&store, &media, "main")?;
@@ -69,7 +72,7 @@ impl Fixture {
 
     fn catalog(&self) -> Result<ShareCatalog> {
         ShareCatalog::build(
-            &self.database,
+            &self.store.source(),
             &self.policy,
             Arc::new(AtomicBool::new(false)),
         )
@@ -269,7 +272,12 @@ fn sharing_namespace_collisions_fail_instead_of_truncating() -> Result<()> {
     let mut policy = fixture.policy.clone();
     policy.roots[0].alias = "Bad.".into();
     assert!(
-        ShareCatalog::build(&fixture.database, &policy, Arc::new(AtomicBool::new(false))).is_err()
+        ShareCatalog::build(
+            &fixture.store.source(),
+            &policy,
+            Arc::new(AtomicBool::new(false))
+        )
+        .is_err()
     );
     Ok(())
 }

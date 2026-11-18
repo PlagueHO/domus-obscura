@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+native-file-security = { path = "../native-file-security" }
+native-sqlite = { path = "../native-sqlite" }
 axum.workspace = true
 base64.workspace = true
 axum-server.workspace = true
@@ -49,7 +51,6 @@ rustix.workspace = true
 fence-windows.workspace = true
 file-id.workspace = true
 native-file-delete = { path = "../native-file-delete" }
-native-file-security = { path = "../native-file-security" }
 winsafe.workspace = true
 windows-service.workspace = true
 

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn artist_images_configuration_defaults_disabled_and_requires_selected_shared_cache() -> TestResult
 {
-    let fixture = Fixture::new(false)?;
+    let mut fixture = Fixture::new(false)?;
     let active = fixture.source.read()?;
     assert!(active.active.services.artist_images.is_empty());
     for selected in ["wikimedia-commons", "uninstalled"] {
@@ -21,7 +21,12 @@ fn artist_images_configuration_defaults_disabled_and_requires_selected_shared_ca
     let cache_directory = crate::infrastructure::permissions::private_test_directory()?;
     let root = cache_directory.path().to_path_buf();
     let database = fixture.directory.path().join("state.db");
-    let mut store = Store::open_current_existing(&database)?;
+    fixture.select_root(
+        "cache",
+        crate::infrastructure::filesystem::StorageRole::Cache,
+        &root,
+    )?;
+    let mut store = fixture.source.open_store(StoreOpenMode::Current)?;
     drop(crate::infrastructure::cache::FileCache::open(
         &mut store,
         &root,

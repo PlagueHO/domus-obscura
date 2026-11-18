@@ -46,10 +46,18 @@ impl Store {
         native: &NativeRoot,
         kind: &str,
     ) -> Result<bool> {
-        let root_text = root
-            .to_str()
-            .ok_or_else(|| Error::InvalidInput("private root must be valid Unicode".into()))?;
         self.check_private_root_location(root, native)?;
+        let (_, directory) = self.open_candidate_root(root, kind)?;
+        if directory.native_root() != native {
+            return Err(Error::Conflict(
+                "private root changed during admission".into(),
+            ));
+        }
+        let binding = self.prepare_root_binding(&directory, kind)?;
+        let root_text = binding.key(
+            root.to_str()
+                .ok_or_else(|| Error::InvalidInput("private root must be valid Unicode".into()))?,
+        );
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -71,14 +79,22 @@ impl Store {
             if exists && reserved && other == root_text {
                 continue;
             }
-            if root.starts_with(&other) || Path::new(&other).starts_with(root) {
+            if self.filesystem.is_none()
+                && (root.starts_with(&other) || Path::new(&other).starts_with(root))
+            {
                 return Err(Error::InvalidInput(
                     "media and private roots must not overlap".into(),
                 ));
             }
         }
         drop(statement);
-        super::native_roots::register(&transaction, root_text, kind, native)?;
+        super::native_roots::register(
+            &transaction,
+            &root_text,
+            kind,
+            &binding,
+            self.filesystem.as_deref(),
+        )?;
         if !exists {
             transaction.execute(
                 "INSERT INTO private_roots(root, kind) VALUES (?1, ?2)",

@@ -476,13 +476,15 @@ fn caa_evidence_and_preview_rollback_together_and_retained_corruption_stops_read
 
 #[test]
 fn caa_cli_uses_only_cached_evidence_and_never_infers_approval() -> TestResult {
-    let fixture = Fixture::build_inner(AudioFormat::Flac, false, false)?;
+    let fixture = Fixture::build_selected(AudioFormat::Flac, false, false)?;
     cached_cover(&fixture, &cover_source()?)?;
     let job = fixture.job.to_string();
     let version = fixture.version.to_string();
+    let host = fixture.write_host()?;
     let args = [
         "artwork-caa-prepare",
-        fixture.database.to_str().ok_or("database path")?,
+        "--host",
+        host.to_str().ok_or("host path")?,
         &job,
         &version,
         IMAGE,
@@ -493,12 +495,7 @@ fn caa_cli_uses_only_cached_evidence_and_never_infers_approval() -> TestResult {
             .args(args)
             .output()
     };
-    let host = fixture._state.path().join("host.json");
     let request = fixture._state.path().join("request.json");
-    std::fs::write(
-        &host,
-        serde_json::to_vec(&json!({"database":fixture.database}))?,
-    )?;
     std::fs::write(
         &request,
         serde_json::to_vec(&json!({
@@ -548,7 +545,7 @@ fn caa_cli_uses_only_cached_evidence_and_never_infers_approval() -> TestResult {
     let candidate: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert!(candidate["approved_at"].is_null());
     let id = candidate["id"].as_i64().ok_or("candidate ID")?.to_string();
-    let output = run(&["artwork-evidence", args[1], &job, &version, &id])?;
+    let output = run(&["artwork-evidence", "--host", args[2], &job, &version, &id])?;
     assert!(
         output.status.success(),
         "{}",

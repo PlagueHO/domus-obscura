@@ -31,7 +31,7 @@ async fn shared_cache_musicbrainz_reuses_exact_release_and_freezes_plans_without
     let server = FixtureServer::start(fixture.router(), &material, MUSIC_HOST)?;
     let state = private::tempdir()?;
     let root = private::tempdir()?;
-    let media = tempfile::tempdir()?;
+    let media = private::tempdir()?;
     let database = state.path().join("state.db");
     let mut store = Store::open(&database)?;
     let location = domus::application::add_location(&store, media.path(), "main")?;
@@ -458,7 +458,7 @@ async fn catalog_transport_enforces_tls_bounds_single_use_and_real_cadence() -> 
     let material = certificates(MUSIC_HOST)?;
     let server = FixtureServer::start(fixture.router(), &material, MUSIC_HOST)?;
     let client = client(&material, &server)?;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     let mut store = Store::open(&database)?;
     let query = CatalogQuery::artists("Fixture", 0, 25)?;
@@ -563,7 +563,7 @@ async fn catalog_authenticated_discovery_freezes_evidence_and_preserves_backoff(
     let catalog_fixture = CatalogFixture::default();
     let material = certificates(MUSIC_HOST)?;
     let metadata_server = FixtureServer::start(catalog_fixture.router(), &material, MUSIC_HOST)?;
-    let directory = tempfile::tempdir()?;
+    let directory = private::tempdir()?;
     let database = directory.path().join("state.db");
     let media = directory.path().join("media");
     std::fs::create_dir(&media)?;

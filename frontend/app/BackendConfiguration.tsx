@@ -1,36 +1,20 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
 import type { BackendCertificateStatus } from "../src/generated/BackendCertificateStatus";
-import type { BackendConfigurationResult } from "../src/generated/BackendConfigurationResult";
 import type { ConfigurationSection } from "../src/generated/ConfigurationSection";
-import type { ConfigurationReloadState } from "../src/generated/ConfigurationReloadState";
 import type { WorkerStatus } from "../src/generated/WorkerStatus";
 import type { LocalStatus } from "../src/generated/LocalStatus";
-import { ApiError, request } from "./api";
-import { useCommand, useResource } from "./hooks";
+import { request } from "./api";
+import { useResource } from "./hooks";
 import { Alert, Button } from "./components/ui";
 import { Icon } from "./components/Media";
-import { BackendConfigurationForm } from "./BackendConfigurationForm";
 import { ArtistPhotoBindings } from "./ArtistPhotoBindings";
-import {
-  acceptConfigurationSave,
-  beginConfigurationEdit,
-  changeConfigurationDraft,
-  configurationErrors,
-  configurationSections,
-  dirtySections,
-  discardConfigurationSection,
-  sectionHasErrors,
-  sectionUpdate,
-  type ConfigurationEditor,
-} from "./backend-configuration-state";
+import { configurationSections } from "./backend-configuration-state";
 
 type Section = ConfigurationSection | "music_output" | "music_roots";
 const configured = (value: boolean) => (value ? "Configured · value hidden" : "Not configured");
-
 const RefreshContext = createContext<{ busy: boolean; refresh: () => void } | undefined>(undefined);
 
-/** Settings card with the component-library header band and a shared refresh action. */
 export function ConfigurationCard({ title, children }: { title: string; children: ReactNode }) {
   const refresh = useContext(RefreshContext);
   return (
@@ -55,41 +39,14 @@ export function ConfigurationCard({ title, children }: { title: string; children
   );
 }
 
-/** A lost reload response must never cause a second activation command. */
-export async function confirmConfigurationReload(
-  revision: string,
-  load: () => Promise<BackendConfigurationState>,
-  wait: () => Promise<void>,
-): Promise<BackendConfigurationState> {
-  let failure = "The replacement host has not confirmed the saved revision.";
-  for (let attempt = 0; attempt < 10; attempt++) {
-    await wait();
-    let state: BackendConfigurationState;
-    try {
-      state = await load();
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 401) throw error;
-      failure = error instanceof Error ? error.message : "The host could not be reached.";
-      continue;
-    }
-    if (state.active_revision === revision) return state;
-    if (state.reload.status === "failed") throw new Error(state.reload.message);
-  }
-  throw new Error(
-    `Reload could not be confirmed. ${failure} Select Refresh or sign in again. The reload command was not retried.`,
-  );
-}
-
 export function BackendConfiguration({
   output,
   roots,
-  otherDrafts = false,
   onRefreshRelated,
   relatedLoading = false,
 }: {
   output?: ReactNode;
   roots?: ReactNode;
-  otherDrafts?: boolean;
   onRefreshRelated?: () => void;
   relatedLoading?: boolean;
 }) {
@@ -104,132 +61,17 @@ export function BackendConfiguration({
         : new URLSearchParams(location.hash.split("?")[1]).get("section");
     return configurationSections.find(({ id }) => id === requested)?.id ?? "general";
   });
-  const [draft, setEditor] = useState<ConfigurationEditor>();
-  const [confirmed, setConfirmed] = useState<BackendConfigurationState>();
-  const [notice, setNotice] = useState("");
-  const [destination, setDestination] = useState("");
-  const [uncertain, setUncertain] = useState(false);
-  const abort = useRef<AbortController | undefined>(undefined);
-  const command = useCommand();
-  useEffect(() => {
-    setConfirmed(undefined);
-    setUncertain(false);
-    setDestination("");
-    setNotice("");
-    setEditor((current) =>
-      current && (dirtySections(current).length > 0 || current.conflict) ? current : undefined,
-    );
-  }, [resource.data]);
-  useEffect(() => () => abort.current?.abort(), []);
-  const state = confirmed ?? resource.data;
+  const state = resource.data;
   const fresh = !resource.error && !resource.loading;
-  const readOnly =
+  const policyReadOnly =
     !state || state.active.system_settings_read_only || state.saved.system_settings_read_only;
-  const editor = draft ?? (state && !readOnly ? beginConfigurationEdit(state) : undefined);
-  const changed = editor ? dirtySections(editor) : [];
   const currentSection = configurationSections.find(({ id }) => id === section);
   const backendSection = currentSection?.id;
-  const reloading = state?.reload.status === "pending";
-
-  async function submit(action: "validate" | "save", sections: ConfigurationSection[]) {
-    if (
-      !editor ||
-      !sections.length ||
-      editor.conflict ||
-      !fresh ||
-      readOnly ||
-      uncertain ||
-      reloading
-    )
-      return;
-    await command.run(async () => {
-      setNotice("");
-      try {
-        const result = await request<BackendConfigurationResult>(
-          `/api/system/configuration/sections/${action}`,
-          {
-            body: {
-              expected_revision: editor.expectedRevision,
-              sections: sections.map((id) => sectionUpdate(editor.draft, id)),
-            },
-          },
-        );
-        if (result.errors.length) {
-          setEditor(configurationErrors(editor, result.errors));
-        } else if (action === "validate") {
-          setEditor(configurationErrors(editor, []));
-        } else if (result.state) {
-          setConfirmed(result.state);
-          setEditor(acceptConfigurationSave(editor, result.state, sections));
-          setNotice("Changes saved.");
-        } else {
-          throw new Error(
-            "The save response has no saved state. Refresh and review before retrying.",
-          );
-        }
-      } catch (error) {
-        if (action === "save" || (error instanceof ApiError && error.status === 409)) {
-          setEditor({ ...editor, validated: false, conflict: true });
-        }
-        throw error;
-      }
-    });
-  }
-
-  async function reload() {
-    if (!state || changed.length || otherDrafts || !fresh || readOnly || reloading || uncertain)
-      return;
-    await command.run(async () => {
-      setNotice("");
-      const controller = new AbortController();
-      abort.current = controller;
-      setUncertain(true);
-      const result = await request<ConfigurationReloadState>("/api/system/configuration/reload", {
-        body: { expected_revision: state.saved_revision },
-        signal: controller.signal,
-      });
-      if (result.status !== "pending")
-        throw new Error("The host did not accept reload. Select Refresh before retrying.");
-      setConfirmed({ ...state, reload: result });
-      if (result.origin !== window.location.origin) {
-        setDestination(result.origin);
-        setNotice(
-          "Open the saved address and check that the changes are active. You may need to sign in.",
-        );
-        return;
-      }
-      const active = await confirmConfigurationReload(
-        result.revision,
-        async () => {
-          const observed = await request<BackendConfigurationState>("/api/system/configuration", {
-            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(3000)]),
-          });
-          setConfirmed(observed);
-          return observed;
-        },
-        () =>
-          new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(resolve, 1000);
-            controller.signal.addEventListener(
-              "abort",
-              () => {
-                clearTimeout(timer);
-                reject(new Error("Reload confirmation stopped."));
-              },
-              { once: true },
-            );
-          }),
-      ).catch((error: unknown) => {
-        setNotice("");
-        throw error;
-      });
-      setConfirmed(active);
-      setUncertain(false);
-      setNotice("The saved revision is active in the API. Separate workers are unchanged.");
-      window.location.reload();
-    });
-  }
-
+  const select = (value: string) => {
+    const target = configurationSections.find(({ id }) => id === value);
+    if (target) setSection(target.id);
+    else if (value === "music_output" || value === "music_roots") setSection(value);
+  };
   const navigation = (id: Section, label: string) => (
     <Button
       key={id}
@@ -239,22 +81,13 @@ export function BackendConfiguration({
       onClick={() => setSection(id)}
     >
       <span>{label}</span>
-      {changed.some((value) => value === id) ? (
-        <small>Unsaved</small>
-      ) : (
-        state?.changed_sections.some((value) => value === id) && <small>Reload needed</small>
-      )}
-      {editor &&
-        configurationSections.some(
-          ({ id: value }) => value === id && sectionHasErrors(editor, value),
-        ) && <small>Error</small>}
+      {state?.changed_sections.some((value) => value === id) && <small>Restart required</small>}
     </Button>
   );
-
   return (
     <RefreshContext.Provider
       value={{
-        busy: resource.loading || relatedLoading || command.busy,
+        busy: resource.loading || relatedLoading,
         refresh: () => {
           resource.refresh();
           onRefreshRelated?.();
@@ -262,60 +95,21 @@ export function BackendConfiguration({
       }}
     >
       <div className="configuration-messages">
-        {notice && <p role="status">{notice}</p>}
         <Alert error={resource.error} />
-        <Alert error={command.error} />
-        {state?.reload.status === "failed" && !command.error && (
-          <p role="alert">{state.reload.message}</p>
-        )}
-        {(state?.restart_required || reloading || uncertain) && (
-          <div className="configuration-notice">
-            <div role="status">
-              <strong>
-                {reloading
-                  ? "Applying saved changes…"
-                  : uncertain
-                    ? "Reload needs confirmation"
-                    : "Saved changes need a reload"}
-              </strong>
+        <p role="status">
+          Host configuration is read-only. Stop the API and all workers before editing the
+          configuration file. Validate the file, then restart all components.
+        </p>
+        {state?.restart_required && (
+          <div className="configuration-notice" role="status">
+            <div>
+              <strong>Saved host settings are not active</strong>
               <p>
-                {uncertain && !command.busy
-                  ? "Refresh to check the server. The reload command was not retried."
-                  : changed.length > 0 || otherDrafts
-                    ? "Save or discard your unsaved changes before reloading."
-                    : "Reload the API to apply saved settings. Separate workers stay unchanged."}
+                A coordinated restart is required. Refresh only reads the file; it does not apply
+                changes.
               </p>
             </div>
-            <Button
-              variant="secondary"
-              disabled={
-                !fresh ||
-                readOnly ||
-                command.busy ||
-                reloading ||
-                uncertain ||
-                !state?.restart_required ||
-                changed.length > 0 ||
-                otherDrafts
-              }
-              onClick={() => void reload()}
-            >
-              Reload
-            </Button>
           </div>
-        )}
-        {destination && (
-          <p>
-            <a href={destination} rel="noreferrer">
-              Open saved browser address
-            </a>
-            . Expected revision: <code>{state?.saved_revision}</code>.
-          </p>
-        )}
-        {state && readOnly && (
-          <p role="status">
-            These settings are read-only. The operator must enable editing outside the UI.
-          </p>
         )}
         {Boolean(resource.error) && state && (
           <p role="status">
@@ -329,37 +123,24 @@ export function BackendConfiguration({
       <div className="configuration-layout">
         <label className="configuration-section-picker">
           Settings section
-          <select
-            value={section}
-            onChange={(event) => {
-              const value = event.target.value;
-              const target = configurationSections.find(({ id }) => id === value);
-              if (target) setSection(target.id);
-              else if (value === "music_output" || value === "music_roots") setSection(value);
-            }}
-          >
-            <optgroup label="Core application">
-              {configurationSections
-                .filter(({ group }) => group === "Core application")
-                .map(({ id, title }) => (
-                  <option key={id} value={id}>
-                    {title}
-                    {changed.includes(id) ? " (unsaved)" : ""}
-                  </option>
-                ))}
-            </optgroup>
-            <optgroup label="Media · Music">
-              {configurationSections
-                .filter(({ group }) => group === "Media · Music")
-                .map(({ id, title }) => (
-                  <option key={id} value={id}>
-                    {title}
-                    {changed.includes(id) ? " (unsaved)" : ""}
-                  </option>
-                ))}
-              {output && <option value="music_output">Output policy</option>}
-              {roots && <option value="music_roots">Library roots</option>}
-            </optgroup>
+          <select value={section} onChange={(event) => select(event.target.value)}>
+            {["Core application", "Media · Music"].map((group) => (
+              <optgroup key={group} label={group}>
+                {configurationSections
+                  .filter((value) => value.group === group)
+                  .map(({ id, title }) => (
+                    <option key={id} value={id}>
+                      {title}
+                    </option>
+                  ))}
+                {group === "Media · Music" && output && (
+                  <option value="music_output">Output policy</option>
+                )}
+                {group === "Media · Music" && roots && (
+                  <option value="music_roots">Library roots</option>
+                )}
+              </optgroup>
+            ))}
           </select>
         </label>
         <nav className="configuration-navigation" aria-label="Configuration sections">
@@ -370,7 +151,7 @@ export function BackendConfiguration({
             </div>
             {configurationSections
               .filter(({ group }) => group === "Core application")
-              .map(({ id, title: label }) => navigation(id, label))}
+              .map(({ id, title }) => navigation(id, title))}
           </div>
           <div className="configuration-group">
             <div className="configuration-group-label">
@@ -380,7 +161,7 @@ export function BackendConfiguration({
             <div className="configuration-subgroup">Music</div>
             {configurationSections
               .filter(({ group }) => group === "Media · Music")
-              .map(({ id, title: label }) => navigation(id, label))}
+              .map(({ id, title }) => navigation(id, title))}
             {output && navigation("music_output", "Output policy")}
             {roots && navigation("music_roots", "Library roots")}
           </div>
@@ -404,57 +185,20 @@ export function BackendConfiguration({
                   <p>These are saved worker settings, not a live sharing status report.</p>
                 </>
               )}
-              {state && readOnly && backendSection && (
+              {state && backendSection && (
                 <SectionSummary configuration={state.saved} section={backendSection} />
               )}
-              {state && editor && !readOnly && backendSection && (
-                <BackendConfigurationForm
-                  editor={editor}
-                  saved={state.saved}
-                  section={backendSection}
-                  changed={changed.includes(backendSection)}
-                  disabled={command.busy || !fresh || readOnly || reloading || uncertain}
-                  busy={command.busy}
-                  onChange={(draft) => setEditor(changeConfigurationDraft(editor, draft))}
-                  onValidate={() => void submit("validate", [backendSection])}
-                  onSave={() => void submit("save", [backendSection])}
-                  onSaveAll={changed.length > 1 ? () => void submit("save", changed) : undefined}
-                  onDiscard={() =>
-                    setEditor(
-                      editor.conflict
-                        ? undefined
-                        : discardConfigurationSection(editor, backendSection),
-                    )
-                  }
-                />
-              )}
-              {state && backendSection && backendSection === "music_providers" && (
+              {state && backendSection === "music_providers" && (
                 <ArtistPhotoBindings
-                  readOnly={readOnly || !fresh || reloading || uncertain}
+                  readOnly={policyReadOnly || !fresh}
                   enabled={state.active.services.artist_images.includes("wikimedia-commons")}
                 />
               )}
               {state && backendSection && (
                 <details className="configuration-details">
                   <summary>Advanced</summary>
-                  {editor && (
-                    <Button
-                      variant="secondary"
-                      disabled={
-                        command.busy ||
-                        !fresh ||
-                        readOnly ||
-                        reloading ||
-                        uncertain ||
-                        editor.conflict
-                      }
-                      onClick={() => void submit("validate", [backendSection])}
-                    >
-                      Check changes before saving
-                    </Button>
-                  )}
                   {state.saved_requires_validation && (
-                    <p>Saved settings need full validation when the API reloads.</p>
+                    <p>Saved settings need full validation before all components restart.</p>
                   )}
                   <h3>
                     {backendSection === "music_sharing"
@@ -493,14 +237,13 @@ export function sharingWorkerEvidence(
   fresh: boolean,
 ): string {
   if (!fresh) return "Worker sharing status is unknown. Refresh the status before relying on it.";
-  if (!worker)
-    return "Worker sharing status is unknown. The API has no worker status snapshot. Reload the API if its worker settings changed.";
+  if (!worker) return "Worker sharing status is unknown. The API has no worker status snapshot.";
   if (!worker.online)
     return "The worker is offline or its heartbeat is stale. Saved sharing settings are not confirmed active.";
   if (worker.stopping)
     return "The worker is stopping. Saved sharing settings are not confirmed active.";
   if (worker.active_revision !== revision)
-    return "The worker runs a different configuration revision. Restart it at a safe boundary to apply the saved sharing settings.";
+    return "The worker runs a different configuration revision. Stop all components, validate the configuration, then restart them.";
   return "The worker heartbeat confirms this saved configuration revision. This does not prove that peers can connect or that every folder is available.";
 }
 
@@ -586,6 +329,7 @@ function SectionSummary({
   configuration: BackendConfigurationState["active"];
   section: ConfigurationSection;
 }) {
+  const acquisition = value.production_worker?.acquisition ?? value.local_acquisition;
   const rows: [string, ReactNode][] =
     section === "general"
       ? [
@@ -671,7 +415,10 @@ function SectionSummary({
                           )
                         : "Use production acquisition account",
                     ],
-                    ["Activation", "Restart the separate worker to apply saved changes."],
+                    [
+                      "Activation",
+                      "Stop all components, edit and validate the file, then restart them.",
+                    ],
                     ...(value.production_worker?.sharing?.policy.roots.map(
                       (root) =>
                         [`Public alias · binding ${root.binding_id}`, root.alias] satisfies [
@@ -681,21 +428,23 @@ function SectionSummary({
                     ) ?? []),
                   ]
                 : [
+                    ["Production worker", value.production_worker ? "Configured" : "Disabled"],
+                    ["Queue capacity", value.production_worker?.queue_capacity ?? "Not configured"],
                     [
                       "Development acquisition",
                       value.local_acquisition ? "Configured · development only" : "Disabled",
                     ],
-                    ...(value.local_acquisition
+                    ...(acquisition
                       ? ([
-                          ["Private staging root", value.local_acquisition.staging_root],
+                          ["Private staging root", acquisition.staging_root],
                           [
                             "Soulseek credential file",
-                            configured(value.local_acquisition.credentials_file_configured),
+                            configured(acquisition.credentials_file_configured),
                           ],
-                          ["Soulseek server", value.local_acquisition.server],
+                          ["Soulseek server", acquisition.server],
                           [
                             "Plaintext login acknowledgement",
-                            value.local_acquisition.acknowledge_plaintext_login
+                            acquisition.acknowledge_plaintext_login
                               ? "Acknowledged"
                               : "Not acknowledged",
                           ],

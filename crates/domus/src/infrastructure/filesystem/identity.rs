@@ -25,12 +25,6 @@ impl NativeRoot {
         })
     }
 
-    pub(super) fn child(&mut self, directory: &Dir) -> Result<()> {
-        self.identity = directory_id(directory)?;
-        self.ancestors.push(self.identity.clone());
-        Ok(())
-    }
-
     pub(crate) fn overlaps(&self, other: &Self) -> bool {
         self.ancestors.contains(&other.identity) || other.ancestors.contains(&self.identity)
     }

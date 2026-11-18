@@ -184,7 +184,7 @@ impl From<Error> for ApiError {
             Error::SoulseekTransport(_) => {
                 Self::new(StatusCode::BAD_GATEWAY, "Soulseek connection failed")
             }
-            Error::Database(_) | Error::Io(_) | Error::Json(_) => {
+            Error::Database(_) | Error::NativeStorage(_) | Error::Io(_) | Error::Json(_) => {
                 eprintln!("API storage operation failed");
                 Self::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -494,7 +494,7 @@ impl Api {
             )
             .route(
                 "/api/system/configuration/save",
-                post(save_backend_configuration).layer(DefaultBodyLimit::max(16384)),
+                post(host_configuration_read_only).layer(DefaultBodyLimit::max(16384)),
             )
             .route(
                 "/api/system/configuration/sections/validate",
@@ -502,11 +502,11 @@ impl Api {
             )
             .route(
                 "/api/system/configuration/sections/save",
-                post(save_configuration_sections).layer(DefaultBodyLimit::max(16384)),
+                post(host_configuration_read_only).layer(DefaultBodyLimit::max(16384)),
             )
             .route(
                 "/api/system/configuration/reload",
-                post(reload_configuration).layer(DefaultBodyLimit::max(1024)),
+                post(host_configuration_read_only).layer(DefaultBodyLimit::max(1024)),
             )
             .route("/api/jobs", get(jobs).post(create_job))
             .route("/api/queue", get(queue))
@@ -1958,30 +1958,6 @@ async fn validate_backend_configuration(
     ))
 }
 
-async fn save_backend_configuration(
-    State(api): State<Api>,
-    request: std::result::Result<
-        Json<super::server::configuration::BackendConfigurationCommand>,
-        axum::extract::rejection::JsonRejection,
-    >,
-) -> ApiResult<Json<super::server::configuration::BackendConfigurationResult>> {
-    api.require_settings_write()?;
-    let Json(request) = request.map_err(|error| {
-        ApiError::new(error.status(), "backend configuration request is invalid")
-    })?;
-    let source = api.0.backend_configuration.clone().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "backend configuration is not attached to this host",
-        )
-    })?;
-    Ok(Json(
-        tokio::task::spawn_blocking(move || source.save(request))
-            .await
-            .map_err(|_| Error::Internal("configuration save task failed"))??,
-    ))
-}
-
 async fn validate_configuration_sections(
     State(api): State<Api>,
     request: std::result::Result<
@@ -2000,42 +1976,10 @@ async fn validate_configuration_sections(
     ))
 }
 
-async fn save_configuration_sections(
-    State(api): State<Api>,
-    request: std::result::Result<
-        Json<super::server::configuration::ConfigurationSectionCommand>,
-        axum::extract::rejection::JsonRejection,
-    >,
-) -> ApiResult<Json<super::server::configuration::BackendConfigurationResult>> {
-    api.require_settings_write()?;
-    let Json(command) = request.map_err(|error| {
-        ApiError::new(error.status(), "configuration section request is invalid")
-    })?;
-    let source = api.configuration_service()?;
-    Ok(Json(
-        tokio::task::spawn_blocking(move || source.save_sections(command))
-            .await
-            .map_err(|_| Error::Internal("configuration save task failed"))??,
-    ))
-}
-
-async fn reload_configuration(
-    State(api): State<Api>,
-    request: std::result::Result<
-        Json<super::server::configuration::ConfigurationReloadCommand>,
-        axum::extract::rejection::JsonRejection,
-    >,
-) -> ApiResult<Json<super::server::configuration::ConfigurationReloadState>> {
-    api.require_settings_write()?;
-    let Json(command) = request.map_err(|error| {
-        ApiError::new(error.status(), "configuration reload request is invalid")
-    })?;
-    let source = api.configuration_service()?;
-    drop(api.reload_permit()?);
-    Ok(Json(
-        tokio::task::spawn_blocking(move || source.request_reload(command))
-            .await
-            .map_err(|_| Error::Internal("configuration reload task failed"))??,
+async fn host_configuration_read_only() -> ApiResult<()> {
+    Err(ApiError::new(
+        StatusCode::GONE,
+        "host configuration is operator-managed; stop the API and all workers, edit and validate the file, then restart all components",
     ))
 }
 

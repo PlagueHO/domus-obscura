@@ -1,10 +1,10 @@
 //! Durable same-host handoff. The API never owns a production media operation.
 use super::local_file::ProcessLock;
-use super::store::{RequestClaim, Store};
+use super::store::{RequestClaim, Store, StoreOpenMode, StoreSource};
 use super::worker::{LocalAcquisition, StartLocalDownload};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -287,7 +287,7 @@ impl Drop for ActiveLanes {
 }
 
 pub struct PreparedProductionWorker {
-    database: PathBuf,
+    database_source: StoreSource,
     configuration: WorkerConfiguration,
     services: crate::application::services::ServiceConfiguration,
     revision: String,
@@ -302,12 +302,12 @@ impl PreparedProductionWorker {
             .production_worker
             .clone()
             .ok_or_else(|| Error::InvalidInput("production_worker is not configured".into()))?;
-        let store = Store::open_read_current(&configuration.database)?;
+        let store = source.open_store(StoreOpenMode::ReadCurrent)?;
         worker.validate(&store, &configuration.services)?;
         super::local_file::protect_files(&store, &[path])?;
-        let lock = ProcessLock::acquire(store.database_path(), "worker")?;
+        let lock = source.state_lock("worker")?;
         Ok(Self {
-            database: store.database_path().to_owned(),
+            database_source: store.source(),
             configuration: worker,
             services: configuration.services,
             revision: source.active_revision().into(),
@@ -364,7 +364,7 @@ impl PreparedProductionWorker {
             .as_ref()
             .map(|configuration| {
                 super::soulseek::sharing::SharingRuntime::start(
-                    &self.database,
+                    &self.database_source,
                     configuration,
                     self.configuration.acquisition.as_ref(),
                     stop.clone(),
@@ -372,7 +372,7 @@ impl PreparedProductionWorker {
             })
             .transpose()?
             .flatten();
-        let mut store = Store::open_current_existing(&self.database)?;
+        let mut store = self.database_source.open(StoreOpenMode::Current)?;
         let host = store.start_worker_host(
             &format!("production-{}", std::process::id()),
             &self.revision,
@@ -444,7 +444,7 @@ impl PreparedProductionWorker {
                 if lanes[index].is_none() && !stop.load(Ordering::Acquire) {
                     match store.claim_worker_request(&host, lane) {
                         Ok(Some(claim)) => {
-                            let database = self.database.clone();
+                            let database = self.database_source.clone();
                             let configuration = self.configuration.clone();
                             let services = self.services.clone();
                             let stopping = stop.clone();
@@ -507,7 +507,7 @@ impl PreparedProductionWorker {
 }
 
 fn execute(
-    database: &Path,
+    database_source: &StoreSource,
     configuration: &WorkerConfiguration,
     services: crate::application::services::ServiceConfiguration,
     operation: WorkerOperation,
@@ -515,7 +515,9 @@ fn execute(
     binding: &str,
     shared_account: Option<Arc<super::soulseek::sharing::Account>>,
 ) -> Result<()> {
-    let mut store = Store::open_current_existing(database)?.with_worker_stop(stop.clone());
+    let mut store = database_source
+        .open(StoreOpenMode::Current)?
+        .with_worker_stop(stop.clone());
     store.check_worker_stop()?;
     if let Some((job, version)) = operation.job() {
         store.require_current_worker_plan(job, version)?;
@@ -559,7 +561,7 @@ fn execute(
             ) {
                 let run = store.completed_worker_normalization(job_id, plan_version)?;
                 super::worker::publish_worker(
-                    database,
+                    database_source,
                     &acquisition.staging_root,
                     job_id,
                     plan_version,
@@ -576,7 +578,7 @@ fn execute(
                     None
                 };
                 acquisition.acquire_controlled(
-                    database,
+                    database_source,
                     services,
                     job_id,
                     plan_version,
@@ -610,7 +612,7 @@ fn execute(
                 .as_ref()
                 .ok_or_else(|| Error::Conflict("worker acquisition is not configured".into()))?;
             super::worker::publish_worker(
-                database,
+                database_source,
                 &acquisition.staging_root,
                 job_id,
                 plan_version,

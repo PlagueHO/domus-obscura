@@ -157,7 +157,7 @@ fn staging_root_is_reserved_against_browsing_and_has_one_database_and_one_live_o
     );
     drop(fixture.staging.take());
     let before = std::fs::read(fixture.scratch.path().join("owner.lock"))?;
-    let other = tempfile::tempdir()?;
+    let other = super::private::tempdir()?;
     let mut other_store = Store::open(&other.path().join("other.db"))?;
     assert!(StagingRoot::open(&mut other_store, fixture.scratch.path()).is_err());
     assert_eq!(

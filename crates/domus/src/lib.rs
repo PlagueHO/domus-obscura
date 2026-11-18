@@ -65,6 +65,8 @@ pub enum Error {
     Internal(&'static str),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("native database storage error: {0}")]
+    NativeStorage(#[from] native_sqlite::Error),
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Soulseek transport error: {0}")]

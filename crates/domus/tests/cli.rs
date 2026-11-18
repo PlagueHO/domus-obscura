@@ -15,12 +15,170 @@ fn run(args: &[&str]) -> Result<std::process::Output, std::io::Error> {
         .output()
 }
 
+fn selected_host(
+    parent: &std::path::Path,
+    mut value: serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    value["environment"] = serde_json::json!("single_user");
+    value["listen"] = serde_json::json!("127.0.0.1:8080");
+    value["origin"] = serde_json::json!("http://127.0.0.1:8080");
+    value["system_settings_read_only"] = serde_json::json!(false);
+    value["storage"] = serde_json::to_value(
+        domus::infrastructure::filesystem::StorageConfiguration::inspect_initial(
+            parent,
+            &domus::domain::LibraryPath::parse("")?,
+        )?,
+    )?;
+    Ok(value)
+}
+
+fn write_host(
+    parent: &std::path::Path,
+    database: &std::path::Path,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let path = parent.join("host.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&selected_host(
+            parent,
+            serde_json::json!({"database":database}),
+        )?)?,
+    )?;
+    Ok(path)
+}
+
+fn initialized_storage(
+    parent: &std::path::Path,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), Box<dyn std::error::Error>> {
+    let root = parent.join("application");
+    let output = run(&[
+        "init",
+        "--storage-root",
+        root.to_str().ok_or("storage path")?,
+    ])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let host = root.join("config.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&host)?)?;
+    value["system_settings_read_only"] = serde_json::json!(false);
+    std::fs::write(&host, serde_json::to_vec(&value)?)?;
+    Ok((root.join("state").join("state.db"), host))
+}
+
+#[test]
+fn fresh_cli_setup_preserves_existing_configuration_and_orphaned_storage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = tempdir()?;
+    let root = fixture.path().join("application");
+    let arguments = [
+        "init",
+        "--storage-root",
+        root.to_str().ok_or("storage path")?,
+    ];
+    let output = run(&arguments)?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let host = root.join("config.json");
+    let database = root.join("state").join("state.db");
+    let configuration = std::fs::read(&host)?;
+    let state = std::fs::read(&database)?;
+    let value: serde_json::Value = serde_json::from_slice(&configuration)?;
+    assert_eq!(value["environment"], "single_user");
+    assert_eq!(value["system_settings_read_only"], true);
+    assert_eq!(value["services"]["acquisition"], serde_json::json!([]));
+    assert!(value["storage"].is_object());
+    assert!(!run(&arguments)?.status.success());
+    assert_eq!(std::fs::read(&host)?, configuration);
+    assert_eq!(std::fs::read(&database)?, state);
+    let orphaned = fixture.path().join("orphaned");
+    std::fs::create_dir(&orphaned)?;
+    std::fs::write(orphaned.join("state.db"), b"retained evidence")?;
+    assert!(
+        !run(&[
+            "init",
+            "--storage-root",
+            orphaned.to_str().ok_or("storage path")?
+        ])?
+        .status
+        .success()
+    );
+    assert_eq!(
+        std::fs::read(orphaned.join("state.db"))?,
+        b"retained evidence"
+    );
+    assert_eq!(std::fs::read_dir(&orphaned)?.count(), 1);
+    Ok(())
+}
+
+#[test]
+fn state_cli_requires_host_and_preserves_read_only_system_policy()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = tempdir()?;
+    let (database, host) = initialized_storage(fixture.path())?;
+    let mut configuration: serde_json::Value = serde_json::from_slice(&std::fs::read(&host)?)?;
+    configuration["system_settings_read_only"] = serde_json::json!(true);
+    let configuration = serde_json::to_vec(&configuration)?;
+    std::fs::write(&host, &configuration)?;
+    let before = std::fs::read(&database)?;
+    for command in ["settings", "job-create", "init"] {
+        let output = run(&[command, database.to_str().ok_or("database path")?])?;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
+    }
+    let settings = fixture.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        serde_json::to_vec(&domus::domain::OutputSettings::default())?,
+    )?;
+    let output = run(&[
+        "settings-save",
+        "--host",
+        host.to_str().ok_or("host path")?,
+        "0",
+        settings.to_str().ok_or("settings path")?,
+    ])?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("system settings are read-only"));
+    assert_eq!(std::fs::read(&database)?, before);
+    assert_eq!(std::fs::read(&host)?, configuration);
+    let output = run(&["settings", "--host", host.to_str().ok_or("host path")?])?;
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)?,
+        serde_json::Value::Null
+    );
+    assert_eq!(std::fs::read(&database)?, before);
+    Ok(())
+}
+
+#[test]
+fn serve_storage_override_rejects_relative_paths_without_creating_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = tempdir()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_domus"))
+        .current_dir(fixture.path())
+        .args(["serve", "--storage-root", "relative-storage"])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("absolute paths"));
+    assert_eq!(std::fs::read_dir(fixture.path())?.count(), 0);
+    Ok(())
+}
+
 #[test]
 fn job_history_never_creates_or_upgrades_state() -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
     let database = state.path().join("history.db");
-    let path = database.to_str().ok_or("database path")?;
-    let missing = run(&["job-history", path, "1", "2", "0", "50"])?;
+    let host = write_host(state.path(), &database)?;
+    let path = host.to_str().ok_or("host path")?;
+    let missing = run(&["job-history", "--host", path, "1", "2", "0", "50"])?;
     assert!(!missing.status.success());
     assert!(missing.stdout.is_empty());
     assert!(!database.exists());
@@ -29,7 +187,7 @@ fn job_history_never_creates_or_upgrades_state() -> Result<(), Box<dyn std::erro
         "PRAGMA user_version=19; CREATE TABLE sentinel(value TEXT);
          INSERT INTO sentinel VALUES ('retained');",
     )?;
-    let old = run(&["job-history", path, "1", "2", "0", "50"])?;
+    let old = run(&["job-history", "--host", path, "1", "2", "0", "50"])?;
     assert!(!old.status.success());
     assert!(old.stdout.is_empty());
     assert_eq!(
@@ -42,7 +200,7 @@ fn job_history_never_creates_or_upgrades_state() -> Result<(), Box<dyn std::erro
         "retained"
     );
     for (after, limit) in [("-1", "50"), ("0", "201"), ("0", "0")] {
-        let invalid = run(&["job-history", path, "1", "2", after, limit])?;
+        let invalid = run(&["job-history", "--host", path, "1", "2", after, limit])?;
         assert!(!invalid.status.success());
         assert!(invalid.stdout.is_empty());
     }
@@ -91,6 +249,45 @@ fn mcp_startup_never_creates_or_upgrades_state_or_echoes_private_configuration()
 }
 
 #[test]
+fn service_and_mcp_require_external_selection_before_state_effects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = tempdir()?;
+    let database = state.path().join("state.db");
+    drop(domus::infrastructure::store::Store::open(&database)?);
+    let configuration = state.path().join("host.json");
+    let request = state.path().join("request.json");
+    std::fs::write(
+        &configuration,
+        serde_json::to_vec(&serde_json::json!({
+            "environment":"single_user", "database":database,
+            "listen":"127.0.0.1:8080", "origin":"http://127.0.0.1:8080"
+        }))?,
+    )?;
+    std::fs::write(
+        &request,
+        br#"{"operation":"metadata","release":{"provider":"musicbrainz","id":"20000000-0000-4000-8000-000000000001"}}"#,
+    )?;
+    let before = std::fs::read(&database)?;
+    let entries = std::fs::read_dir(state.path())?.count();
+    for arguments in [
+        vec!["mcp-stdio", configuration.to_str().ok_or("host path")?],
+        vec![
+            "service-call",
+            configuration.to_str().ok_or("host path")?,
+            request.to_str().ok_or("request path")?,
+        ],
+    ] {
+        let output = run(&arguments)?;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("storage selection is missing"));
+        assert_eq!(std::fs::read(&database)?, before);
+        assert_eq!(std::fs::read_dir(state.path())?.count(), entries);
+    }
+    Ok(())
+}
+
+#[test]
 fn mcp_stdio_uses_shared_services_without_network_or_media_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     use serde_json::{Value, json};
@@ -102,9 +299,12 @@ fn mcp_stdio_uses_shared_services_without_network_or_media_authority()
     let configuration = state.path().join("host.json");
     std::fs::write(
         &configuration,
-        serde_json::to_vec(&json!({
-            "database":database,"services":{"discovery":[],"metadata":[],"artwork":[],"acquisition":[]}
-        }))?,
+        serde_json::to_vec(&selected_host(
+            state.path(),
+            json!({
+                "database":database,"services":{"discovery":[],"metadata":[],"artwork":[],"acquisition":[]}
+            }),
+        )?)?,
     )?;
     let messages = [
         json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{
@@ -196,12 +396,13 @@ fn job_controls_cli_requires_current_state_and_preserves_legacy_databases()
 -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
     let database = state.path().join("state.db");
-    let path = database.to_str().ok_or("database path")?;
+    let host = write_host(state.path(), &database)?;
+    let path = host.to_str().ok_or("host path")?;
     for arguments in [
-        vec!["job-control", path, "1", "1", "pause"],
-        vec!["job-control", path, "1", "1", "restart"],
-        vec!["job-control-status", path, "1"],
-        vec!["job-control-continue", path, "1", "1"],
+        vec!["job-control", "--host", path, "1", "1", "pause"],
+        vec!["job-control", "--host", path, "1", "1", "restart"],
+        vec!["job-control-status", "--host", path, "1"],
+        vec!["job-control-continue", "--host", path, "1", "1"],
     ] {
         let output = run(&arguments)?;
         assert!(!output.status.success());
@@ -212,9 +413,9 @@ fn job_controls_cli_requires_current_state_and_preserves_legacy_databases()
     let raw = rusqlite::Connection::open(&database)?;
     raw.execute_batch("PRAGMA user_version=16; CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('unchanged');")?;
     for arguments in [
-        vec!["job-control", path, "1", "1", "cancel"],
-        vec!["job-control-status", path, "1"],
-        vec!["job-control-continue", path, "1", "1"],
+        vec!["job-control", "--host", path, "1", "1", "cancel"],
+        vec!["job-control-status", "--host", path, "1"],
+        vec!["job-control-continue", "--host", path, "1", "1"],
     ] {
         let output = run(&arguments)?;
         assert!(!output.status.success());
@@ -241,8 +442,9 @@ fn job_controls_cli_pauses_answers_and_continues_without_claiming()
     let mut store = domus::infrastructure::store::Store::open(&database)?;
     let job = store.enqueue(1)?.to_string();
     drop(store);
-    let path = database.to_str().ok_or("database path")?;
-    let output = run(&["job-control", path, &job, "1", "pause"])?;
+    let host = write_host(state.path(), &database)?;
+    let path = host.to_str().ok_or("host path")?;
+    let output = run(&["job-control", "--host", path, &job, "1", "pause"])?;
     assert!(
         output.status.success(),
         "{}",
@@ -254,23 +456,23 @@ fn job_controls_cli_pauses_answers_and_continues_without_claiming()
         .as_i64()
         .ok_or("question ID")?
         .to_string();
-    let status = run(&["job-control-status", path, &id])?;
+    let status = run(&["job-control-status", "--host", path, &id])?;
     assert!(status.status.success());
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&status.stdout)?,
         control
     );
     assert!(
-        !run(&["job-control-continue", path, &id, "1"])?
+        !run(&["job-control-continue", "--host", path, &id, "1"])?
             .status
             .success()
     );
     assert!(
-        run(&["question-answer", path, &question, "1", "Resume"])?
+        run(&["question-answer", "--host", path, &question, "1", "Resume"])?
             .status
             .success()
     );
-    let continuation = run(&["job-control-continue", path, &id, "1"])?;
+    let continuation = run(&["job-control-continue", "--host", path, &id, "1"])?;
     assert!(continuation.status.success());
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&continuation.stdout)?,
@@ -364,6 +566,8 @@ fn worker_check_cli_rejects_missing_database_and_never_upgrades_old_schema()
 -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
     let database = state.path().join("state.db");
+    let host = write_host(state.path(), &database)?;
+    let host = host.to_str().ok_or("host path")?;
     let config = state.path().join("worker.json");
     let secret = state.path().join("credentials.json");
     std::fs::write(
@@ -375,7 +579,7 @@ fn worker_check_cli_rejects_missing_database_and_never_upgrades_old_schema()
         }))?,
     )?;
     let config = config.to_str().ok_or("config path")?;
-    let missing = run(&["worker-check", config])?;
+    let missing = run(&["worker-check", "--host", host, config])?;
     assert!(!missing.status.success());
     assert!(missing.stdout.is_empty());
     assert!(!missing.stderr.is_empty());
@@ -387,11 +591,12 @@ fn worker_check_cli_rejects_missing_database_and_never_upgrades_old_schema()
     )?;
     let raw = rusqlite::Connection::open(&database)?;
     raw.execute_batch("PRAGMA user_version=12; CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('unchanged');")?;
-    let old = run(&["worker-check", config])?;
+    let old = run(&["worker-check", "--host", host, config])?;
     assert!(!old.status.success());
     assert!(old.stdout.is_empty());
     let error = String::from_utf8(old.stderr)?;
-    assert!(error.contains("upgrade separately"), "{error}");
+    assert!(error.contains("explicit fresh setup"), "{error}");
+    assert!(!state.path().join("sqlite-tmp").exists());
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
         12
@@ -409,31 +614,30 @@ fn worker_check_cli_rejects_missing_database_and_never_upgrades_old_schema()
 fn local_cli_can_initialize_scan_and_report_coverage() -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
     let media = tempdir()?;
-    let database = state.path().join("state.db");
-    let database = database.to_str().ok_or("non-Unicode database")?;
+    let (_database, host) = initialized_storage(state.path())?;
+    let host = host.to_str().ok_or("host path")?;
     let root = media.path().to_str().ok_or("non-Unicode media")?;
     std::fs::write(
         media.path().join("folder.jpg"),
         b"unchanged image observation",
     )?;
-    assert!(run(&["init", database])?.status.success());
-    let output = run(&["location-add", database, root, "main"])?;
+    let output = run(&["location-add", "--host", host, root, "main"])?;
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let location = String::from_utf8(output.stdout)?.trim().to_owned();
-    assert!(run(&["scan", database, &location])?.status.success());
-    let details = run(&["location", database, &location])?;
+    assert!(run(&["scan", "--host", host, &location])?.status.success());
+    let details = run(&["location", "--host", host, &location])?;
     assert!(details.status.success());
     let details: serde_json::Value = serde_json::from_slice(&details.stdout)?;
     assert_eq!(details["coverage"], "complete");
-    let browse = run(&["browse", database, &location, "", "0", "20"])?;
+    let browse = run(&["browse", "--host", host, &location, "", "0", "20"])?;
     assert!(browse.status.success());
     let entries: serde_json::Value = serde_json::from_slice(&browse.stdout)?;
     assert_eq!(entries[0]["relative_path"], "folder.jpg");
-    let invalid = run(&["browse", database, &location, "../secret", "0", "20"])?;
+    let invalid = run(&["browse", "--host", host, &location, "../secret", "0", "20"])?;
     assert!(!invalid.status.success());
     assert!(!invalid.stderr.is_empty());
     assert_eq!(
@@ -444,13 +648,14 @@ fn local_cli_can_initialize_scan_and_report_coverage() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn local_cli_explicitly_binds_legacy_media_and_staging_without_changing_files()
+fn local_cli_refuses_legacy_media_and_staging_binding_without_upgrading_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
     let media = tempdir()?;
     let staging = tempdir()?;
     let database = state.path().join("state.db");
-    let database_text = database.to_str().ok_or("non-Unicode database")?;
+    let host = write_host(state.path(), &database)?;
+    let host = host.to_str().ok_or("host path")?;
     let root = media.path().to_str().ok_or("non-Unicode media")?;
     let staging_root = staging.path().to_str().ok_or("non-Unicode staging")?;
     let mut store = domus::infrastructure::store::Store::open(&database)?;
@@ -474,31 +679,39 @@ fn local_cli_explicitly_binds_legacy_media_and_staging_without_changing_files()
     let identity = run(&["root-identity", root])?;
     assert!(identity.status.success());
     assert_eq!(String::from_utf8(identity.stdout)?.trim(), expected);
-    assert!(!run(&["scan", database_text, &location])?.status.success());
+    assert!(!run(&["scan", "--host", host, &location])?.status.success());
     assert!(
-        !run(&["location-bind", database_text, &location, "wrong"])?
+        !run(&["location-bind", "--host", host, &location, "wrong"])?
             .status
             .success()
     );
-    let bound = run(&["location-bind", database_text, &location, &expected])?;
-    assert!(bound.status.success(), "{:?}", bound.stderr);
-    assert!(!run(&["scan", database_text, &location])?.status.success());
+    let bound = run(&["location-bind", "--host", host, &location, &expected])?;
+    assert!(!bound.status.success());
+    assert!(String::from_utf8_lossy(&bound.stderr).contains("explicit fresh setup"));
+    assert!(!run(&["scan", "--host", host, &location])?.status.success());
     let staging_identity = run(&["root-identity", staging_root])?;
     assert!(staging_identity.status.success());
     let staging_identity = String::from_utf8(staging_identity.stdout)?;
     assert!(
-        !run(&["staging-bind", database_text, staging_root, "wrong"])?
+        !run(&["staging-bind", "--host", host, staging_root, "wrong"])?
             .status
             .success()
     );
     let bound = run(&[
         "staging-bind",
-        database_text,
+        "--host",
+        host,
         staging_root,
         staging_identity.trim(),
     ])?;
-    assert!(bound.status.success(), "{:?}", bound.stderr);
-    assert!(run(&["scan", database_text, &location])?.status.success());
+    assert!(!bound.status.success());
+    assert!(String::from_utf8_lossy(&bound.stderr).contains("explicit fresh setup"));
+    assert!(!run(&["scan", "--host", host, &location])?.status.success());
+    assert_eq!(
+        rusqlite::Connection::open(&database)?
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+        12
+    );
     assert_eq!(
         std::fs::read(media.path().join("sentinel.txt"))?,
         b"unchanged"
@@ -523,6 +736,7 @@ fn worker_cli_rejects_invalid_configuration_without_network_or_database_creation
     let state = tempdir()?;
     let configuration = state.path().join("worker.json");
     let database = state.path().join("missing.db");
+    let host = write_host(state.path(), &database)?;
     let body = serde_json::json!({
         "database":database,"staging_root":state.path(),
         "credentials_file":state.path().join("secret.json"),
@@ -532,6 +746,8 @@ fn worker_cli_rejects_invalid_configuration_without_network_or_database_creation
     std::fs::write(&configuration, serde_json::to_vec(&body)?)?;
     let output = run(&[
         "worker-once",
+        "--host",
+        host.to_str().ok_or("host path")?,
         configuration.to_str().ok_or("non-Unicode configuration")?,
     ])?;
     assert!(!output.status.success());
@@ -546,6 +762,8 @@ fn publication_cli_rejects_invalid_inputs_missing_state_and_old_schema_without_s
 -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
     let database = state.path().join("missing.db");
+    let host = write_host(state.path(), &database)?;
+    let host = host.to_str().ok_or("host path")?;
     let config = state.path().join("publication.json");
     let staging = state.path().join("scratch");
     let valid = serde_json::json!({
@@ -564,7 +782,12 @@ fn publication_cli_rejects_invalid_inputs_missing_state_and_old_schema_without_s
         let mut body = valid.clone();
         body[key] = value;
         std::fs::write(&config, serde_json::to_vec(&body)?)?;
-        let output = run(&["publish-new-once", config.to_str().ok_or("config")?])?;
+        let output = run(&[
+            "publish-new-once",
+            "--host",
+            host,
+            config.to_str().ok_or("config")?,
+        ])?;
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         assert!(!String::from_utf8(output.stderr)?.contains("never-echo"));
@@ -573,31 +796,31 @@ fn publication_cli_rejects_invalid_inputs_missing_state_and_old_schema_without_s
     }
     std::fs::write(&config, serde_json::to_vec(&valid)?)?;
     assert!(
-        !run(&["publish-new-once", config.to_str().ok_or("config")?])?
-            .status
-            .success()
-    );
-    assert!(
         !run(&[
-            "publication-status",
-            database.to_str().ok_or("db")?,
-            "1",
-            "2"
+            "publish-new-once",
+            "--host",
+            host,
+            config.to_str().ok_or("config")?
         ])?
         .status
         .success()
+    );
+    assert!(
+        !run(&["publication-status", "--host", host, "1", "2"])?
+            .status
+            .success()
     );
     assert!(!database.exists());
     let raw = rusqlite::Connection::open(&database)?;
     raw.execute_batch("PRAGMA user_version=15; CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('unchanged');")?;
     for output in [
-        run(&["publish-new-once", config.to_str().ok_or("config")?])?,
         run(&[
-            "publication-status",
-            database.to_str().ok_or("db")?,
-            "1",
-            "2",
+            "publish-new-once",
+            "--host",
+            host,
+            config.to_str().ok_or("config")?,
         ])?,
+        run(&["publication-status", "--host", host, "1", "2"])?,
     ] {
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
@@ -620,9 +843,11 @@ fn a_read_command_does_not_create_a_misspelled_database() -> Result<(), Box<dyn 
 {
     let state = tempdir()?;
     let database = state.path().join("missing.db");
+    let host = write_host(state.path(), &database)?;
     let output = run(&[
         "browse",
-        database.to_str().ok_or("non-Unicode path")?,
+        "--host",
+        host.to_str().ok_or("host path")?,
         "1",
         "",
         "0",
@@ -638,10 +863,10 @@ fn local_cli_can_save_preview_and_explicitly_approve_without_starting_work()
 -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
     let media = tempdir()?;
-    let database = state.path().join("state.db");
+    let (database, host) = initialized_storage(state.path())?;
+    let host = host.to_str().ok_or("host path")?;
     let database = database.to_str().ok_or("non-Unicode database")?;
-    assert!(run(&["init", database])?.status.success());
-    let absent = run(&["settings", database])?;
+    let absent = run(&["settings", "--host", host])?;
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&absent.stdout)?,
         serde_json::Value::Null
@@ -653,25 +878,26 @@ fn local_cli_can_save_preview_and_explicitly_approve_without_starting_work()
     )?;
     let settings_file = settings_file.to_str().ok_or("non-Unicode settings file")?;
     assert!(
-        run(&["settings-save", database, "0", settings_file])?
+        run(&["settings-save", "--host", host, "0", settings_file])?
             .status
             .success()
     );
     assert!(
-        !run(&["settings-save", database, "0", settings_file])?
+        !run(&["settings-save", "--host", host, "0", settings_file])?
             .status
             .success()
     );
     let location = run(&[
         "location-add",
-        database,
+        "--host",
+        host,
         media.path().to_str().ok_or("non-Unicode root")?,
         "main",
     ])?;
     assert!(location.status.success());
     let location = String::from_utf8(location.stdout)?.trim().to_owned();
-    assert!(run(&["scan", database, &location])?.status.success());
-    let job = run(&["job-create", database])?;
+    assert!(run(&["scan", "--host", host, &location])?.status.success());
+    let job = run(&["job-create", "--host", host])?;
     assert!(job.status.success());
     let job = String::from_utf8(job.stdout)?.trim().to_owned();
     let request_file = state.path().join("request.json");
@@ -689,7 +915,8 @@ fn local_cli_can_save_preview_and_explicitly_approve_without_starting_work()
     )?;
     let prepared = run(&[
         "plan-prepare",
-        database,
+        "--host",
+        host,
         request_file.to_str().ok_or("non-Unicode request")?,
     ])?;
     assert!(
@@ -700,10 +927,10 @@ fn local_cli_can_save_preview_and_explicitly_approve_without_starting_work()
     let prepared: serde_json::Value = serde_json::from_slice(&prepared.stdout)?;
     assert_eq!(prepared["version"], 2);
     assert!(prepared["approved_at"].is_null());
-    let approved = run(&["plan-approve", database, &job, "2"])?;
+    let approved = run(&["plan-approve", "--host", host, &job, "2"])?;
     assert!(approved.status.success());
     assert!(String::from_utf8(approved.stdout)?.contains("No transfer or file operation started"));
-    let saved = run(&["plan", database, &job, "2"])?;
+    let saved = run(&["plan", "--host", host, &job, "2"])?;
     assert!(saved.status.success());
     let saved: serde_json::Value = serde_json::from_slice(&saved.stdout)?;
     assert!(saved["approved_at"].is_i64());
@@ -720,18 +947,30 @@ fn local_cli_can_save_preview_and_explicitly_approve_without_starting_work()
 #[test]
 fn local_json_input_is_bounded_before_parsing() -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
-    let database = state.path().join("state.db");
-    let database = database.to_str().ok_or("non-Unicode database")?;
-    assert!(run(&["init", database])?.status.success());
+    let (_database, host) = initialized_storage(state.path())?;
+    let host = host.to_str().ok_or("host path")?;
     let file = state.path().join("large-settings.json");
     std::fs::write(&file, vec![b' '; 16385])?;
     let output = run(&[
         "settings-save",
-        database,
+        "--host",
+        host,
         "0",
         file.to_str().ok_or("non-Unicode file")?,
     ])?;
     assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr)?.contains("JSON input exceeds 16384 bytes"));
+    assert!(String::from_utf8(output.stderr)?.contains("exceeds its size limit"));
+    std::fs::write(&file, br#""never-echo-private-input""#)?;
+    let output = run(&[
+        "settings-save",
+        "--host",
+        host,
+        "0",
+        file.to_str().ok_or("non-Unicode file")?,
+    ])?;
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr)?;
+    assert!(error.contains("invalid JSON input"));
+    assert!(!error.contains("never-echo-private-input"));
     Ok(())
 }

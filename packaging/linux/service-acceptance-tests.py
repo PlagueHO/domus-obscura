@@ -38,7 +38,10 @@ class AcceptanceTests(unittest.TestCase):
         for role in ("api", "worker"):
             source = (Path(__file__).parent / "systemd" /
                       f"domus-obscura-{role}.service").read_text()
-            result = acceptance.render(source, root, package, "fixture", "fixture", "test")
+            configuration = root / "state" / "service.json"
+            result = acceptance.render(source, root, package, "fixture", "fixture", "test",
+                                       configuration)
+            self.assertIn(str(configuration), result)
             for line in source.splitlines():
                 if not any(token in line for token in (
                     "domus-obscura", "/var/lib/domus-obscura", "/opt/domus-obscura"
@@ -167,7 +170,9 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_configuration_rejects_live_credentials_and_external_state(self):
         fixture = {"database": "/var/lib/domus-acceptance-test/state/state.db",
-                   "staging": "/var/lib/domus-acceptance-test/staging"}
+                   "staging": "/var/lib/domus-acceptance-test/staging",
+                   "storage": {"selection_revision": 1}}
+        fixture["configuration"] = str(Path(fixture["database"]).parent / "service.json")
         root = Path("/var/lib/domus-acceptance-test")
         package = Path("/opt/domus-acceptance-test")
         with patch.object(acceptance, "read", return_value=b"{}"):
@@ -179,6 +184,7 @@ class AcceptanceTests(unittest.TestCase):
                          "artwork": [], "acquisition": ["soulseek"],
                          "artist_images": []},
             "database": fixture["database"], "listen": "127.0.0.1:8080",
+            "storage": fixture["storage"],
             "origin": "http://127.0.0.1:8080",
             "browser_assets": str(package / "browser"),
             "production_worker": {"queue_capacity": 64, "sharing": None,

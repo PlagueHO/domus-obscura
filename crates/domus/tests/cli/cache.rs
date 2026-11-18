@@ -80,7 +80,10 @@ impl Fixture {
         let host = state.path().join("host.json");
         std::fs::write(
             &host,
-            serde_json::to_vec(&json!({"database":database,"cache":{"root":root}}))?,
+            serde_json::to_vec(&selected_host(
+                state.path(),
+                json!({"database":database,"cache":{"root":root}}),
+            )?)?,
         )?;
         let request = state.path().join("plan.json");
         std::fs::write(
@@ -163,7 +166,10 @@ impl Fixture {
     }
 
     fn set_host(&self, value: Value) -> TestResult {
-        std::fs::write(&self.host, serde_json::to_vec(&value)?)?;
+        std::fs::write(
+            &self.host,
+            serde_json::to_vec(&selected_host(self.state.path(), value)?)?,
+        )?;
         Ok(())
     }
 }
@@ -220,11 +226,7 @@ fn configured_cli_catalog_hit_and_plan_use_only_selected_cache_during_pause() ->
         fixture.database.to_str().ok_or("database")?,
         RELEASE,
     ])?;
-    assert!(legacy.status.success());
-    assert_eq!(
-        serde_json::from_slice::<Value>(&legacy.stdout)?["data"]["summary"]["title"],
-        "Legacy album"
-    );
+    failed(legacy, "Usage:")?;
     Ok(())
 }
 
@@ -382,12 +384,14 @@ fn configured_cli_cache_open_never_binds_repairs_or_cleans_read_state() -> TestR
 fn configured_cli_rejects_database_alias_inside_bound_cache() -> TestResult {
     let fixture = Fixture::new()?;
     let alias = fixture.root.join("state.db");
+    std::fs::create_dir(fixture.root.join("sqlite-tmp"))?;
+    private::directory(&fixture.root.join("sqlite-tmp"))?;
     std::fs::hard_link(&fixture.database, &alias)?;
     let database_bytes = std::fs::read(&alias)?;
     fixture.set_host(json!({"database":alias,"cache":{"root":fixture.root}}))?;
     failed(
         fixture.cli("catalog-release", &[RELEASE])?,
-        "application database",
+        "selected storage root",
     )?;
     assert_eq!(std::fs::read(&alias)?, database_bytes);
     assert_eq!(fixture.gate()?, (0, i64::from(u32::MAX), 0));
@@ -441,7 +445,7 @@ fn configured_cli_protects_host_requests_and_credentials_from_media_and_cache_ov
             copied_host.to_str().ok_or("host")?,
             RELEASE,
         ])?,
-        "overlap",
+        "selected storage root",
     )?;
     std::fs::remove_file(&copied_host)?;
     let copied_request = fixture._media.path().join("request.json");
@@ -672,13 +676,7 @@ fn configured_caa_preparation_freezes_evidence_and_survives_cache_eviction() -> 
         fixture.cache.invalidate(&key)?;
     }
     assert!(store.approved_artwork(fixture.job, 2).is_ok());
-    let evidence = run(&[
-        "artwork-evidence",
-        fixture.database.to_str().ok_or("db")?,
-        &job,
-        "2",
-        &id.to_string(),
-    ])?;
+    let evidence = fixture.cli("artwork-evidence", &[&job, "2", &id.to_string()])?;
     assert!(evidence.status.success());
     let output = fixture.cli("artwork-caa-prepare", &args)?;
     failed(output, "fresh exact-release CAA listing")?;

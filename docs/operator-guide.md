@@ -67,14 +67,14 @@ needs separate verification.
 Keep writable state outside the program directory, Git, and media roots.
 Never put application state in a generated package output directory.
 
-| Resource                                                | Required access and location                                                                                     |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Executable, browser assets, helpers, notices            | Runtime read/execute. Optional service payloads must not be runtime-writable.                                    |
-| SQLite directory and sidecars                           | Private runtime read/write on local disk. Never use an SMB share or other network filesystem.                    |
-| Backend JSON and stable save lock                       | Private access for the runtime account. Editable configuration also needs sibling-file creation and replacement. |
-| Credential references and TLS private keys              | Private files accessible to that account. Keep contents out of commands, logs, URLs, examples, and Git.          |
-| Staging, managed certificate state, selected file cache | Approved private directories with the required lifecycle write access and native bindings.                       |
-| Registered main/backup media roots                      | Read access for scans. Grant write access only for separately approved media operations.                         |
+| Resource                                                | Required access and location                                                                              |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Executable, browser assets, helpers, notices            | Runtime read/execute. Optional service payloads must not be runtime-writable.                             |
+| SQLite directory and sidecars                           | Private runtime read/write on local disk. Never use an SMB share or other network filesystem.             |
+| Backend JSON                                            | Private runtime read access. Only the operator edits existing host JSON while all components are stopped. |
+| Credential references and TLS private keys              | Private files accessible to that account. Keep contents out of commands, logs, URLs, examples, and Git.   |
+| Staging, managed certificate state, selected file cache | Approved private directories with the required lifecycle write access and native bindings.                |
+| Registered main/backup media roots                      | Read access for scans. Grant write access only for separately approved media operations.                  |
 
 Check access under the actual runtime account. An administrator's successful
 read is not runtime access evidence. Windows mapped drives from an interactive
@@ -105,9 +105,14 @@ the command creates explicit `single_user` anonymous HTTP on loopback with the
 fixed `_anonymous` identity. It needs no certificate, Azure, DNS, or Entra setup.
 Provider services are disabled and system settings are read-only by default.
 
-First launch creates private `DomusObscura` state below `LOCALAPPDATA` on Windows,
-or `XDG_DATA_HOME` on Linux. Linux falls back to `$HOME/.local/share`.
-Later launches load the existing `service.json` and reuse `state.db`. Omitting
+First launch uses `%LOCALAPPDATA%\DomusObscura` on Windows and
+`$XDG_DATA_HOME/domus-obscura` on Linux. An unset or empty `XDG_DATA_HOME` selects
+`$HOME/.local/share/domus-obscura`. To override this root, use
+`domus serve --storage-root <absolute-application-storage>`.
+First launch creates `config.json` and `state/state.db`. Later launches reuse them.
+Without `config.json`, nonempty selected storage is refused before SQLite opens.
+Use an empty directory for explicit fresh setup. Previous layouts and media stay untouched.
+Omitting
 the configuration argument does not reset saved authentication, provider, or
 certificate settings. Use the saved origin and review configured startup effects.
 Inspect retained state after a failed first launch. Existing configuration and
@@ -152,13 +157,17 @@ Use this startup order:
    account. Review pending work before enabling a worker.
 2. Prepare initial state, private references, and native roots separately.
    With explicit configuration, the local database must already exist.
-   `domus init <local-database>` creates or migrates SQLite; run it only as the
-   designated setup owner with every state user stopped.
+   `domus init --storage-root <absolute-application-storage>` creates fresh
+   `config.json` and `state/state.db` with external storage expectations.
+   It refuses existing configuration and nonempty storage. It starts no services.
+   State utility commands require `--host <absolute-host-file>` and never migrate
+   old state. Keep every state user stopped during setup.
    Follow [native root binding](../README.md#native-root-binding) before using
    existing media or staging. Registration, binding, and media approval are
    separate operations.
-3. Start one API with the intended executable and configuration. API startup can
-   migrate SQLite and initialize configured host resources; it is not validation.
+3. Start one API with the intended executable and configuration. Selected state
+   must have the current schema. API startup can initialize configured host
+   resources; it is not validation.
 4. Confirm that the browser responds at the configured origin. Inspect the active
    API revision and startup errors. Do not use process creation alone as readiness.
 5. Start one worker only if `production_worker` is configured and its work is
@@ -191,7 +200,7 @@ There is no general foreground `domus status` command.
 | Question                                     | Check                                                                                                                                                                       |
 | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Is the process still running?                | Inspect its terminal and exact PID. On Windows, use `Get-Process -Id <pid>`; on Linux, use `ps -p <pid>`. PID existence alone does not prove readiness or drain completion. |
-| Which API configuration is active?           | Open System, or read guarded `GET /api/system/configuration`. Compare `active_revision`, `saved_revision`, validation state, and reload state.                              |
+| Which API configuration is active?           | Open System, or read guarded `GET /api/system/configuration`. Compare `active_revision`, `saved_revision`, and validation state.                                            |
 | Is the worker using the saved configuration? | Read the browser's fresh worker status and configuration revision. A missing/stale heartbeat or failed refresh is not current readiness evidence.                           |
 | Was a request completed?                     | Read `GET /api/worker/requests/{id}`, the job history, and transfer/publication receipts. HTTP 202 means admitted, not completed.                                           |
 | Why is work waiting?                         | Inspect Decisions, provider status, and Recovery. Saving an answer, applying recovery, and retrying are separate actions.                                                   |
@@ -214,8 +223,7 @@ This is the maintenance boundary for backup, restore, and upgrade.
 3. Stop the API with Ctrl+C. Linux SIGTERM also requests normal drain. The API
    requests immediate HTTP shutdown; in-flight requests can lose their responses.
    It then waits for active local work and result recording. That operation drain
-   has no forced timeout. The ten-second HTTP grace period applies only to
-   configuration reload, not normal stop.
+   has no forced timeout.
 4. Stop every other state user: one-shot workers, source tools, scan commands,
    `service-call`, `mcp-stdio`, standalone certificate bootstrap/recovery,
    SQLite tools, and external configuration writers. Confirm their actual exit.
@@ -245,48 +253,39 @@ Backend JSON and versioned Music output policy are different state. The JSON has
 a raw-byte revision; immutable output settings and plans remain in SQLite.
 Changing one does not rewrite existing plans or approve media work.
 
-| State                      | Meaning                                                                                               |
-| -------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Active                     | The API's startup snapshot, or the worker revision confirmed by a fresh heartbeat.                    |
-| Saved, unvalidated         | JSON on disk that has not passed validation for its exact revision. Inspection does not validate it.  |
-| Saved, passively validated | A successful service save checked that revision. Referenced files can still change before activation. |
-| Reload/restart required    | Saved JSON differs from the API snapshot. API activation and worker activation are separate.          |
+| State              | Meaning                                                                                                 |
+| ------------------ | ------------------------------------------------------------------------------------------------------- |
+| Active             | The API's startup snapshot, or the worker revision confirmed by a fresh heartbeat.                      |
+| Saved, unvalidated | JSON on disk that has not passed validation for its exact revision. Inspection does not validate it.    |
+| Passively checked  | Validation checked the exact input. Referenced files can still change before activation.                |
+| Restart required   | Saved JSON differs from the API snapshot. Stop and restart all components with the same validated file. |
 
-Use System to inspect settings. When both active and saved configuration permit
-editing, select the required section. Open **Advanced** and use
-**Check changes before saving** for passive validation. Use **Save changes** to
-save that section, or **Save all changed sections** for related changed sections.
+Use System to inspect settings. Host JSON has no browser save or reload control,
+regardless of `system_settings_read_only`. Stop the API and all workers at safe
+boundaries before editing JSON. Then run
+`domus configuration-check <absolute-configuration-file>`.
 Validation reads existing inputs, verifies TLS, and queries
 current-schema SQLite. It does not migrate, create/bind roots, contact providers,
-start work, or activate TLS. There is no general backend-validation CLI.
+start work, or activate TLS. Invalid input produces errors and a failing exit status.
 Do not substitute `serve`, `api-preview`, or `PreparedServer::load` for validation.
 
 The backend enforces `system_settings_read_only` on each protected write command. The browser
-cannot change that setting. Keep hidden references unchanged unless a write-only
-replacement is intended. A blank replacement must not erase a saved secret.
+cannot change that setting. It controls SQLite policy commands, not host JSON.
+The old host save and API-only reload routes return `410 Gone`.
+Preserve old configuration locks and interrupted files as operator evidence.
+Never delete or adopt them as automatic recovery.
 
-After a failed save, retain the draft. Refresh and review the saved revision
-before retrying. A pre-replacement failure preserves the previous file. A sync or
-verification failure after replacement can leave an uncertain saved result; do
-not claim rollback. Inspect an interrupted owned `.pending` file with the API
-stopped. Never delete configuration or its stable lock as automatic recovery.
-
-**Reload** requests explicit, revision-bound API activation. Preparation failure
-keeps the old host active. A failed listener restoration is fatal and needs
-operator recovery. After an origin or identity change, reconnect at the intended
-origin, sign in if required, and check the active revision. A pending command or
-lost response does not prove activation. Do not retry reload automatically.
-
-API reload does not restart the worker. Stop the worker at a safe boundary, then
-start it with the reviewed saved configuration. Confirm its fresh revision.
+Restart all components with the same validated configuration. After an origin or
+identity change, reconnect at the intended origin, sign in if required, and check
+the API's active revision and a fresh worker heartbeat. Startup rechecks every
+reference. A successful passive check is not activation or a reservation.
 Accepted requests retain their configuration digest; a changed provider/account
 or staging choice cannot silently replace it.
 
 For manual edits, stop the API first. Stop the worker too when its configuration
 changes. Preserve private permissions and the stable sibling lock. Restart in
-API-then-worker order. Tools that edit live JSON must implement the full
-[configuration writer protocol](agent-operations.md#backend-configuration-writers);
-atomic rename alone is not sufficient.
+API-then-worker order. Application components never edit existing host JSON.
+Do not use a file replacement as a substitute for stopping all components.
 
 ## Certificates and peer networking
 

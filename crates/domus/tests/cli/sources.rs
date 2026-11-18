@@ -45,7 +45,8 @@ fn source_review_cli_imports_only_local_listing_and_requires_separate_exact_appr
         catalog,
     )?;
     store.approve_plan(job, plan.version)?;
-    let db = database.to_str().ok_or("database")?;
+    let host = write_host(state.path(), &database)?;
+    let db = host.to_str().ok_or("host path")?;
     let job = job.to_string();
     let version = plan.version.to_string();
     let listing = state.path().join("listing.json");
@@ -60,13 +61,27 @@ fn source_review_cli_imports_only_local_listing_and_requires_separate_exact_appr
         json!({"folder":"never-echo-private"}),
     ] {
         std::fs::write(&listing, serde_json::to_vec(&body)?)?;
-        let output = run(&["source-candidate-prepare", db, &job, &version, path])?;
+        let output = run(&[
+            "source-candidate-prepare",
+            "--host",
+            db,
+            &job,
+            &version,
+            path,
+        ])?;
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         assert!(!String::from_utf8(output.stderr)?.contains("never-echo-private"));
     }
     std::fs::write(&listing, serde_json::to_vec(&folder)?)?;
-    let output = run(&["source-candidate-prepare", db, &job, &version, path])?;
+    let output = run(&[
+        "source-candidate-prepare",
+        "--host",
+        db,
+        &job,
+        &version,
+        path,
+    ])?;
     assert!(
         output.status.success(),
         "{}",
@@ -76,15 +91,23 @@ fn source_review_cli_imports_only_local_listing_and_requires_separate_exact_appr
     let id = candidate["id"].as_i64().ok_or("candidate")?.to_string();
     let hash = candidate["review_sha256"].as_str().ok_or("review digest")?;
     assert!(candidate["approved_at"].is_null());
-    let output = run(&["source-candidate", db, &id])?;
+    let output = run(&["source-candidate", "--host", db, &id])?;
     assert!(output.status.success());
     assert_eq!(serde_json::from_slice::<Value>(&output.stdout)?, candidate);
     let flag = "--reviewed-exact-edition-and-permitted-download";
-    let invalid = run(&["source-candidate-approve", db, &id, &version, hash])?;
+    let invalid = run(&[
+        "source-candidate-approve",
+        "--host",
+        db,
+        &id,
+        &version,
+        hash,
+    ])?;
     assert!(!invalid.status.success());
     assert!(invalid.stdout.is_empty());
     let invalid = run(&[
         "source-candidate-approve",
+        "--host",
         db,
         &id,
         &version,
@@ -92,7 +115,15 @@ fn source_review_cli_imports_only_local_listing_and_requires_separate_exact_appr
         flag,
     ])?;
     assert!(!invalid.status.success());
-    let output = run(&["source-candidate-approve", db, &id, &version, hash, flag])?;
+    let output = run(&[
+        "source-candidate-approve",
+        "--host",
+        db,
+        &id,
+        &version,
+        hash,
+        flag,
+    ])?;
     assert!(
         output.status.success(),
         "{}",
@@ -108,6 +139,7 @@ fn source_review_cli_imports_only_local_listing_and_requires_separate_exact_appr
     std::fs::write(&prohibited, serde_json::to_vec(&folder)?)?;
     let invalid = run(&[
         "source-candidate-prepare",
+        "--host",
         db,
         &job,
         &version,
@@ -123,7 +155,8 @@ fn source_review_cli_never_creates_or_migrates_state_or_echoes_input() -> TestRe
     let database = state.path().join("missing.db");
     let listing = state.path().join("listing.json");
     std::fs::write(&listing, br#"{"private":"never-echo-private"}"#)?;
-    let db = database.to_str().ok_or("database")?;
+    let host = write_host(state.path(), &database)?;
+    let db = host.to_str().ok_or("host path")?;
     let path = listing.to_str().ok_or("input")?;
     for old in [false, true] {
         let raw = if old {
@@ -134,10 +167,11 @@ fn source_review_cli_never_creates_or_migrates_state_or_echoes_input() -> TestRe
             None
         };
         for args in [
-            vec!["source-candidate-prepare", db, "1", "2", path],
-            vec!["source-candidate", db, "1"],
+            vec!["source-candidate-prepare", "--host", db, "1", "2", path],
+            vec!["source-candidate", "--host", db, "1"],
             vec![
                 "source-candidate-approve",
+                "--host",
                 db,
                 "1",
                 "2",

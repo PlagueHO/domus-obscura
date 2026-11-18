@@ -5,7 +5,7 @@ use std::sync::{Arc, Barrier};
 const BINDING: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn fixture() -> Result<(tempfile::TempDir, Store, Vec<i64>)> {
-    let temp = tempfile::tempdir()?;
+    let temp = crate::infrastructure::permissions::private_test_directory()?;
     let store = Store::open(&temp.path().join("state.sqlite"))?;
     let mut locations = Vec::new();
     for (index, name) in ["first", "second", "third"].into_iter().enumerate() {

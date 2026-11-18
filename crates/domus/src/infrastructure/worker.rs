@@ -1,9 +1,9 @@
 use super::catalog::CatalogQuery;
 use super::filesystem::require_local_disk;
-use super::local_file::{protect_files, read_local};
+use super::local_file::protect_files;
 use super::soulseek::{SoulseekSession, public_peer_ip};
 use super::staging::StagingRoot;
-use super::store::{JobClaim, SourceFile, Store};
+use super::store::{JobClaim, SourceFile, Store, StoreOpenMode, StoreSource};
 use crate::application::export_playback_album;
 use crate::application::services::{Capability, ServiceConfiguration};
 use crate::domain::JobState;
@@ -16,17 +16,21 @@ use std::time::Duration;
 /// Import only bounded local folder metadata for a separate unapproved review.
 /// No credentials, live providers, staging or worker claims are used.
 pub fn prepare_source_candidate_file(
-    database: &Path,
+    configuration: &Path,
     job: i64,
     version: i64,
     path: &Path,
 ) -> Result<super::store::SourceCandidate> {
-    let snapshot = Store::open_read_snapshot(database)?;
-    protect_files(&snapshot, &[path])?;
-    let listing = serde_json::from_slice(&read_local(path, 1_048_576, false)?)
+    let store = super::server::configuration::ConfigurationService::open(configuration)?
+        .open_store(StoreOpenMode::ReadCurrent)?;
+    protect_files(&store, &[configuration, path])?;
+    let source = store.source();
+    drop(store);
+    let listing = serde_json::from_slice(&source.read_input(path, 1_048_576, false)?)
         .map_err(|_| Error::InvalidInput("invalid source folder listing".into()))?;
-    drop(snapshot);
-    Store::open_current_existing(database)?.prepare_source_candidate(job, version, listing)
+    source
+        .open(StoreOpenMode::Current)?
+        .prepare_source_candidate(job, version, listing)
 }
 
 #[derive(Deserialize)]
@@ -38,6 +42,21 @@ struct PublicationConfiguration {
     plan_version: i64,
     normalization_run: i64,
     acknowledge_new_only_publication: bool,
+}
+
+impl PublicationConfiguration {
+    fn validate(&self) -> Result<()> {
+        if !self.acknowledge_new_only_publication
+            || !self.database.is_absolute()
+            || !self.staging_root.is_absolute()
+            || self.job_id <= 0
+            || self.plan_version <= 0
+            || self.normalization_run <= 0
+        {
+            return Err(Error::InvalidInput("publication requires absolute local state/staging paths, positive IDs and explicit new-only acknowledgement".into()));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -58,60 +77,68 @@ pub struct ResumePublication {
 /// Resume only an existing publication journal. Browser input selects no paths
 /// or credentials. All plan, claim, staging and exact-file checks still apply.
 pub fn resume_publication(
-    database: &Path,
+    database: &StoreSource,
     staging_root: &Path,
     job: i64,
     version: i64,
     request: ResumePublication,
 ) -> Result<PublicationOutcome> {
-    publish_configuration(
-        PublicationConfiguration {
-            database: database.to_owned(),
-            staging_root: staging_root.to_owned(),
-            job_id: job,
-            plan_version: version,
-            normalization_run: request.normalization_run,
-            acknowledge_new_only_publication: request.acknowledge_new_only_publication,
-        },
+    let configuration = PublicationConfiguration {
+        database: database.path().to_owned(),
+        staging_root: staging_root.to_owned(),
+        job_id: job,
+        plan_version: version,
+        normalization_run: request.normalization_run,
+        acknowledge_new_only_publication: request.acknowledge_new_only_publication,
+    };
+    configuration.validate()?;
+    publish_controlled(
+        database.open(StoreOpenMode::Current)?,
+        configuration,
         &[],
         true,
+        None,
     )
 }
 
 /// Explicit local publication, never an acquisition retry or replacement.
 /// No account credentials or provider connection is used by this command.
-pub fn publish_new_once(path: &Path) -> Result<PublicationOutcome> {
+pub fn publish_new_once(path: &Path, host: &Path) -> Result<PublicationOutcome> {
+    let selected_host = super::services::read_host(host)?;
     let configuration: PublicationConfiguration =
-        serde_json::from_slice(&read_local(path, 16384, false)?)
+        serde_json::from_slice(&selected_host.read_input(path, 16384)?)
             .map_err(|_| Error::InvalidInput("invalid publication configuration".into()))?;
-    publish_configuration(configuration, &[path], false)
-}
-
-fn publish_configuration(
-    configuration: PublicationConfiguration,
-    protected_files: &[&Path],
-    require_journal: bool,
-) -> Result<PublicationOutcome> {
-    publish_controlled(configuration, protected_files, require_journal, None)
+    configuration.validate()?;
+    let store = super::services::load_cli_operation_store(
+        selected_host,
+        host,
+        &configuration.database,
+        &[path],
+        StoreOpenMode::Current,
+    )?;
+    publish_controlled(store, configuration, &[host, path], false, None)
 }
 
 pub(crate) fn publish_worker(
-    database: &Path,
+    database: &StoreSource,
     staging_root: &Path,
     job: i64,
     version: i64,
     run: i64,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<PublicationOutcome> {
+    let configuration = PublicationConfiguration {
+        database: database.path().to_owned(),
+        staging_root: staging_root.to_owned(),
+        job_id: job,
+        plan_version: version,
+        normalization_run: run,
+        acknowledge_new_only_publication: true,
+    };
+    configuration.validate()?;
     publish_controlled(
-        PublicationConfiguration {
-            database: database.to_owned(),
-            staging_root: staging_root.to_owned(),
-            job_id: job,
-            plan_version: version,
-            normalization_run: run,
-            acknowledge_new_only_publication: true,
-        },
+        database.open(StoreOpenMode::Current)?,
+        configuration,
         &[],
         false,
         Some(stop),
@@ -119,21 +146,12 @@ pub(crate) fn publish_worker(
 }
 
 fn publish_controlled(
+    mut store: Store,
     configuration: PublicationConfiguration,
     protected_files: &[&Path],
     require_journal: bool,
     stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<PublicationOutcome> {
-    if !configuration.acknowledge_new_only_publication
-        || !configuration.database.is_absolute()
-        || !configuration.staging_root.is_absolute()
-        || configuration.job_id <= 0
-        || configuration.plan_version <= 0
-        || configuration.normalization_run <= 0
-    {
-        return Err(Error::InvalidInput("publication requires absolute local state/staging paths, positive IDs and explicit new-only acknowledgement".into()));
-    }
-    let mut store = Store::open_current_existing(&configuration.database)?;
     if let Some(stop) = stop {
         store = store.with_worker_stop(stop);
     }
@@ -274,8 +292,8 @@ pub(crate) struct Credentials {
     pub(crate) password: String,
 }
 
-pub(crate) fn read_credentials(path: &Path) -> Result<Credentials> {
-    let mut bytes = read_local(path, 4096, true)?;
+pub(crate) fn read_credentials(source: &StoreSource, path: &Path) -> Result<Credentials> {
+    let mut bytes = source.read_input(path, 4096, true)?;
     let parsed = serde_json::from_slice::<Credentials>(&bytes);
     bytes.fill(0);
     let credentials =
@@ -285,17 +303,14 @@ pub(crate) fn read_credentials(path: &Path) -> Result<Credentials> {
 }
 
 pub(crate) fn account_lock(
-    database: &Path,
+    database: &StoreSource,
     credentials: &Credentials,
 ) -> Result<super::local_file::ProcessLock> {
     use sha2::{Digest, Sha256};
-    super::local_file::ProcessLock::acquire(
-        database,
-        &format!(
-            "account-{:x}",
-            Sha256::digest(credentials.username.as_bytes())
-        ),
-    )
+    database.state_lock(&format!(
+        "account-{:x}",
+        Sha256::digest(credentials.username.as_bytes())
+    ))
 }
 
 #[derive(Deserialize)]
@@ -322,46 +337,40 @@ struct FolderSelection {
 }
 
 impl SearchConfiguration {
-    fn read(
-        path: &Path,
-        folder_query: bool,
-    ) -> Result<(Self, crate::domain::CatalogRelease, Credentials)> {
-        Self::read_selected(path, folder_query, None)
-    }
-
     fn read_selected(
         path: &Path,
         folder_query: bool,
-        host: Option<&Path>,
-    ) -> Result<(Self, crate::domain::CatalogRelease, Credentials)> {
-        let mut config: Self = serde_json::from_slice(&read_local(path, 16384, false)?)
+        host: &Path,
+    ) -> Result<(
+        Self,
+        crate::domain::CatalogRelease,
+        Credentials,
+        StoreSource,
+    )> {
+        let selected_host = super::services::read_host(host)?;
+        let mut config: Self = serde_json::from_slice(&selected_host.read_input(path, 16384)?)
             .map_err(|_| Error::InvalidInput("invalid source-read configuration".into()))?;
         config.services.validate_builtins()?;
         config
             .services
             .require(Capability::Acquisition, "soulseek")?;
-        let selected = host
-            .map(|host| {
-                super::services::load_cli_source_store(
-                    host,
-                    &config.database,
-                    &[path, &config.credentials_file],
-                )
-            })
-            .transpose()?;
-        let cache = selected.as_ref().and_then(Store::cache);
-        if let Some(store) = &selected {
-            config.database = store.database_path().to_owned();
-        }
-        Self::validate(config, &[path], folder_query, cache)
+        Self::inputs(&config, folder_query)?;
+        let selected = super::services::load_cli_source_store(
+            selected_host,
+            host,
+            &config.database,
+            &[path, &config.credentials_file],
+        )?;
+        let cache = selected.cache();
+        config.database = selected.database_path().to_owned();
+        let database = selected.source();
+        drop(selected);
+        let (config, release, credentials) =
+            Self::validate(config, &[host, path], folder_query, cache, &database)?;
+        Ok((config, release, credentials, database))
     }
 
-    fn validate(
-        config: Self,
-        protected: &[&Path],
-        folder_query: bool,
-        cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
-    ) -> Result<(Self, crate::domain::CatalogRelease, Credentials)> {
+    fn inputs(config: &Self, folder_query: bool) -> Result<CatalogQuery> {
         config.services.validate_builtins()?;
         config
             .services
@@ -387,18 +396,32 @@ impl SearchConfiguration {
                 ));
             }
         }
-        let query = CatalogQuery::release(&config.release_id)?;
-        let store = Store::open_read_snapshot(&config.database)?;
+        CatalogQuery::release(&config.release_id)
+    }
+
+    fn validate(
+        config: Self,
+        protected: &[&Path],
+        folder_query: bool,
+        cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
+        database: &StoreSource,
+    ) -> Result<(Self, crate::domain::CatalogRelease, Credentials)> {
+        let query = Self::inputs(&config, folder_query)?;
+        let store = database.open(StoreOpenMode::ReadCurrent)?;
         let mut files = protected.to_vec();
         files.push(&config.credentials_file);
         protect_files(&store, &files)?;
         let cached = if let Some(cache) = cache {
             drop(store);
-            Store::open_read_current(&config.database)?
+            database
+                .open(StoreOpenMode::ReadCurrent)?
                 .with_cache(cache)
                 .peek_catalog_cache(&query)?
         } else {
-            store.peek_catalog_cache(&query)?
+            drop(store);
+            database
+                .open(StoreOpenMode::Snapshot)?
+                .peek_catalog_cache(&query)?
         };
         let cache = cached.ok_or_else(|| {
             Error::Conflict(
@@ -407,7 +430,7 @@ impl SearchConfiguration {
             )
         })?;
         let edition = query.parse_release(&cache.body)?;
-        let credentials = read_credentials(&config.credentials_file)?;
+        let credentials = read_credentials(database, &config.credentials_file)?;
         Ok((config, edition, credentials))
     }
 }
@@ -429,6 +452,7 @@ mod cache_tests {
         let state = crate::infrastructure::permissions::private_test_directory()?;
         let database = state.path().join("state.db");
         let store = Store::open(&database)?;
+        let database = store.source();
         let credentials = state.path().join("credentials.json");
         std::fs::write(
             &credentials,
@@ -554,24 +578,20 @@ pub struct SourceFolderReport {
 }
 
 impl PreparedFolder {
-    pub fn load(path: &Path) -> Result<Self> {
-        let (config, release, credentials) = SearchConfiguration::read(path, true)?;
-        Self::prepare(config, release, credentials)
-    }
-
     /// Select only an already-bound host cache; loading never contacts a peer.
     pub fn load_with_host(path: &Path, host: &Path) -> Result<Self> {
-        let (config, release, credentials) =
-            SearchConfiguration::read_selected(path, true, Some(host))?;
-        Self::prepare(config, release, credentials)
+        let (config, release, credentials, database) =
+            SearchConfiguration::read_selected(path, true, host)?;
+        Self::prepare(config, release, credentials, database)
     }
 
     fn prepare(
         config: SearchConfiguration,
         release: crate::domain::CatalogRelease,
         credentials: Credentials,
+        database: StoreSource,
     ) -> Result<Self> {
-        let account = account_lock(&config.database, &credentials)?;
+        let account = account_lock(&database, &credentials)?;
         let edition = release.selection(None)?;
         let selection = config.folder.ok_or_else(|| {
             Error::InvalidInput("source-folder requires one selected peer folder".into())
@@ -619,24 +639,20 @@ pub struct PreparedSearch {
 }
 
 impl PreparedSearch {
-    pub fn load(path: &Path) -> Result<Self> {
-        let (config, release, credentials) = SearchConfiguration::read(path, false)?;
-        Self::prepare(config, release, credentials)
-    }
-
     /// Select only an already-bound host cache; loading never contacts a peer.
     pub fn load_with_host(path: &Path, host: &Path) -> Result<Self> {
-        let (config, release, credentials) =
-            SearchConfiguration::read_selected(path, false, Some(host))?;
-        Self::prepare(config, release, credentials)
+        let (config, release, credentials, database) =
+            SearchConfiguration::read_selected(path, false, host)?;
+        Self::prepare(config, release, credentials, database)
     }
 
     fn prepare(
         config: SearchConfiguration,
         release: crate::domain::CatalogRelease,
         credentials: Credentials,
+        database: StoreSource,
     ) -> Result<Self> {
-        let account = account_lock(&config.database, &credentials)?;
+        let account = account_lock(&database, &credentials)?;
         let query = format!("{} {}", release.summary.artist, release.summary.title);
         if query.len() > 256 || query.chars().any(char::is_control) {
             return Err(Error::InvalidInput(
@@ -648,7 +664,7 @@ impl PreparedSearch {
             credentials,
             server: config.server,
             query,
-            policy: source_policy(&config.database)?,
+            policy: source_policy(&database)?,
         })
     }
 
@@ -712,17 +728,34 @@ struct ValidatedWorker {
 }
 
 impl ValidatedWorker {
-    fn read(path: &Path, snapshot: bool) -> Result<Self> {
-        let configuration: Configuration = serde_json::from_slice(&read_local(path, 16384, false)?)
-            .map_err(|_| Error::InvalidInput("invalid worker configuration".into()))?;
-        Self::validate(configuration, &[path], snapshot)
+    fn read(path: &Path, host: &Path, snapshot: bool) -> Result<Self> {
+        let selected_host = super::services::read_host(host)?;
+        let configuration: Configuration =
+            serde_json::from_slice(&selected_host.read_input(path, 16384)?)
+                .map_err(|_| Error::InvalidInput("invalid worker configuration".into()))?;
+        Self::inputs(&configuration)?;
+        let selected = super::services::load_cli_source_store(
+            selected_host,
+            host,
+            &configuration.database,
+            &[path, &configuration.credentials_file],
+        )?;
+        let cache = selected.cache();
+        let source = selected.source();
+        let credentials = read_credentials(&source, &configuration.credentials_file)?;
+        drop(selected);
+        let mut store = source.open(if snapshot {
+            StoreOpenMode::Snapshot
+        } else {
+            StoreOpenMode::Current
+        })?;
+        if let Some(cache) = cache {
+            store = store.with_cache(cache);
+        }
+        Self::from_store(configuration, credentials, snapshot, store)
     }
 
-    fn validate(
-        mut configuration: Configuration,
-        protected: &[&Path],
-        snapshot: bool,
-    ) -> Result<Self> {
+    fn inputs(configuration: &Configuration) -> Result<()> {
         configuration.services.validate_builtins()?;
         configuration
             .services
@@ -745,14 +778,15 @@ impl ValidatedWorker {
             }
             require_local_disk(&std::fs::canonicalize(file)?)?;
         }
-        let store = if snapshot {
-            Store::open_read_snapshot(&configuration.database)?
-        } else {
-            Store::open_current_existing(&configuration.database)?
-        };
-        let mut files = protected.to_vec();
-        files.push(&configuration.credentials_file);
-        protect_files(&store, &files)?;
+        Ok(())
+    }
+
+    fn from_store(
+        mut configuration: Configuration,
+        credentials: Credentials,
+        snapshot: bool,
+        store: Store,
+    ) -> Result<Self> {
         let state = store.job_state(configuration.job_id)?;
         if snapshot {
             store.require_job_running(configuration.job_id, configuration.plan_version)?;
@@ -768,7 +802,6 @@ impl ValidatedWorker {
                 "provide exactly one manual source or approved source_candidate for an unselected queued/searching job; omit both for an existing downloading/validating/normalizing source".into(),
             )),
         };
-        let credentials = read_credentials(&configuration.credentials_file)?;
         if snapshot {
             store.approved_artwork(configuration.job_id, configuration.plan_version)?;
         }
@@ -795,8 +828,8 @@ impl ValidatedWorker {
 impl PreparedWorker {
     /// Check local inputs without claiming the job, changing source state,
     /// opening staging or making network requests. Run reloads all inputs.
-    pub fn check(path: &Path) -> Result<WorkerCheck> {
-        let validated = ValidatedWorker::read(path, true)?;
+    pub fn check(path: &Path, host: &Path) -> Result<WorkerCheck> {
+        let validated = ValidatedWorker::read(path, host, true)?;
         let (tracks, received_tracks) = if let Some((_, files)) = &validated.source {
             (files.len(), 0)
         } else {
@@ -823,8 +856,8 @@ impl PreparedWorker {
         })
     }
 
-    pub fn load(path: &Path) -> Result<Self> {
-        Self::from_validated(ValidatedWorker::read(path, false)?)
+    pub fn load(path: &Path, host: &Path) -> Result<Self> {
+        Self::from_validated(ValidatedWorker::read(path, host, false)?)
     }
 
     fn from_validated(validated: ValidatedWorker) -> Result<Self> {
@@ -845,7 +878,7 @@ impl PreparedWorker {
         let account = if shared_account.is_some() {
             None
         } else {
-            Some(account_lock(&configuration.database, &credentials)?)
+            Some(account_lock(&store.source(), &credentials)?)
         };
         if let Some(decision) =
             store.check_artwork(configuration.job_id, configuration.plan_version)?
@@ -1007,7 +1040,8 @@ impl PreparedWorker {
                 self.store.submission_approval(&self.claim)?;
                 let result = (|| {
                     protect_files(&self.store, &[&self.credentials_file])?;
-                    let mut credentials = read_credentials(&self.credentials_file)?;
+                    let mut credentials =
+                        read_credentials(&self.store.source(), &self.credentials_file)?;
                     if credentials.username != account {
                         return Err(Error::Conflict(
                             "Soulseek account changed during worker reconnect".into(),
@@ -1086,10 +1120,15 @@ impl PreparedWorker {
 #[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalAcquisition {
+    #[serde(default = "default_staging_root")]
     pub staging_root: PathBuf,
     pub credentials_file: PathBuf,
     pub server: SocketAddrV4,
     pub acknowledge_plaintext_login: bool,
+}
+
+fn default_staging_root() -> PathBuf {
+    "staging".into()
 }
 
 #[derive(Default)]
@@ -1113,9 +1152,8 @@ impl LocalAcquisition {
             ));
         }
         protect_files(store, &[&self.credentials_file])?;
-        let root = super::filesystem::LibraryDirectory::open(&self.staging_root)?;
-        let canonical = std::fs::canonicalize(&self.staging_root)?;
-        require_local_disk(&canonical)?;
+        let (canonical, root) = store.open_candidate_root(&self.staging_root, "staging")?;
+        root.require_local()?;
         store.check_native_root(
             canonical
                 .to_str()
@@ -1123,15 +1161,14 @@ impl LocalAcquisition {
             "staging",
             root.native_root(),
         )?;
-        super::permissions::FilePermissions::current()?
-            .check(&root.into_directory().into_std_file(), true)?;
-        read_credentials(&self.credentials_file)?;
+        super::permissions::FilePermissions::current()?.check(&root.directory_file()?, true)?;
+        read_credentials(&store.source(), &self.credentials_file)?;
         Ok(())
     }
 
     fn metadata(
         &self,
-        database: &Path,
+        database: &StoreSource,
         services: ServiceConfiguration,
         release_id: String,
         folder: Option<FolderSelection>,
@@ -1145,7 +1182,7 @@ impl LocalAcquisition {
         SearchConfiguration::validate(
             SearchConfiguration {
                 services,
-                database: database.to_owned(),
+                database: database.path().to_owned(),
                 credentials_file: self.credentials_file.clone(),
                 server: self.server,
                 release_id,
@@ -1155,12 +1192,13 @@ impl LocalAcquisition {
             &[],
             is_folder,
             cache,
+            database,
         )
     }
 
     pub fn search(
         &self,
-        database: &Path,
+        database: &StoreSource,
         services: ServiceConfiguration,
         release_id: String,
     ) -> Result<SourceSearchReport> {
@@ -1169,7 +1207,7 @@ impl LocalAcquisition {
 
     pub(crate) fn search_with_cache(
         &self,
-        database: &Path,
+        database: &StoreSource,
         services: ServiceConfiguration,
         release_id: String,
         cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
@@ -1194,7 +1232,7 @@ impl LocalAcquisition {
 
     pub fn folder(
         &self,
-        database: &Path,
+        database: &StoreSource,
         services: ServiceConfiguration,
         request: SourceFolderRequest,
     ) -> Result<SourceFolderReport> {
@@ -1203,7 +1241,7 @@ impl LocalAcquisition {
 
     pub(crate) fn folder_with_cache(
         &self,
-        database: &Path,
+        database: &StoreSource,
         services: ServiceConfiguration,
         request: SourceFolderRequest,
         cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
@@ -1234,7 +1272,7 @@ impl LocalAcquisition {
 
     pub fn acquire_and_publish(
         &self,
-        database: &Path,
+        database: &StoreSource,
         services: ServiceConfiguration,
         job_id: i64,
         plan_version: i64,
@@ -1252,7 +1290,7 @@ impl LocalAcquisition {
 
     pub(crate) fn acquire_controlled(
         &self,
-        database: &Path,
+        database: &StoreSource,
         services: ServiceConfiguration,
         job_id: i64,
         plan_version: i64,
@@ -1264,23 +1302,24 @@ impl LocalAcquisition {
                 "new-only publication needs explicit acknowledgement".into(),
             ));
         }
-        let mut validated = ValidatedWorker::validate(
-            Configuration {
-                services,
-                database: database.to_owned(),
-                staging_root: self.staging_root.clone(),
-                credentials_file: self.credentials_file.clone(),
-                server: self.server,
-                job_id,
-                plan_version,
-                acknowledge_plaintext_login: self.acknowledge_plaintext_login,
-                export_for_playback: false,
-                source: None,
-                source_candidate: request.source_candidate,
-            },
-            &[],
-            false,
-        )?;
+        let configuration = Configuration {
+            services,
+            database: database.path().to_owned(),
+            staging_root: self.staging_root.clone(),
+            credentials_file: self.credentials_file.clone(),
+            server: self.server,
+            job_id,
+            plan_version,
+            acknowledge_plaintext_login: self.acknowledge_plaintext_login,
+            export_for_playback: false,
+            source: None,
+            source_candidate: request.source_candidate,
+        };
+        ValidatedWorker::inputs(&configuration)?;
+        let store = database.open(StoreOpenMode::Current)?;
+        protect_files(&store, &[&configuration.credentials_file])?;
+        let credentials = read_credentials(database, &configuration.credentials_file)?;
+        let mut validated = ValidatedWorker::from_store(configuration, credentials, false, store)?;
         if let Some(stop) = execution.stop {
             validated.store = validated.store.with_worker_stop(stop);
         }
@@ -1305,8 +1344,9 @@ pub struct SourceFolderRequest {
     pub audio_profile: Option<crate::domain::AudioProfile>,
 }
 
-fn source_policy(database: &Path) -> Result<crate::domain::AudioPolicy> {
-    Ok(Store::open_read_current(database)?
+fn source_policy(database: &StoreSource) -> Result<crate::domain::AudioPolicy> {
+    Ok(database
+        .open(StoreOpenMode::ReadCurrent)?
         .settings()?
         .ok_or_else(|| Error::Conflict("save output settings before source discovery".into()))?
         .policy)

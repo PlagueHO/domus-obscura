@@ -2,8 +2,16 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::io;
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::FromRawHandle;
 use std::ptr::{self, NonNull};
-use windows_sys::Win32::Foundation::LocalFree;
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, FileFsDeviceInformation, NtOpenFile,
+    NtQueryVolumeInformationFile,
+};
+use windows_sys::Win32::Foundation::{
+    INVALID_HANDLE_VALUE, LocalFree, RtlNtStatusToDosError, UNICODE_STRING,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
@@ -13,8 +21,132 @@ use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, OBJECT_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
 };
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GetVolumeInformationByHandleW,
+};
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 const MAX_SDDL_UNITS: usize = 131_072;
+
+#[repr(C)]
+struct DeviceInformation {
+    device_type: u32,
+    characteristics: u32,
+}
+
+pub(super) fn filesystem_information(file: &File) -> io::Result<super::FilesystemInformation> {
+    let name = UNICODE_STRING {
+        Length: 0,
+        MaximumLength: 0,
+        Buffer: ptr::null_mut(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: file.as_raw_handle(),
+        ObjectName: &name,
+        Attributes: 0,
+        SecurityDescriptor: ptr::null(),
+        SecurityQualityOfService: ptr::null(),
+    };
+    let mut handle = ptr::null_mut();
+    let mut completion = std::mem::MaybeUninit::<IO_STATUS_BLOCK>::zeroed();
+    // SAFETY: the empty name reopens the borrowed object, not its former path.
+    // Synchronous, nonalertable I/O confines every output buffer to this call.
+    // ReOpenFile cannot reopen the directory handles used by the caller.
+    let result = unsafe {
+        NtOpenFile(
+            &mut handle,
+            FILE_READ_ATTRIBUTES | 0x0010_0000,
+            &attributes,
+            completion.as_mut_ptr(),
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+        )
+    };
+    if result < 0 {
+        return Err(nt_error(result));
+    }
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(invalid(
+            "Windows returned an invalid filesystem query handle",
+        ));
+    }
+    // SAFETY: successful NtOpenFile transfers one new owned handle.
+    let synchronous = unsafe { File::from_raw_handle(handle) };
+    if result != 0 {
+        return Err(invalid(
+            "Windows filesystem reopen did not complete exactly",
+        ));
+    }
+    let mut device = DeviceInformation {
+        device_type: 0,
+        characteristics: 0,
+    };
+    let mut completion = std::mem::MaybeUninit::<IO_STATUS_BLOCK>::zeroed();
+    // SAFETY: the documented FILE_FS_DEVICE_INFORMATION ABI is two ULONGs.
+    // This synchronous handle completes the request before either stack buffer
+    // can go out of scope. The original caller's I/O state is not reused.
+    let result = unsafe {
+        NtQueryVolumeInformationFile(
+            synchronous.as_raw_handle(),
+            completion.as_mut_ptr(),
+            ptr::from_mut(&mut device).cast(),
+            size_of::<DeviceInformation>() as u32,
+            FileFsDeviceInformation,
+        )
+    };
+    if result < 0 {
+        return Err(nt_error(result));
+    }
+    // SAFETY: successful synchronous completion initialized IO_STATUS_BLOCK.
+    let completion = unsafe { completion.assume_init() };
+    if result != 0 || completion.Information != size_of::<DeviceInformation>() {
+        return Err(invalid("Windows filesystem query did not complete exactly"));
+    }
+    let remote = device.characteristics & 0x10 != 0;
+    let name = if remote {
+        None
+    } else {
+        let mut name = [0_u16; 261];
+        // SAFETY: all unused optional outputs are null. The name buffer is
+        // initialized and lives through the synchronous Win32 call.
+        if unsafe {
+            GetVolumeInformationByHandleW(
+                synchronous.as_raw_handle(),
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                name.as_mut_ptr(),
+                name.len() as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let end = name
+            .iter()
+            .position(|unit| *unit == 0)
+            .filter(|end| *end != 0)
+            .ok_or_else(|| invalid("Windows returned an invalid filesystem name"))?;
+        Some(
+            String::from_utf16(&name[..end])
+                .map_err(|_| invalid("Windows filesystem name is not valid UTF-16"))?,
+        )
+    };
+    Ok(super::FilesystemInformation {
+        device_type: device.device_type,
+        remote,
+        name,
+    })
+}
+
+fn nt_error(status: i32) -> io::Error {
+    // SAFETY: this pure SDK conversion accepts any NTSTATUS value.
+    io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)
+}
 
 struct LocalAllocation(NonNull<c_void>);
 

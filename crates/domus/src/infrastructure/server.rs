@@ -192,6 +192,18 @@ impl PreparedServer {
         bootstrap::prepare()
     }
 
+    /// Select private application storage explicitly. Existing state without
+    /// config.json is refused; this never adopts or moves old state or media.
+    pub fn local_at(root: &Path) -> Result<Self> {
+        bootstrap::prepare_at(root)
+    }
+
+    /// Create fresh selected private state without loading services or opening
+    /// a listener. Existing configuration and nonempty storage are refused.
+    pub fn initialize_local_at(root: &Path) -> Result<PathBuf> {
+        bootstrap::initialize_at(root)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let (configuration_source, configuration, hostname) =
             configuration::ConfigurationService::load(path)?;
@@ -199,12 +211,13 @@ impl PreparedServer {
         {
             // Hold the worker's stable process lock through schema preparation.
             // A live worker permits a current-schema restart, never migration.
-            match super::local_file::ProcessLock::acquire(&configuration.database, "worker") {
+            match configuration_source.state_lock("worker") {
                 Ok(_migration_guard) => {
                     Self::from_source(Arc::new(configuration_source), configuration, hostname)
                 }
                 Err(Error::Busy(_)) => {
-                    let store = Store::open_current_existing(&configuration.database)?;
+                    let store =
+                        configuration_source.open_store(super::store::StoreOpenMode::Current)?;
                     Self::from_source_with_store(
                         Arc::new(configuration_source),
                         configuration,
@@ -225,7 +238,7 @@ impl PreparedServer {
         if super::windows_service::worker_stopped()? {
             Self::from_source(Arc::new(source), configuration, hostname)
         } else {
-            let store = Store::open_current_existing(&configuration.database)?;
+            let store = source.open_store(super::store::StoreOpenMode::Current)?;
             Self::from_source_with_store(Arc::new(source), configuration, hostname, store)
         }
     }
@@ -235,7 +248,7 @@ impl PreparedServer {
         configuration: Configuration,
         hostname: String,
     ) -> Result<Self> {
-        let store = Store::open_existing(&configuration.database)?;
+        let store = configuration_source.open_store(super::store::StoreOpenMode::Existing)?;
         Self::from_source_with_store(configuration_source, configuration, hostname, store)
     }
 
@@ -263,13 +276,6 @@ impl PreparedServer {
     }
 
     async fn prepare(self) -> Result<Host> {
-        self.prepare_with_certificate_guard(None).await
-    }
-
-    async fn prepare_with_certificate_guard(
-        self,
-        previous: Option<Arc<crate::infrastructure::certificates::HostGuard>>,
-    ) -> Result<Host> {
         let Self {
             configuration,
             store,
@@ -288,9 +294,12 @@ impl PreparedServer {
                 .ok_or(Error::Internal("managed TLS configuration is missing"))?
                 .state_directory
                 .clone();
+            let source = store.source();
             Some(
                 tokio::task::spawn_blocking(move || {
-                    crate::infrastructure::certificates::HostGuard::acquire(&path, previous)
+                    let store =
+                        source.open(crate::infrastructure::store::StoreOpenMode::ReadCurrent)?;
+                    crate::infrastructure::certificates::HostGuard::acquire_for(&path, &store, None)
                 })
                 .await
                 .map_err(|_| Error::Internal("certificate host gate task failed"))??,
@@ -299,6 +308,7 @@ impl PreparedServer {
             None
         };
         let cache = store.cache();
+        let database_source = store.source();
         let mut api = match configuration.environment {
             Environment::SingleUser => {
                 Api::single_user(&configuration.origin, store, configuration.services.clone())?
@@ -343,14 +353,16 @@ impl PreparedServer {
         }
         if let Some(root) = &configuration.browser_assets {
             let root = root.clone();
-            let browser =
-                tokio::task::spawn_blocking(move || super::browser::BrowserAssets::load(&root))
-                    .await
-                    .map_err(|_| Error::Internal("browser asset task failed"))??;
+            let filesystem = database_source.filesystem()?.clone();
+            let browser = tokio::task::spawn_blocking(move || {
+                super::browser::BrowserAssets::load_for(&root, Some(&filesystem))
+            })
+            .await
+            .map_err(|_| Error::Internal("browser asset task failed"))??;
             api = api.with_browser(browser)?;
         }
         if let Some(local) = configuration.local_acquisition.clone() {
-            let database = configuration.database.clone();
+            let database = database_source;
             let services = configuration.services.clone();
             let runtime = tokio::task::spawn_blocking(move || {
                 Ok::<_, Error>(
@@ -368,7 +380,7 @@ impl PreparedServer {
             tls,
             hostname,
             source: configuration_source,
-            certificate_guard,
+            _certificate_guard: certificate_guard,
         })
     }
 
@@ -381,8 +393,6 @@ impl PreparedServer {
         if lifecycle.stopping() {
             return Ok(());
         }
-        let (sender, reloads) = tokio::sync::mpsc::channel(1);
-        self.configuration_source.attach_reload(sender)?;
         let host = self.prepare().await?;
         if lifecycle.stopping() {
             return Ok(());
@@ -391,7 +401,7 @@ impl PreparedServer {
         let result = if lifecycle.stopping() {
             Ok(())
         } else {
-            Self::run_host(host, reloads, &mut renewals, lifecycle).await
+            Self::run_host(host, lifecycle).await
         };
         if let Some(owner) = &mut renewals {
             owner.drain().await?;
@@ -399,20 +409,10 @@ impl PreparedServer {
         result
     }
 
-    async fn run_host(
-        mut host: Host,
-        mut reloads: tokio::sync::mpsc::Receiver<String>,
-        renewals: &mut Option<crate::infrastructure::certificates::RenewalOwner>,
-        lifecycle: super::lifecycle::Lifecycle,
-    ) -> Result<()> {
-        let mut listener = TcpListener::bind(host.configuration.listen)?;
-        let (mut handle, mut serving) = host.start(&listener).await?;
-        let mut shutdown = ShutdownOnDrop(handle.clone());
-        let mut readiness = if lifecycle.stopping() {
-            Ok(())
-        } else {
-            lifecycle.ready()
-        };
+    async fn run_host(host: Host, lifecycle: super::lifecycle::Lifecycle) -> Result<()> {
+        let listener = TcpListener::bind(host.configuration.listen)?;
+        let (handle, mut serving) = host.start(&listener).await?;
+        let _shutdown = ShutdownOnDrop(handle.clone());
         eprintln!(
             "{} API preview listening on {}",
             match host.configuration.environment {
@@ -423,126 +423,16 @@ impl PreparedServer {
             },
             host.configuration.listen,
         );
-        let result = loop {
-            if let Err(error) = std::mem::replace(&mut readiness, Ok(())) {
-                break Err(error);
-            }
-            if lifecycle.stopping() {
-                break Ok(());
-            }
-            enum Event {
-                Reload(String),
-                Stop(Result<()>),
-            }
-            let event = tokio::select! {
-                result = &mut serving => Event::Stop(join_listener(result)),
-                result = lifecycle.stopped() => Event::Stop(result.map_err(Error::from)),
-                _ = host.api.refresh_identity() => Event::Stop(Err(Error::Internal("identity refresh stopped unexpectedly"))),
-                _ = watch_tls(host.configuration.clone(), host.hostname.clone(), host.tls.clone()) => Event::Stop(Err(Error::Internal("TLS refresh stopped unexpectedly"))),
-                request = reloads.recv() => match request {
-                    Some(revision) => Event::Reload(revision),
-                    None => Event::Stop(Err(Error::Internal("configuration reload channel closed"))),
-                },
-            };
-            let revision = match event {
-                Event::Stop(result) => break result,
-                Event::Reload(revision) => revision,
-            };
-            if let Some(owner) = renewals {
-                owner.drain().await?;
-            }
-            *renewals = None;
-            #[cfg(test)]
-            reload_checkpoint::reach(&host.configuration.database, "preparing").await?;
-            let prepared = tokio::time::timeout(
-                Duration::from_secs(30),
-                host.replacement(&revision, &listener),
-            )
-            .await;
-            let (candidate, candidate_listener, _idle) = match prepared {
-                Ok(Ok(candidate)) => candidate,
-                Ok(Err(_)) | Err(_) => {
-                    eprintln!("API reload preparation failed; the previous host remains active");
-                    host.source.finish_reload(
-                        revision,
-                        Err(Error::Internal("reload preparation failed")),
-                    )?;
-                    #[cfg(test)]
-                    reload_checkpoint::reach(&host.configuration.database, "rejected").await?;
-                    match renewal_owner(&host).await {
-                        Ok(owner) => *renewals = owner,
-                        Err(_) => eprintln!(
-                            "Certificate renewal could not restart after rejected reload; the previous listener remains active. Stop the API before local recovery."
-                        ),
-                    }
-                    continue;
-                }
-            };
-            #[cfg(test)]
-            reload_checkpoint::reach(&host.configuration.database, "prepared").await?;
-            // Keep a bound copy of the old socket until the new generation is
-            // listening. Failed handover can restore the immutable old host.
-            host.api.stop_local_operations();
-            drop(_idle);
-            handle.graceful_shutdown(Some(Duration::from_secs(10)));
-            if let Err(error) = join_listener((&mut serving).await) {
-                eprintln!("API listener drain failed during reload: {error}");
-            }
-            host.api.drain_local_operations().await?;
-            #[cfg(test)]
-            reload_checkpoint::reach(&host.configuration.database, "handover").await?;
-            let source = host.source.clone();
-            let expected = revision.clone();
-            let verified = tokio::task::spawn_blocking(move || source.verify_reload(&expected))
-                .await
-                .unwrap_or(Err(Error::Internal("API activation revision task failed")));
-            let started = match verified {
-                Ok(()) => match renewal_owner(&candidate).await {
-                    Ok(owner) => {
-                        *renewals = owner;
-                        candidate.start(&candidate_listener).await
-                    }
-                    Err(error) => Err(error),
-                },
-                Err(error) => Err(error),
-            };
-            match started {
-                Ok((next_handle, next_serving)) => {
-                    host = candidate;
-                    listener = candidate_listener;
-                    handle = next_handle;
-                    serving = next_serving;
-                    shutdown.0 = handle.clone();
-                    #[cfg(test)]
-                    reload_checkpoint::reach(&host.configuration.database, "before_report").await?;
-                    host.source.finish_reload(revision, Ok(()))?;
-                    #[cfg(test)]
-                    reload_checkpoint::reach(&host.configuration.database, "reported").await?;
-                    eprintln!("API configuration reload activated");
-                }
-                Err(_) => {
-                    if let Some(owner) = renewals {
-                        owner.drain().await?;
-                    }
-                    *renewals = None;
-                    eprintln!("API reload handover failed; restoring the previous host");
-                    let source = host.source.clone();
-                    let configuration = host.configuration.clone();
-                    let hostname = host.hostname.clone();
-                    let previous_guard = host.certificate_guard.clone();
-                    host = tokio::task::spawn_blocking(move || {
-                        Self::from_source(source, configuration, hostname)
-                    })
-                    .await
-                    .map_err(|_| Error::Internal("API restoration task failed"))??
-                    .prepare_with_certificate_guard(previous_guard)
-                    .await?;
-                    *renewals = renewal_owner(&host).await?;
-                    (handle, serving) = host.start(&listener).await?;
-                    shutdown.0 = handle.clone();
-                    host.source
-                        .finish_reload(revision, Err(Error::Internal("reload handover failed")))?;
-                }
+        let result = if lifecycle.stopping() {
+            Ok(())
+        } else if let Err(error) = lifecycle.ready() {
+            Err(error)
+        } else {
+            tokio::select! {
+                result = &mut serving => join_listener(result),
+                result = lifecycle.stopped() => result.map_err(Error::from),
+                _ = host.api.refresh_identity() => Err(Error::Internal("identity refresh stopped unexpectedly")),
+                _ = watch_tls(host.source.clone(), host.configuration.clone(), host.hostname.clone(), host.tls.clone()) => Err(Error::Internal("TLS refresh stopped unexpectedly")),
             }
         };
         host.api.stop_local_operations();
@@ -556,7 +446,7 @@ impl PreparedServer {
 /// Installed only by an exact child test. The database binding keeps the hook
 /// separate from every other host, including hosts on other executor threads.
 #[cfg(test)]
-pub(super) mod reload_checkpoint {
+pub(super) mod tls_checkpoint {
     use super::*;
 
     pub struct Checkpoint {
@@ -595,7 +485,7 @@ struct Host {
     tls: Option<RustlsConfig>,
     hostname: String,
     source: Arc<configuration::ConfigurationService>,
-    certificate_guard: Option<Arc<crate::infrastructure::certificates::HostGuard>>,
+    _certificate_guard: Option<Arc<crate::infrastructure::certificates::HostGuard>>,
 }
 
 type ListenerTask = tokio::task::JoinHandle<io::Result<()>>;
@@ -632,48 +522,6 @@ impl Host {
         }
         Ok((handle, serving))
     }
-
-    async fn replacement(
-        &self,
-        revision: &str,
-        listener: &TcpListener,
-    ) -> Result<(Host, TcpListener, super::api::ReloadPermit)> {
-        let idle = self.api.reload_permit()?;
-        let source = self.source.clone();
-        let expected = revision.to_owned();
-        // Blocking resource preparation can outlive its timeout. Keep media
-        // operations excluded until that preparation actually finishes.
-        let (prepared, idle) = tokio::task::spawn_blocking(move || {
-            let candidate = source.reload_candidate(&expected)?;
-            let configuration = candidate.active.clone();
-            let hostname = reqwest::Url::parse(&configuration.origin)
-                .map_err(|_| Error::InvalidInput("service origin is invalid".into()))?
-                .host_str()
-                .ok_or(Error::Internal("hostname is missing"))?
-                .trim_matches(['[', ']'])
-                .to_owned();
-            let prepared =
-                PreparedServer::from_source(Arc::new(candidate), configuration, hostname)?;
-            Ok::<_, Error>((prepared, idle))
-        })
-        .await
-        .map_err(|_| Error::Internal("API reload preparation task failed"))??;
-        let candidate = prepared
-            .prepare_with_certificate_guard(self.certificate_guard.clone())
-            .await?;
-        let listener = if candidate.configuration.listen == self.configuration.listen {
-            listener.try_clone()?
-        } else {
-            TcpListener::bind(candidate.configuration.listen)?
-        };
-        listener.set_nonblocking(true)?;
-        let source = self.source.clone();
-        let expected = revision.to_owned();
-        tokio::task::spawn_blocking(move || source.verify_reload(&expected))
-            .await
-            .map_err(|_| Error::Internal("API reload revision task failed"))??;
-        Ok((candidate, listener, idle))
-    }
 }
 
 fn join_listener(
@@ -700,28 +548,26 @@ pub(crate) async fn shutdown_signal() -> io::Result<()> {
     }
 }
 
-fn tls_material(configuration: &Configuration) -> Result<(Vec<u8>, Vec<u8>)> {
-    configuration::ConfigurationService::tls_material(configuration)
-}
-
-fn load_tls(configuration: &Configuration, hostname: &str) -> Result<RustlsConfig> {
+fn load_tls(
+    source: &configuration::ConfigurationService,
+    configuration: &Configuration,
+    hostname: &str,
+) -> Result<RustlsConfig> {
     if configuration.tls_mode == crate::domain::certificates::TlsMode::AzureDns {
-        let managed = configuration
-            .managed_tls
-            .as_ref()
-            .ok_or_else(|| Error::InvalidInput("managed TLS configuration is missing".into()))?;
-        return crate::infrastructure::certificates::state::StateStore::load_active(
-            &managed.state_directory,
-            &managed.binding(hostname)?,
-            hostname,
-        )
-        .map(|(_, _, configuration)| configuration);
+        return Err(Error::InvalidInput(
+            "managed TLS requires selected certificate storage preparation".into(),
+        ));
     }
-    let (certificate, key) = tls_material(configuration)?;
+    let (certificate, key) = source.tls_material(configuration)?;
     tls::configuration(hostname, &certificate, &key)
 }
 
-async fn watch_tls(configuration: Configuration, hostname: String, active: Option<RustlsConfig>) {
+async fn watch_tls(
+    source: Arc<configuration::ConfigurationService>,
+    configuration: Configuration,
+    hostname: String,
+    active: Option<RustlsConfig>,
+) {
     if configuration.tls_mode == crate::domain::certificates::TlsMode::AzureDns {
         std::future::pending::<()>().await;
         return;
@@ -737,10 +583,11 @@ async fn watch_tls(configuration: Configuration, hostname: String, active: Optio
     loop {
         timer.tick().await;
         let configuration = configuration.clone();
+        let source = source.clone();
         let hostname = hostname.clone();
         let active = active.clone();
         match tokio::task::spawn_blocking(move || {
-            let (certificate, key) = tls_material(&configuration)?;
+            let (certificate, key) = source.tls_material(&configuration)?;
             tls::reload(&active, &hostname, &certificate, &key)
         })
         .await
@@ -767,11 +614,14 @@ async fn renewal_owner(
         .clone()
         .ok_or(Error::Internal("managed TLS configuration is missing"))?;
     let hostname = host.hostname.clone();
-    let database = host.configuration.database.clone();
+    let source = host.source.clone();
     let selection = host.source.certificate_selection();
     let recovery = host.source.certificate_recovery();
     let runtime_recovery = recovery.clone();
     let started = tokio::task::spawn_blocking(move || {
+        let database = source
+            .open_store(crate::infrastructure::store::StoreOpenMode::ReadCurrent)?
+            .source();
         crate::infrastructure::certificates::RenewalOwner::start(
             managed, hostname, database, tls, selection, recovery,
         )
@@ -864,6 +714,7 @@ mod tests {
             &file,
             serde_json::to_vec(&serde_json::json!({
                 "environment":"single_user", "database":database,
+                "storage": crate::infrastructure::filesystem::StorageConfiguration::inspect_initial(root, &crate::domain::LibraryPath::parse("")?)?,
                 "listen":address.to_string(), "origin":origin
             }))?,
         )?;

@@ -1,12 +1,12 @@
 //! Commons-only transport. No name search, implicit artist mapping, redirect
 //! following, remote resizing or album-cover authority.
+use super::store::{StoreOpenMode, StoreSource};
 use crate::application::services::artist_images::*;
 use crate::application::services::cache::{Cache, CacheKey, CacheLookup};
 use crate::{Error, Result};
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -27,21 +27,21 @@ impl Drop for CancelPending {
 }
 
 pub struct CommonsClient {
-    database: PathBuf,
+    database: StoreSource,
     cache: Arc<dyn Cache>,
     http: reqwest::Client,
     slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl CommonsClient {
-    pub fn new(database: PathBuf, cache: Arc<dyn Cache>) -> Result<Self> {
+    pub fn new(database: StoreSource, cache: Arc<dyn Cache>) -> Result<Self> {
         Self::from_builder(database, cache, reqwest::Client::builder())
     }
 
     /// Trusted private-CA fixtures may replace DNS and trust roots. The fixed
     /// HTTPS authorities and transport policy still apply to every request.
     pub fn from_builder(
-        database: PathBuf,
+        database: StoreSource,
         cache: Arc<dyn Cache>,
         builder: reqwest::ClientBuilder,
     ) -> Result<Self> {
@@ -79,7 +79,7 @@ impl CommonsClient {
             let _cancel = CancelPending(cancelled.clone());
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let mut store = super::store::Store::open_current_existing(&path)?;
+                let mut store = path.open(StoreOpenMode::Current)?;
                 let result = work(http, cache, &mut store, cancelled, runtime);
                 if let Err(error) = &result {
                     eprintln!("artist photo provider failed: {error}");

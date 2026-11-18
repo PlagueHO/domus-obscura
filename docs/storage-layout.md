@@ -2,17 +2,46 @@
 
 ## Status
 
-**Storage policy agreed; implementation remains pending.** The user
+**Storage policy agreed; production implementation in final validation.** The user
 selected one private application directory with overridable child folders and
 separate media libraries. Primary and backup libraries can be local folders,
 network file shares, or other native filesystem locations. They are not limited
 to the application directory, its disk, or local storage.
 
-The seven core decisions, SQLite temporary folder and state-bootstrap location below are
-confirmed. Detailed configuration fields and
-filesystem/mount acceptance still need implementation and verification.
-Application code, existing folders, and binding rules remain unchanged.
+The seven core decisions, SQLite temporary folder and state-bootstrap location
+below are confirmed and implemented. The shared client retains ancestor handles,
+checks actual filesystem locality and verifies complete selected-boundary
+expectations. Saved bindings contain immutable logical root definitions, not
+runtime provider paths or ancestors above the selected boundary. Configuration
+references resolve relative to the main configuration file, not the working
+directory. Personal startup selects the agreed OS directory, with
+`serve --storage-root` as an explicit override. Fresh setup
+creates `config.json` and `state/state.db`. Omitted database, enabled-cache,
+acquisition-staging and managed-certificate paths use their relative role
+defaults. Optional services remain disabled when omitted.
+Host JSON writers and API-only activation have been removed.
+Fresh setup records application/state directory expectations in `config.json`
+before SQLite initialization. External expected state authority remains separate
+from SQLite. Selected API, worker and CLI sources share the same admission
+policy. SQLite temporary storage stays in the admitted private state directory.
+Concurrent containers and recreation passed against generated retained storage
+on Docker Desktop. Final repository checks and native Ubuntu CI remain required.
 This agreement does not authorize data deletion or changes to existing media.
+
+The user confirmed that the application is not released and has no existing
+installation. Issue #68 requires explicit fresh setup, not an existing-state
+migration feature. Leave any pre-existing state and media untouched. Jobs,
+plans and settings do not transfer into the new state.
+
+**Confirmed authority model:** Trust the operator's configured filesystem and
+share mappings, not physical-device properties. Keep native handle, identity,
+traversal and known-overlap checks. Opaque mappings need exact operator topology
+assurances or supported relationship evidence. Disk serials, RAID membership and
+automatic detection of indistinguishable full clones are not prerequisites.
+See the [authority contract](storage.md#confirmed-hardware-independent-authority-contract)
+for the guarantees and limits. The user has approved production implementation
+under this contract. The approval does not permit deployment, existing-media
+operations or host changes.
 
 This document describes where data belongs. The separate
 [storage-client experiment](storage.md) describes filesystem identity and mount
@@ -118,8 +147,15 @@ state-root binding belongs in `config.json`. It is startup trust information,
 not mutable application policy or a copy of SQLite records.
 Startup must verify this expectation before SQLite can create coordination files,
 recover or migrate. The provider scope and persistent identity format still need
-proof. A copied database or owner marker must not authorize a replacement root.
+verification within the operator-trusted logical provider scope. This does not
+require physical-device discovery. A copied database or owner marker must not
+authorize a replacement root.
 Changing the binding requires explicit operator action and coordinated restart.
+The [proposed logical binding model](storage.md#proposed-logical-binding-document-and-admission-model)
+defines a test-only document, exact topology assurances and setup/rebinding
+steps. Its portable observations are synthetic. An isolated Windows extension
+now checks actual retained directory identities, but does not establish storage
+locality or production startup enforcement.
 
 Operator edits alone do not synchronize running processes. Each process can
 retain a different active snapshot after an edit or a partial restart.
@@ -130,13 +166,15 @@ API-only reload as proof that every component has applied a change. Remove
 independent host-configuration reload. Normal versioned SQLite commands and
 managed certificate renewal remain separate from host-configuration changes.
 
-**Current implementation differs:** It supports guarded JSON saves and an
-explicit API-host reload. JSON saves conflict with the new no-application-writes
-requirement. An API-only reload leaves independent workers unchanged.
-These differences require later implementation work. Existing
-configuration paths, lock files, and pending-write files are not changed by
-this document. The target layout does not introduce normal application-managed
-configuration update files.
+Application components now have no host JSON writer or API-only host reload.
+Their old HTTP routes return `410 Gone`. System settings shows redacted saved and
+active summaries. `domus configuration-check` supplies passive validation while
+components are stopped. The SQLite editing-policy flag remains independent.
+Existing configuration paths, old locks and pending files are preserved.
+Personal fresh setup now uses the agreed root name and relative state path.
+Existing nonempty storage without `config.json` remains refused.
+Optional role configuration, external state bootstrap and the full configurable
+layout remain incomplete.
 
 ## Confirmed decisions
 
@@ -266,7 +304,11 @@ SQLite stays on local disk.
 The agreed default model is one parent directory with child defaults. Explicit
 overrides would allow an operator to place a large staging directory or cache
 on another supported disk. Media roots always remain separate configuration
-entries. Exact JSON field names are not selected yet.
+entries. The current path fields are `database`, `cache.root`,
+`local_acquisition.staging_root`, `production_worker.acquisition.staging_root`
+and `managed_tls.state_directory`. Their defaults resolve from the
+configuration file's parent. Explicit absolute overrides remain supported.
+An omitted optional section does not enable its service or create its directory.
 
 The local-disk requirement for SQLite does not apply to media libraries.
 Windows UNC shares and network shares mounted on Linux are examples of media

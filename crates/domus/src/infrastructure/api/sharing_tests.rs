@@ -40,6 +40,7 @@ async fn sharing_api_binding_is_explicit_guarded_and_read_only_policy_is_enforce
     let state = directory.path().join("state");
     let media = directory.path().join("media");
     std::fs::create_dir(&state)?;
+    private_fixture::directory(&state)?;
     std::fs::create_dir(&media)?;
     let database = state.join("domus.sqlite");
     let store = Store::open(&database)?;

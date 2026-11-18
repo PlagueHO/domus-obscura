@@ -3,7 +3,7 @@ use axum::extract::ConnectInfo;
 
 #[tokio::test]
 async fn queue_dismissal_requires_command_guards_and_keeps_diagnostic_jobs() -> TestResult {
-    let state = tempfile::tempdir()?;
+    let state = private::tempdir()?;
     let database = state.path().join("state.db");
     let mut store = Store::open(&database)?;
     let finished = store.enqueue(1)?;
@@ -54,9 +54,9 @@ async fn queue_dismissal_requires_command_guards_and_keeps_diagnostic_jobs() -> 
 
 #[tokio::test]
 async fn library_root_configuration_is_guarded_bound_and_never_changes_media() -> TestResult {
-    let state = tempfile::tempdir()?;
-    let media = tempfile::tempdir()?;
-    let backup = tempfile::tempdir()?;
+    let state = private::tempdir()?;
+    let media = private::tempdir()?;
+    let backup = private::tempdir()?;
     std::fs::write(media.path().join("untouched.txt"), b"keep these bytes")?;
     let database = state.path().join("state.db");
     let store = Store::open(&database)?;
@@ -164,7 +164,7 @@ async fn library_root_configuration_is_guarded_bound_and_never_changes_media() -
 #[tokio::test]
 async fn settings_policy_guards_writes_and_preserves_versions_after_failed_saves() -> TestResult {
     for read_only in [true, false] {
-        let state = tempfile::tempdir()?;
+        let state = private::tempdir()?;
         let database = state.path().join("state.db");
         let mut store = Store::open(&database)?;
         let original = OutputSettings::default();
@@ -266,8 +266,8 @@ async fn source_reviews_need_guarded_separate_digest_approval_without_starting_m
     use domus::application::{add_location, scan_location};
     use domus::domain::{EditionSelection, PlannedTrack};
     use domus::infrastructure::store::PlanRequest;
-    let state = tempfile::tempdir()?;
-    let media = tempfile::tempdir()?;
+    let state = private::tempdir()?;
+    let media = private::tempdir()?;
     let database = state.path().join("state.db");
     let mut store = Store::open(&database)?;
     let main = add_location(&store, media.path(), "main")?;
@@ -445,7 +445,7 @@ async fn request(
 
 #[tokio::test]
 async fn operator_controls_need_guards_and_explicit_answer_then_continue() -> TestResult {
-    let state = tempfile::tempdir()?;
+    let state = private::tempdir()?;
     let database = state.path().join("state.db");
     let mut store = Store::open(&database)?;
     let job = store.enqueue(1)?;

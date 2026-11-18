@@ -418,34 +418,43 @@ test("replacement retains the original and restore requires a fresh explicit rev
   expect(original.ok(), await original.text()).toBe(true);
 });
 
-test("backend JSON save preserves startup state and rejects a stale section revision", async ({
+test("host configuration is read-only and old write routes preserve startup state", async ({
   page,
 }) => {
   await page.goto("/#/settings");
   const initial: BackendConfigurationState = await (
     await page.request.get("/api/system/configuration")
   ).json();
-  await page.getByRole("textbox", { name: /^Listen address/ }).fill("127.0.0.1:4175");
-  await page.getByRole("textbox", { name: /^Browser origin/ }).fill("http://127.0.0.1:4175");
-  const submission = page.waitForRequest((request) =>
-    request.url().endsWith("/api/system/configuration/sections/save"),
-  );
-  await page.getByRole("button", { name: "Save changes", exact: true }).click();
-  const body: unknown = (await submission).postDataJSON();
-  await expect(page.getByText("Changes saved.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Host configuration is read-only.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: /^Listen address/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save changes", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Reload/ })).toHaveCount(0);
+  for (const endpoint of ["save", "sections/save", "reload"]) {
+    const rejected = await page.request.post(`/api/system/configuration/${endpoint}`, {
+      headers: guards,
+      data: {
+        expected_revision: initial.saved_revision,
+        sections: [
+          {
+            section: "general",
+            environment: "single_user",
+            listen: "127.0.0.1:4175",
+            origin: "http://127.0.0.1:4175",
+            browser_assets: null,
+          },
+        ],
+      },
+    });
+    expect(rejected.status()).toBe(410);
+  }
   const saved: BackendConfigurationState = await (
     await page.request.get("/api/system/configuration")
   ).json();
   expect(saved.active_revision).toBe(initial.active_revision);
   expect(saved.active.origin).toBe(origin);
-  expect(saved.saved.origin).toBe("http://127.0.0.1:4175");
-  expect(saved.restart_required).toBe(true);
-  expect(saved.saved_revision).not.toBe(initial.saved_revision);
-  const rejected = await page.request.post("/api/system/configuration/sections/save", {
-    headers: guards,
-    data: body,
-  });
-  expect(rejected.status()).toBe(409);
+  expect(saved.saved).toEqual(initial.saved);
+  expect(saved.restart_required).toBe(false);
+  expect(saved.saved_revision).toBe(initial.saved_revision);
 });
 
 test("one stale album rejects the full batch and manual reconciliation preserves both jobs", async ({

@@ -1,5 +1,6 @@
 use super::*;
 use crate::infrastructure::caa::CaaListing;
+use crate::infrastructure::permissions::private_test_directory;
 use serde_json::json;
 
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -10,7 +11,7 @@ fn shared_cache_caa_preserves_provenance_expiry_and_exact_filename_without_legac
 -> TestResult {
     use crate::application::services::cache::testing::MemoryCache;
     use std::sync::Arc;
-    let state = tempfile::tempdir()?;
+    let state = private_test_directory()?;
     let mut store = Store::open(&state.path().join("state.db"))?;
     let (parsed, raw) = listing(1, "png")?;
     let request = CaaRequest::listing(RELEASE)?;
@@ -101,7 +102,7 @@ fn shared_cache_caa_preserves_provenance_expiry_and_exact_filename_without_legac
 fn shared_cache_caa_rejects_malformed_envelopes_and_transactional_reads() -> TestResult {
     use crate::application::services::cache::testing::MemoryCache;
     use std::sync::Arc;
-    let state = tempfile::tempdir()?;
+    let state = private_test_directory()?;
     let shared = Arc::new(MemoryCache::default());
     let store = Store::open(&state.path().join("state.db"))?.with_cache(shared.clone());
     let request = CaaRequest::listing(RELEASE)?;
@@ -177,7 +178,7 @@ async fn shared_cache_caa_commits_budget_before_storage_and_never_rolls_it_back_
 -> TestResult {
     use std::sync::{Arc, atomic::Ordering};
     for fail in [false, true] {
-        let state = tempfile::tempdir()?;
+        let state = private_test_directory()?;
         let database = state.path().join("state.db");
         let shared = Arc::new(TransactionProbe {
             cache: Default::default(),
@@ -244,7 +245,7 @@ fn cache(store: &mut Store, request: &CaaRequest, payload: CaaPayload) -> Result
 
 #[test]
 fn caa_cache_checks_hashes_expiry_scope_and_image_format_before_reuse() -> TestResult {
-    let state = tempfile::tempdir()?;
+    let state = private_test_directory()?;
     let path = state.path().join("state.db");
     let mut store = Store::open(&path)?;
     let request = CaaRequest::listing(RELEASE)?;
@@ -310,7 +311,7 @@ fn caa_cache_checks_hashes_expiry_scope_and_image_format_before_reuse() -> TestR
 
 #[test]
 fn caa_cache_enforces_exact_entry_byte_bounds_and_no_missing_or_invalid_entries() -> TestResult {
-    let state = tempfile::tempdir()?;
+    let state = private_test_directory()?;
     let mut store = Store::open(&state.path().join("state.db"))?;
     let request = CaaRequest::listing(RELEASE)?;
     cache(&mut store, &request, CaaPayload::Missing)?;
@@ -407,7 +408,7 @@ fn caa_cache_enforces_exact_entry_byte_bounds_and_no_missing_or_invalid_entries(
 async fn caa_cache_and_provider_completion_commit_atomically_or_keep_uncertain_lease() -> TestResult
 {
     for fail in [false, true] {
-        let state = tempfile::tempdir()?;
+        let state = private_test_directory()?;
         let mut store = Store::open(&state.path().join("state.db"))?;
         let (listing, raw) = listing(1, "png")?;
         let request = CaaRequest::listing(RELEASE)?;

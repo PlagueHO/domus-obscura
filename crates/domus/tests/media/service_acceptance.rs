@@ -21,7 +21,11 @@ fn write_new(path: &Path, bytes: &[u8]) -> TestResult {
     Ok(())
 }
 
-fn prepare(root: &Path, large: bool, browser_assets: Option<&Path>) -> TestResult {
+fn prepare(
+    root: &Path,
+    large: bool,
+    browser_assets: Option<&Path>,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     if root.symlink_metadata()?.file_type().is_symlink()
         || !root.is_absolute()
         || std::fs::read_dir(root)?.next().is_some()
@@ -41,6 +45,8 @@ fn prepare(root: &Path, large: bool, browser_assets: Option<&Path>) -> TestResul
     } else {
         None
     };
+    let scan_directory = make("scan-")?;
+    let scan_root = scan_directory.path().to_owned();
     let mut fixture = Fixture::build_with_inputs(
         AudioFormat::Mp3,
         true,
@@ -51,6 +57,8 @@ fn prepare(root: &Path, large: bool, browser_assets: Option<&Path>) -> TestResul
         FixtureInputs {
             directories: Some([make("state-")?, make("library-")?, make("staging-")?]),
             source,
+            selected: true,
+            extra_media: vec![scan_root.clone()],
             ..Default::default()
         },
     )?;
@@ -117,8 +125,6 @@ fn prepare(root: &Path, large: bool, browser_assets: Option<&Path>) -> TestResul
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(&services, &worker.acquisition))?)
     );
-    let scan_directory = make("scan-")?;
-    let scan_root = scan_directory.path().to_owned();
     for index in 0..if large { 8192 } else { 4 } {
         let directory = scan_root.join(format!("directory-{index:05}"));
         std::fs::create_dir(&directory)?;
@@ -141,18 +147,17 @@ fn prepare(root: &Path, large: bool, browser_assets: Option<&Path>) -> TestResul
     )?;
     let configuration = json!({
         "environment":"single_user", "system_settings_read_only":true,
+        "storage":fixture.storage,
         "services":services, "database":fixture.database,
         "listen":"127.0.0.1:8080", "origin":"http://127.0.0.1:8080",
         "browser_assets":browser_assets,
         "production_worker":worker
     });
-    write_new(
-        &root.join("service.json"),
-        &serde_json::to_vec_pretty(&configuration)?,
-    )?;
+    let host = fixture._state.path().join("service.json");
+    write_new(&host, &serde_json::to_vec_pretty(&configuration)?)?;
     let descriptor = json!({
-        "format":1, "database":fixture.database,
-        "scan_root":scan_root, "library":fixture._library.path(),
+        "format":1, "database":fixture.database, "configuration":host, "storage":fixture.storage,
+        "scan_root":scan_root, "library":fixture._library.path(), "main_location":fixture.main,
         "staging":fixture.scratch.path(), "job":fixture.job,
         "version":fixture.version, "scan_location":scan,
         "scan_request":scan_request.id, "publication_request":publication_request.id,
@@ -169,7 +174,7 @@ fn prepare(root: &Path, large: bool, browser_assets: Option<&Path>) -> TestResul
     let _ = fixture._library.keep();
     let _ = fixture.scratch.keep();
     let _ = scan_directory.keep();
-    Ok(())
+    Ok(host)
 }
 
 #[test]
@@ -178,18 +183,18 @@ fn service_acceptance_fixture_uses_real_approved_receipts_and_durable_requests()
     let browser = tempdir()?;
     std::fs::create_dir(browser.path().join("assets"))?;
     std::fs::write(browser.path().join("index.html"), b"generated browser")?;
-    prepare(root.path(), false, Some(browser.path()))?;
-    let configuration: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.path().join("service.json"))?)?;
+    let host = prepare(root.path(), false, Some(browser.path()))?;
+    let configuration: serde_json::Value = serde_json::from_slice(&std::fs::read(&host)?)?;
     assert_eq!(
         configuration["browser_assets"],
         browser.path().to_str().ok_or("browser path")?
     );
-    domus::infrastructure::server::PreparedServer::load(&root.path().join("service.json"))?;
+    domus::infrastructure::server::PreparedServer::load(&host)?;
     let descriptor: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.path().join("fixture.json"))?)?;
     let database = descriptor["database"].as_str().ok_or("database")?;
-    let store = Store::open_current_existing(Path::new(database))?;
+    let store = domus::infrastructure::server::configuration::ConfigurationService::open(&host)?
+        .open_store(domus::infrastructure::store::StoreOpenMode::ReadCurrent)?;
     let job = descriptor["job"].as_i64().ok_or("job")?;
     let version = descriptor["version"].as_i64().ok_or("version")?;
     assert!(store.plan(job, version)?.approved_at.is_some());
@@ -214,16 +219,19 @@ async fn service_acceptance_offline_worker_completes_generated_scan_and_publicat
     use std::time::Duration;
 
     let root = tempdir()?;
-    prepare(root.path(), false, None)?;
+    let host = prepare(root.path(), false, None)?;
     let descriptor: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.path().join("fixture.json"))?)?;
     let database = descriptor["database"].as_str().ok_or("database")?;
-    let worker = PreparedProductionWorker::load(&root.path().join("service.json"))?;
+    let source = domus::infrastructure::server::configuration::ConfigurationService::open(&host)?
+        .open_store(domus::infrastructure::store::StoreOpenMode::ReadCurrent)?
+        .source();
+    let worker = PreparedProductionWorker::load(&host)?;
     let lifecycle = Lifecycle::controlled(|| Ok(()));
     let running = tokio::spawn(worker.run_with_lifecycle(lifecycle.clone()));
     let outcome = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let store = Store::open_current_existing(Path::new(database))?;
+            let store = source.open(domus::infrastructure::store::StoreOpenMode::ReadCurrent)?;
             let requests = store.worker_requests(Page::new(0, 10)?)?;
             if let Some(request) = requests
                 .iter()
@@ -261,8 +269,16 @@ async fn service_acceptance_offline_worker_completes_generated_scan_and_publicat
         })?
         .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(files.len(), 4);
+    let library = descriptor["library"].as_str().ok_or("library")?;
+    let store = source.open(domus::infrastructure::store::StoreOpenMode::ReadCurrent)?;
+    let expected_root = store.location(
+        descriptor["main_location"]
+            .as_i64()
+            .ok_or("main location")?,
+    )?;
     for (root, folder, name, expected) in files {
-        let output = Path::new(&root)
+        assert_eq!(root, expected_root.root);
+        let output = Path::new(library)
             .join(folder.replace('/', std::path::MAIN_SEPARATOR_STR))
             .join(name);
         assert_eq!(
@@ -286,5 +302,5 @@ fn service_acceptance_export() -> TestResult {
     }
     let browser = package.join("browser");
     domus::infrastructure::browser::BrowserAssets::load(&browser)?;
-    prepare(root, true, Some(&browser))
+    prepare(root, true, Some(&browser)).map(|_| ())
 }

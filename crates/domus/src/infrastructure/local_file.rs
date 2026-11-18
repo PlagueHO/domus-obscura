@@ -1,12 +1,15 @@
-use super::filesystem::{LibraryDirectory, require_local_disk};
+use super::filesystem::{LibraryDirectory, require_local_path};
 use super::permissions::FilePermissions;
 use crate::{Error, Result};
-use std::io::Read;
 use std::path::Path;
+
+pub(crate) use super::filesystem::read_local_file as read_local;
 
 /// Stable no-follow lock files are retained across exits, never replaced.
 pub(crate) struct ProcessLock {
     _file: std::fs::File,
+    directory: LibraryDirectory,
+    _context: Option<native_sqlite::Context>,
 }
 
 impl Drop for ProcessLock {
@@ -19,14 +22,17 @@ impl Drop for ProcessLock {
 }
 
 impl ProcessLock {
-    /// Verify that the pathname still names the locked object. Replacing a
-    /// stable lock file must not create a second owner for the same operation.
-    pub(crate) fn verify(&self, database: &Path, purpose: &str) -> Result<()> {
-        let directory = LibraryDirectory::open(
-            database
-                .parent()
-                .ok_or(Error::Internal("process lock parent is missing"))?,
-        )?;
+    pub(crate) fn with_context(mut self, context: native_sqlite::Context) -> Self {
+        self._context = Some(context);
+        self
+    }
+    /// Replacing a stable lock file must not create a second owner.
+    pub(crate) fn verify_in(&self, directory: &LibraryDirectory, purpose: &str) -> Result<()> {
+        if directory.native_root() != self.directory.native_root() {
+            return Err(Error::Conflict(
+                "process lock directory identity changed".into(),
+            ));
+        }
         let name = format!(".domus-{purpose}.lock");
         let current = directory.open_file(std::ffi::OsStr::new(&name))?;
         if super::filesystem::native_file_identity(&current)?
@@ -41,11 +47,33 @@ impl ProcessLock {
         Self::acquire_mode(database, purpose, false)
     }
 
+    #[cfg(test)]
     pub(crate) fn acquire_shared(database: &Path, purpose: &str) -> Result<Self> {
         Self::acquire_mode(database, purpose, true)
     }
 
+    pub(crate) fn acquire_in(directory: &LibraryDirectory, purpose: &str) -> Result<Self> {
+        Self::acquire_directory(directory, purpose, false)
+    }
+
+    pub(crate) fn acquire_shared_in(directory: &LibraryDirectory, purpose: &str) -> Result<Self> {
+        Self::acquire_directory(directory, purpose, true)
+    }
+
     fn acquire_mode(database: &Path, purpose: &str, shared: bool) -> Result<Self> {
+        let directory = LibraryDirectory::open(
+            database
+                .parent()
+                .ok_or(Error::Internal("database parent is missing"))?,
+        )?;
+        Self::acquire_directory(&directory, purpose, shared)
+    }
+
+    fn acquire_directory(
+        directory: &LibraryDirectory,
+        purpose: &str,
+        shared: bool,
+    ) -> Result<Self> {
         use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
         use cap_std::fs::OpenOptions;
         if purpose.is_empty()
@@ -55,13 +83,8 @@ impl ProcessLock {
         {
             return Err(Error::InvalidInput("invalid process lock purpose".into()));
         }
-        let directory = LibraryDirectory::open(
-            database
-                .parent()
-                .ok_or(Error::Internal("database parent is missing"))?,
-        )?
-        .into_directory();
-        FilePermissions::current()?.check(&directory.try_clone()?.into_std_file(), false)?;
+        FilePermissions::current()?.check(&directory.directory_file()?, false)?;
+        let retained = directory.try_clone()?;
         let name = format!(".domus-{purpose}.lock");
         let options = |create| {
             let mut options = OpenOptions::new();
@@ -101,7 +124,11 @@ impl ProcessLock {
             file.try_lock()
         };
         match locked {
-            Ok(()) => Ok(Self { _file: file }),
+            Ok(()) => Ok(Self {
+                _file: file,
+                directory: retained,
+                _context: None,
+            }),
             Err(std::fs::TryLockError::WouldBlock) => {
                 Err(Error::Busy("another process owns this worker or account"))
             }
@@ -111,34 +138,8 @@ impl ProcessLock {
 }
 
 pub(crate) fn validate_reference(path: &Path) -> Result<()> {
-    require_local_disk(path)?;
-    if !path.is_absolute() || path.components().any(|component| {
-        matches!(component, std::path::Component::Normal(name) if name.to_str().is_none_or(|name| name.contains(':') || name.chars().any(char::is_control)))
-    }) {
-        return Err(Error::InvalidInput("service references require absolute local paths without alternate streams".into()));
-    }
-    Ok(())
-}
-
-pub(crate) fn read_local(path: &Path, maximum: u64, sensitive: bool) -> Result<Vec<u8>> {
-    validate_reference(path)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::InvalidInput("service file parent is missing".into()))?;
-    let directory = LibraryDirectory::open(parent)?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| Error::InvalidInput("service file name is missing".into()))?;
-    let file = directory.open_file(name)?;
-    FilePermissions::current()?.check(&file, sensitive)?;
-    let mut bytes = Vec::new();
-    file.take(maximum + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > maximum {
-        return Err(Error::InvalidInput(
-            "service file exceeds its size limit".into(),
-        ));
-    }
-    Ok(bytes)
+    require_local_path(path)?;
+    super::filesystem::validate_native_reference(path)
 }
 
 pub(crate) fn protect_files(store: &super::store::Store, files: &[&Path]) -> Result<()> {
@@ -155,6 +156,12 @@ pub(crate) fn protect_files(store: &super::store::Store, files: &[&Path]) -> Res
         .iter()
         .map(std::fs::canonicalize)
         .collect::<std::io::Result<Vec<_>>>()?;
+    if let Some(filesystem) = store.selected_filesystem() {
+        for parent in &parents {
+            filesystem.require_private_input(parent)?;
+        }
+        return Ok(());
+    }
     let mut after = 0;
     loop {
         let locations = store.locations(crate::domain::Page::new(after, 200)?)?;

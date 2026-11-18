@@ -4,18 +4,16 @@ use crate::application::services::ServiceConfiguration;
 use crate::domain::certificates::{AcmeEnvironment, TlsMode};
 use crate::infrastructure::certificates::ManagedTlsConfiguration;
 use crate::infrastructure::filesystem::{
-    LibraryDirectory, NativeRoot, is_unsafe_link, native_file_identity, sync_directory,
+    FilesystemClient, LibraryDirectory, NativeRoot, StorageConfiguration, StorageLease,
 };
 use crate::infrastructure::permissions::FilePermissions;
-use crate::infrastructure::store::Store;
+use crate::infrastructure::store::{Store, StoreOpenMode};
 use crate::{Error, Result};
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::OpenOptions;
 use openidconnect::ClientSecret;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{File, TryLockError};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -39,8 +37,11 @@ pub(crate) struct Configuration {
     pub(super) system_settings_read_only: bool,
     #[serde(default)]
     pub(crate) services: ServiceConfiguration,
-    pub(super) cache: Option<crate::infrastructure::cache::CacheConfiguration>,
+    pub(crate) cache: Option<crate::infrastructure::cache::CacheConfiguration>,
+    #[serde(default = "default_database")]
     pub(crate) database: PathBuf,
+    #[serde(default)]
+    pub(crate) storage: Option<StorageConfiguration>,
     pub(super) listen: std::net::SocketAddr,
     pub(super) origin: String,
     pub(super) tenant_id: Option<String>,
@@ -61,6 +62,10 @@ pub(crate) struct Configuration {
 
 fn system_settings_read_only_by_default() -> bool {
     true
+}
+
+pub(super) fn default_database() -> PathBuf {
+    Path::new("state").join("state.db")
 }
 
 #[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -198,7 +203,6 @@ pub struct BackendConfigurationState {
     /// False means this exact revision passed passive validation, not activation.
     pub saved_requires_validation: bool,
     pub changed_sections: Vec<ConfigurationSection>,
-    pub reload: ConfigurationReloadState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -257,36 +261,6 @@ pub enum ConfigurationSectionUpdate {
 pub struct ConfigurationSectionCommand {
     pub expected_revision: String,
     pub sections: Vec<ConfigurationSectionUpdate>,
-}
-
-#[derive(Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationReloadCommand {
-    pub expected_revision: String,
-}
-
-#[derive(Clone, Default, Serialize, ts_rs::TS)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum ConfigurationReloadState {
-    #[default]
-    Idle,
-    Pending {
-        revision: String,
-        origin: String,
-    },
-    Active {
-        revision: String,
-    },
-    Failed {
-        revision: String,
-        message: String,
-    },
-}
-
-#[derive(Default)]
-struct ReloadControl {
-    sender: Option<tokio::sync::mpsc::Sender<String>>,
-    state: ConfigurationReloadState,
 }
 
 enum ConfigurationUpdate {
@@ -357,39 +331,27 @@ pub struct BackendConfigurationIssue {
 #[derive(Serialize, ts_rs::TS)]
 pub struct BackendConfigurationResult {
     pub errors: Vec<BackendConfigurationIssue>,
-    /// Only a successful save returns saved state. Validation does not save.
+    /// Passive validation never returns a replacement saved state.
     pub state: Option<BackendConfigurationState>,
 }
 
-/// Startup and HTTP share passive configuration inspection and revision-bound writes.
-/// Callers cannot change its native source or active snapshot through a save.
+/// Startup and HTTP share passive inspection and revision-bound validation.
+/// Only an operator can edit host JSON, with every state user stopped.
 ///
 /// Callers must authorize access before exposing this service to a transport.
 /// Opening it does not start a server, migrate SQLite, or activate saved changes.
 pub struct ConfigurationService {
     path: PathBuf,
     parent: NativeRoot,
+    _directory: LibraryDirectory,
     pub(super) active: Configuration,
     active_document: Configuration,
     active_revision: String,
-    validated_revision: Mutex<Option<String>>,
-    writer: Arc<Mutex<Option<File>>>,
-    reload: Arc<Mutex<ReloadControl>>,
     certificate_selection:
         Arc<Mutex<Option<crate::infrastructure::certificates::state::CertificateSelection>>>,
     certificate_recovery: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
-    failure: Mutex<Option<SaveFailure>>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SaveFailure {
-    Write,
-    Sync,
-    Replace,
-    AfterReplace,
-    CrashAfterSync,
+    state_storage: StorageLease,
+    _configuration_storage: StorageLease,
 }
 
 impl ConfigurationService {
@@ -397,6 +359,37 @@ impl ConfigurationService {
     /// The caller owns the containing directory and must keep it private.
     pub fn open(path: &Path) -> Result<Self> {
         Self::load(path).map(|(service, _, _)| service)
+    }
+
+    /// Open only the state selected by this frozen host configuration.
+    /// The caller chooses current-schema or snapshot behavior explicitly.
+    pub fn open_store(&self, mode: StoreOpenMode) -> Result<Store> {
+        Store::open_scoped(&self.active.database, self.state_storage.client(), mode)
+    }
+
+    /// Read bounded local input through an admitted private directory handle.
+    /// This performs blocking file I/O, without opening a SQL transaction.
+    pub fn read_input(&self, path: &Path, maximum: u64, sensitive: bool) -> Result<Vec<u8>> {
+        crate::infrastructure::filesystem::read_local_file_for(
+            Some(self.state_storage.client()),
+            path,
+            maximum,
+            sensitive,
+        )
+    }
+
+    pub(crate) fn state_lock(
+        &self,
+        purpose: &str,
+    ) -> Result<super::super::local_file::ProcessLock> {
+        let (context, _, directory) = self
+            .state_storage
+            .client()
+            .sqlite_context(&self.active.database, false)?;
+        Ok(
+            super::super::local_file::ProcessLock::acquire_in(&directory, purpose)?
+                .with_context(context),
+        )
     }
 
     pub(crate) fn certificate_selection(
@@ -427,10 +420,12 @@ impl ConfigurationService {
                 .lock()
                 .map_err(|_| Error::Internal("live certificate selection lock failed"))?
                 .clone();
+            let store = self.open_store(StoreOpenMode::ReadCurrent)?;
             Some(
-                crate::infrastructure::certificates::state::StateStore::status_bound(
+                crate::infrastructure::certificates::state::StateStore::status_bound_for(
+                    &store,
                     &managed.state_directory,
-                    &managed.binding(hostname)?,
+                    &managed.binding_for(hostname, &store.source())?,
                     managed.environment,
                     selected.as_ref(),
                 )?,
@@ -489,13 +484,6 @@ impl ConfigurationService {
 
     /// Recheck both the startup policy and the current saved editing policy.
     pub fn require_editable(&self) -> Result<()> {
-        let control = self
-            .reload
-            .lock()
-            .map_err(|_| Error::Internal("configuration reload lock failed"))?;
-        if matches!(control.state, ConfigurationReloadState::Pending { .. }) {
-            return Err(Error::Busy("configuration reload is pending"));
-        }
         let (_, bytes) = self.read_file(&self.directory()?)?;
         if self.active.system_settings_read_only || Self::parse(&bytes)?.system_settings_read_only {
             return Err(Error::Conflict("system settings are read-only".into()));
@@ -507,10 +495,65 @@ impl ConfigurationService {
         valid_reference(path)?;
         let bytes = crate::infrastructure::local_file::read_local(path, MAXIMUM, false)?;
         let mut configuration = Self::parse(&bytes)?;
+        Self::resolve_paths(
+            &mut configuration,
+            path.parent().ok_or(Error::InvalidInput(
+                "configuration parent is missing".into(),
+            ))?,
+        );
         let hostname = Self::normalize(&mut configuration).map_err(configuration_error)?;
         Self::check_references(&configuration).map_err(configuration_error)?;
         let service = Self::new(path, &bytes, configuration.clone())?;
         Ok((service, configuration, hostname))
+    }
+
+    fn resolve_paths(configuration: &mut Configuration, root: &Path) {
+        let resolve = |path: &mut PathBuf| {
+            if path.is_relative() && !path.has_root() && !path.as_os_str().is_empty() {
+                *path = root.join(&*path);
+            }
+        };
+        for path in [
+            Some(&mut configuration.database),
+            configuration.client_secret_file.as_mut(),
+            configuration.certificate_file.as_mut(),
+            configuration.private_key_file.as_mut(),
+            configuration.browser_assets.as_mut(),
+            configuration.cache.as_mut().map(|cache| &mut cache.root),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            resolve(path);
+        }
+        if let Some(storage) = configuration.storage.as_mut() {
+            storage.resolve_paths(root);
+        }
+        if let Some(managed) = configuration.managed_tls.as_mut() {
+            resolve(&mut managed.state_directory);
+            resolve(&mut managed.dns.client_secret_file);
+        }
+        for acquisition in [
+            configuration.local_acquisition.as_mut(),
+            configuration
+                .production_worker
+                .as_mut()
+                .and_then(|worker| worker.acquisition.as_mut()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            resolve(&mut acquisition.staging_root);
+            resolve(&mut acquisition.credentials_file);
+        }
+        if let Some(account) = configuration
+            .production_worker
+            .as_mut()
+            .and_then(|worker| worker.sharing.as_mut())
+            .and_then(|sharing| sharing.account.as_mut())
+        {
+            resolve(&mut account.credentials_file);
+        }
     }
 
     fn new(path: &Path, bytes: &[u8], active: Configuration) -> Result<Self> {
@@ -520,25 +563,28 @@ impl ConfigurationService {
                 "configuration file name is invalid".into(),
             ));
         }
-        let parent = LibraryDirectory::open(
+        let directory = LibraryDirectory::open(
             path.parent()
                 .ok_or(Error::Internal("configuration parent is missing"))?,
-        )?
-        .native_root()
-        .clone();
+        )?;
+        let parent = directory.native_root().clone();
+        let (state_storage, configuration_storage) = Self::storage(&active, &digest(bytes), path)?
+            .ok_or_else(|| {
+                Error::Conflict(
+                    "storage selection is missing; explicit fresh setup is required".into(),
+                )
+            })?;
         Ok(Self {
             path: path.to_owned(),
             parent,
+            _directory: directory,
             active,
             active_document: Self::parse(bytes)?,
             active_revision: digest(bytes),
-            validated_revision: Mutex::new(None),
-            writer: Arc::new(Mutex::new(None)),
-            reload: Arc::new(Mutex::new(ReloadControl::default())),
             certificate_selection: Arc::new(Mutex::new(None)),
             certificate_recovery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            failure: Mutex::new(None),
+            state_storage,
+            _configuration_storage: configuration_storage,
         })
     }
 
@@ -547,12 +593,35 @@ impl ConfigurationService {
             .map_err(|_| Error::InvalidInput("saved backend configuration JSON is invalid".into()))
     }
 
+    fn storage(
+        configuration: &Configuration,
+        revision: &str,
+        path: &Path,
+    ) -> Result<Option<(StorageLease, StorageLease)>> {
+        configuration
+            .storage
+            .as_ref()
+            .map(|storage| {
+                let client = FilesystemClient::new(storage.clone(), revision.to_owned())?;
+                let application = client.open_application(
+                    path.parent()
+                        .ok_or(Error::Internal("configuration parent is missing"))?,
+                )?;
+                Ok((client.open_state(&configuration.database)?, application))
+            })
+            .transpose()
+    }
+
     fn directory(&self) -> Result<LibraryDirectory> {
-        let directory = LibraryDirectory::open(
-            self.path
-                .parent()
-                .ok_or(Error::Internal("configuration parent is missing"))?,
-        )?;
+        let directory = self
+            ._configuration_storage
+            .client()
+            .open_application(
+                self.path
+                    .parent()
+                    .ok_or(Error::Internal("configuration parent is missing"))?,
+            )?
+            .into_directory()?;
         if directory.native_root() != &self.parent {
             return Err(Error::Conflict(
                 "configuration parent identity changed".into(),
@@ -582,28 +651,27 @@ impl ConfigurationService {
         self.state(&bytes)
     }
 
+    /// Validate the exact saved document without startup effects or a listener.
+    /// This does not reserve references or replace checks at later startup.
+    pub fn validate_saved(&self) -> Result<BackendConfigurationResult> {
+        let (_, bytes) = self.read_file(&self.directory()?)?;
+        self.validate_update(
+            digest(&bytes),
+            ConfigurationUpdate::Full(Box::new(Self::draft_from(summary(&Self::parse(&bytes)?)))),
+        )
+    }
+
     fn state(&self, bytes: &[u8]) -> Result<BackendConfigurationState> {
         let saved = Self::parse(bytes)?;
         let revision = digest(bytes);
-        let validated = self
-            .validated_revision
-            .lock()
-            .map_err(|_| Error::Internal("configuration validation lock failed"))?;
         Ok(BackendConfigurationState {
             active: summary(&self.active),
             saved: summary(&saved),
             active_revision: self.active_revision.clone(),
             restart_required: revision != self.active_revision,
-            saved_requires_validation: revision != self.active_revision
-                && validated.as_ref() != Some(&revision),
+            saved_requires_validation: revision != self.active_revision,
             saved_revision: revision,
             changed_sections: Self::changed_sections(&self.active_document, &saved)?,
-            reload: self
-                .reload
-                .lock()
-                .map_err(|_| Error::Internal("configuration reload lock failed"))?
-                .state
-                .clone(),
         })
     }
 
@@ -649,277 +717,12 @@ impl ConfigurationService {
         })
     }
 
-    pub(crate) fn save(
-        &self,
-        command: BackendConfigurationCommand,
-    ) -> Result<BackendConfigurationResult> {
-        self.save_update(
-            command.expected_revision,
-            ConfigurationUpdate::Full(Box::new(command.draft)),
-        )
-    }
-
-    /// Save a revision-bound draft under the active and saved editing policy.
-    /// The active startup configuration is unchanged.
-    pub fn save_sections(
-        &self,
-        command: ConfigurationSectionCommand,
-    ) -> Result<BackendConfigurationResult> {
-        self.save_update(
-            command.expected_revision,
-            ConfigurationUpdate::Sections(command.sections),
-        )
-    }
-
-    fn save_update(
-        &self,
-        expected: String,
-        update: ConfigurationUpdate,
-    ) -> Result<BackendConfigurationResult> {
-        let reload = self
-            .reload
-            .lock()
-            .map_err(|_| Error::Internal("configuration reload lock failed"))?;
-        if matches!(reload.state, ConfigurationReloadState::Pending { .. }) {
-            return Err(Error::Busy("configuration reload is pending"));
-        }
-        if self.active.system_settings_read_only {
-            return Err(Error::Conflict(
-                "system settings are read-only in active configuration".into(),
-            ));
-        }
-        let mut retained = self
-            .writer
-            .try_lock()
-            .map_err(|_| Error::Busy("configuration save is already running"))?;
-        let opened = self.directory()?;
-        let directory = opened.into_directory();
-        let permissions = FilePermissions::current()?;
-        permissions.check(&directory.try_clone()?.into_std_file(), false)?;
-        let name = self
-            .path
-            .file_name()
-            .ok_or(Error::Internal("configuration name is missing"))?;
-        let lock_name = format!(".{}.lock", name.to_string_lossy());
-        let marker = match directory.open_with(&lock_name, &file_options(true)) {
-            Ok(file) => file.into_std(),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => directory
-                .open_with(&lock_name, &file_options(false))?
-                .into_std(),
-            Err(error) => return Err(error.into()),
-        };
-        if is_unsafe_link(&marker.metadata()?) || !marker.metadata()?.is_file() {
-            return Err(Error::InvalidInput(
-                "configuration lock must be a regular file".into(),
-            ));
-        }
-        permissions.check(&marker, false)?;
-        if let Some(previous) = retained.as_ref() {
-            if native_file_identity(previous)? != native_file_identity(&marker)? {
-                return Err(Error::Conflict(
-                    "configuration lock identity changed; restart before saving".into(),
-                ));
-            }
-        } else {
-            *retained = Some(marker.try_clone()?);
-        }
-        match marker.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                return Err(Error::Busy("configuration is locked by another writer"));
-            }
-            Err(TryLockError::Error(error)) => return Err(error.into()),
-        }
-        let _lock = WriterLock(marker);
-        let (original, bytes) = self.read_file(&self.directory()?)?;
-        self.require_revision(&expected, &bytes)?;
-        if Self::parse(&bytes)?.system_settings_read_only {
-            return Err(Error::Conflict(
-                "system settings are read-only in saved configuration".into(),
-            ));
-        }
-        let proposed = match self.proposed_update(update, &bytes) {
-            Ok(proposed) => proposed,
-            Err(error) => {
-                return Ok(BackendConfigurationResult {
-                    errors: vec![error],
-                    state: None,
-                });
-            }
-        };
-        let mut output = serde_json::to_vec_pretty(&proposed)
-            .map_err(|_| Error::Internal("configuration serialization failed"))?;
-        let changed = changed_fields(&Self::parse(&bytes)?, &proposed)?;
-        output.push(b'\n');
-        if output.len() as u64 > MAXIMUM {
-            return Err(Error::InvalidInput("configuration exceeds 16 KiB".into()));
-        }
-        let temporary_name = format!(".{}.{}.pending", name.to_string_lossy(), digest(&output));
-        let mut temporary = directory
-            .open_with(&temporary_name, &file_options(true))?
-            .into_std();
-        let result = (|| -> Result<()> {
-            permissions.copy(&original, &mut temporary)?;
-            #[cfg(test)]
-            self.fail_save(SaveFailure::Write)?;
-            temporary.write_all(&output)?;
-            #[cfg(test)]
-            self.fail_save(SaveFailure::Sync)?;
-            temporary.sync_all()?;
-            #[cfg(test)]
-            self.fail_save(SaveFailure::CrashAfterSync)?;
-            let (current, current_bytes) = self.read_file(&self.directory()?)?;
-            self.require_revision(&expected, &current_bytes)?;
-            if native_file_identity(&current)? != native_file_identity(&original)? {
-                return Err(Error::Conflict(
-                    "configuration target identity changed".into(),
-                ));
-            }
-            drop(current);
-            drop(original);
-            drop(temporary);
-            #[cfg(test)]
-            self.fail_save(SaveFailure::Replace)?;
-            directory.rename(&temporary_name, &directory, name)?;
-            #[cfg(test)]
-            self.fail_save(SaveFailure::AfterReplace).map_err(|_| Error::Conflict(
-                "configuration was replaced but directory sync failed; reload and review before retrying".into()
-            ))?;
-            sync_directory(&directory).map_err(|_| Error::Conflict(
-                "configuration was replaced but directory sync failed; reload and review before retrying".into()
-            ))?;
-            let (_, actual) = self.read_file(&self.directory()?).map_err(|_| Error::Conflict(
-                "configuration replacement completed but verification failed; reload and review before retrying".into()
-            ))?;
-            if actual != output {
-                return Err(Error::Conflict(
-                    "configuration changed after replacement; reload before retrying".into(),
-                ));
-            }
-            Ok(())
-        })();
-        if result.is_err() {
-            match directory.remove_file(&temporary_name) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err(Error::Conflict("configuration save failed and its temporary file needs operator cleanup; reload before retrying".into())),
-            }
-        }
-        result?;
-        *self
-            .validated_revision
-            .lock()
-            .map_err(|_| Error::Internal("configuration validation lock failed"))? =
-            Some(digest(&output));
-        eprintln!(
-            "backend configuration saved; changed fields: {}",
-            changed.join(", ")
-        );
-        drop(reload);
-        Ok(BackendConfigurationResult {
-            errors: Vec::new(),
-            state: Some(self.state(&output)?),
-        })
-    }
-
-    #[cfg(test)]
-    fn fail_save(&self, point: SaveFailure) -> Result<()> {
-        let mut failure = self
-            .failure
-            .lock()
-            .map_err(|_| Error::Internal("test failure lock failed"))?;
-        if *failure == Some(point) {
-            if point == SaveFailure::CrashAfterSync {
-                std::process::exit(42);
-            }
-            *failure = None;
-            return Err(std::io::Error::other("injected configuration persistence failure").into());
-        }
-        Ok(())
-    }
-
     fn require_revision(&self, expected: &str, bytes: &[u8]) -> Result<()> {
         if expected != digest(bytes) {
             return Err(Error::Conflict(
                 "saved configuration changed; reload and review the draft before retrying".into(),
             ));
         }
-        Ok(())
-    }
-
-    pub(super) fn attach_reload(&self, sender: tokio::sync::mpsc::Sender<String>) -> Result<()> {
-        self.reload
-            .lock()
-            .map_err(|_| Error::Internal("configuration reload lock failed"))?
-            .sender = Some(sender);
-        Ok(())
-    }
-
-    pub(crate) fn request_reload(
-        &self,
-        command: ConfigurationReloadCommand,
-    ) -> Result<ConfigurationReloadState> {
-        let mut control = self
-            .reload
-            .lock()
-            .map_err(|_| Error::Internal("configuration reload lock failed"))?;
-        if matches!(control.state, ConfigurationReloadState::Pending { .. }) {
-            return Err(Error::Busy("configuration reload is already pending"));
-        }
-        let (_, bytes) = self.read_file(&self.directory()?)?;
-        self.require_revision(&command.expected_revision, &bytes)?;
-        let saved = Self::parse(&bytes)?;
-        if self.active.system_settings_read_only || saved.system_settings_read_only {
-            return Err(Error::Conflict("system settings are read-only".into()));
-        }
-        self.proposed(Self::draft_from(summary(&saved)), &bytes)
-            .map_err(configuration_error)?;
-        let sender = control.sender.as_ref().ok_or(Error::Busy(
-            "configuration reload is not attached to this host",
-        ))?;
-        sender
-            .try_send(command.expected_revision.clone())
-            .map_err(|_| Error::Busy("configuration reload host is unavailable or busy"))?;
-        control.state = ConfigurationReloadState::Pending {
-            revision: command.expected_revision,
-            origin: saved.origin,
-        };
-        Ok(control.state.clone())
-    }
-
-    /// A new generation has its own immutable active snapshot and shares only
-    /// the lifecycle gate and stable writer identity with the previous host.
-    pub(super) fn reload_candidate(&self, revision: &str) -> Result<Self> {
-        let (_, bytes) = self.read_file(&self.directory()?)?;
-        self.require_revision(revision, &bytes)?;
-        let active = self
-            .proposed(Self::draft_from(summary(&Self::parse(&bytes)?)), &bytes)
-            .map_err(configuration_error)?;
-        let mut candidate = Self::new(&self.path, &bytes, active)?;
-        if candidate.parent != self.parent {
-            return Err(Error::Conflict(
-                "configuration parent identity changed".into(),
-            ));
-        }
-        candidate.reload = self.reload.clone();
-        candidate.writer = self.writer.clone();
-        Ok(candidate)
-    }
-
-    pub(super) fn verify_reload(&self, revision: &str) -> Result<()> {
-        let (_, bytes) = self.read_file(&self.directory()?)?;
-        self.require_revision(revision, &bytes)?;
-        if Self::parse(&bytes)?.system_settings_read_only {
-            return Err(Error::Conflict("saved configuration is read-only".into()));
-        }
-        Ok(())
-    }
-
-    pub(super) fn finish_reload(&self, revision: String, result: Result<()>) -> Result<()> {
-        self.reload.lock().map_err(|_| Error::Internal("configuration reload lock failed"))?.state = match result {
-            Ok(()) => ConfigurationReloadState::Active { revision },
-            Err(_) => ConfigurationReloadState::Failed { revision, message: "API reload failed. The previous host remains active. Review server diagnostics and saved configuration before retrying.".into() },
-        };
         Ok(())
     }
 
@@ -1233,9 +1036,23 @@ impl ConfigurationService {
                 )
             })
             .transpose()?;
+        Self::resolve_paths(
+            &mut saved,
+            self.path
+                .parent()
+                .ok_or_else(|| issue("configuration", "Configuration parent is missing."))?,
+        );
         Self::normalize(&mut saved)?;
         Self::check_references(&saved)?;
-        let store = Store::open_read_current(&saved.database)
+        let (storage, _application) = Self::storage(&saved, &digest(bytes), &self.path)
+            .map_err(|error| issue_for_error(&error))?
+            .ok_or_else(|| {
+                issue(
+                    "storage",
+                    "Storage selection is missing. Use explicit fresh setup.",
+                )
+            })?;
+        let store = Store::open_scoped(&saved.database, storage.client(), StoreOpenMode::ReadCurrent)
             .map_err(|_| issue("database", "Use an accessible local database with the current schema. Upgrade separately if needed."))?;
         self.check_files(&saved, &store)
             .map_err(|error| issue_for_error(&error))?;
@@ -1329,7 +1146,10 @@ impl ConfigurationService {
                     "managed_tls",
                 ][..],
             ),
-            (ConfigurationSection::Storage, &["database", "cache"][..]),
+            (
+                ConfigurationSection::Storage,
+                &["database", "cache", "storage"][..],
+            ),
             (ConfigurationSection::MusicProviders, &["services"][..]),
             (
                 ConfigurationSection::MusicAcquisition,
@@ -1693,10 +1513,23 @@ impl ConfigurationService {
         let protected = self.protected(configuration);
         crate::infrastructure::local_file::protect_files(
             store,
-            &protected.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+            &protected
+                .iter()
+                .filter(|path| configuration.browser_assets.as_ref() != Some(*path))
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>(),
         )?;
         if let Some(assets) = &configuration.browser_assets {
-            crate::infrastructure::browser::BrowserAssets::load(assets)?;
+            if let Some(client) = store.selected_filesystem() {
+                let directory = crate::infrastructure::filesystem::LibraryDirectory::open(assets)?;
+                client.require_non_media_input(&directory)?;
+            } else {
+                crate::infrastructure::local_file::protect_files(store, &[assets])?;
+            }
+            crate::infrastructure::browser::BrowserAssets::load_for(
+                assets,
+                store.selected_filesystem(),
+            )?;
         }
         if let Some(local) = &configuration.local_acquisition {
             local.validate(store, &configuration.services)?;
@@ -1716,13 +1549,13 @@ impl ConfigurationService {
             .trim_matches(['[', ']']);
         match configuration.tls_mode {
             TlsMode::Manual => {
-                load_tls(configuration, hostname)?;
+                load_tls(self, configuration, hostname)?;
             }
             TlsMode::AzureDns => {
                 let managed = configuration.managed_tls.as_ref().ok_or_else(|| {
                     Error::InvalidInput("managed TLS configuration is missing".into())
                 })?;
-                managed.binding(hostname)?;
+                managed.binding_for(hostname, &store.source())?;
                 self.check_certificate_layout(configuration, managed, store)?;
             }
         }
@@ -1826,11 +1659,11 @@ impl ConfigurationService {
                 "certificate commands require explicit managed HTTPS configuration".into(),
             ));
         }
-        let store = if write {
-            Store::open_current_existing(&configuration.database)?
+        let store = service.open_store(if write {
+            StoreOpenMode::Current
         } else {
-            Store::open_read_current(&configuration.database)?
-        };
+            StoreOpenMode::ReadCurrent
+        })?;
         service.check_files(&configuration, &store)?;
         Ok((
             configuration.managed_tls.ok_or_else(|| {
@@ -1873,9 +1706,10 @@ impl ConfigurationService {
                 &directory.native,
             )?;
             let (selected, _, tls) =
-                crate::infrastructure::certificates::state::StateStore::load_active(
+                crate::infrastructure::certificates::state::StateStore::load_active_for(
+                    store,
                     &managed.state_directory,
-                    &managed.binding(hostname)?,
+                    &managed.binding_for(hostname, &store.source())?,
                     hostname,
                 )?;
             store.check_native_root(
@@ -1894,7 +1728,7 @@ impl ConfigurationService {
         }
         Ok((
             self.client_secret(&self.active)?,
-            Some(load_tls(&self.active, hostname)?),
+            Some(load_tls(self, &self.active, hostname)?),
         ))
     }
 
@@ -1903,7 +1737,7 @@ impl ConfigurationService {
             .client_secret_file
             .as_ref()
             .map(|path| {
-                let bytes = crate::infrastructure::local_file::read_local(path, 4096, true)?;
+                let bytes = self.read_input(path, 4096, true)?;
                 let secret = String::from_utf8(bytes)
                     .map_err(|_| Error::InvalidInput("client secret file is not UTF-8".into()))?;
                 let secret = secret.trim_end_matches(['\r', '\n']);
@@ -1917,9 +1751,9 @@ impl ConfigurationService {
             .transpose()
     }
 
-    pub(super) fn tls_material(configuration: &Configuration) -> Result<(Vec<u8>, Vec<u8>)> {
+    pub(super) fn tls_material(&self, configuration: &Configuration) -> Result<(Vec<u8>, Vec<u8>)> {
         Ok((
-            crate::infrastructure::local_file::read_local(
+            self.read_input(
                 configuration
                     .certificate_file
                     .as_deref()
@@ -1927,7 +1761,7 @@ impl ConfigurationService {
                 262144,
                 false,
             )?,
-            crate::infrastructure::local_file::read_local(
+            self.read_input(
                 configuration
                     .private_key_file
                     .as_deref()
@@ -1937,33 +1771,6 @@ impl ConfigurationService {
             )?,
         ))
     }
-}
-
-struct WriterLock(File);
-impl Drop for WriterLock {
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
-}
-
-fn file_options(create: bool) -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .create_new(create)
-        .follow(FollowSymlinks::No);
-    #[cfg(unix)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    #[cfg(windows)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.access_mode(0xc004_0000).share_mode(3);
-    }
-    options
 }
 
 fn replacement(update: ConfigurationReplacement, previous: Option<String>) -> Option<String> {
@@ -2020,22 +1827,7 @@ fn issue_for_error(error: &Error) -> BackendConfigurationIssue {
     }
 }
 
-fn changed_fields(before: &Configuration, after: &Configuration) -> Result<Vec<String>> {
-    let before = serde_json::to_value(before)
-        .map_err(|_| Error::Internal("configuration comparison failed"))?;
-    let after = serde_json::to_value(after)
-        .map_err(|_| Error::Internal("configuration comparison failed"))?;
-    let (Some(before), Some(after)) = (before.as_object(), after.as_object()) else {
-        return Err(Error::Internal("configuration comparison requires objects"));
-    };
-    Ok(after
-        .iter()
-        .filter(|(key, value)| before.get(*key) != Some(*value))
-        .map(|(key, _)| key.clone())
-        .collect())
-}
-
-fn digest(bytes: &[u8]) -> String {
+pub(super) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 

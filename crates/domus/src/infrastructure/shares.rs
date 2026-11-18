@@ -1,9 +1,11 @@
 //! Bounded, read-only sharing over explicitly bound native library directories.
 //! A catalog is evidence, not open authority. Every read resolves from its binding
 //! again and retains the cross-process publication lock for the protected work.
-use super::filesystem::{LibraryDirectory, NativeRoot, is_unsafe_cap_link, native_file_identity};
+use super::filesystem::{
+    DirectorySnapshot, LibraryDirectory, is_unsafe_cap_link, native_file_identity,
+};
 use super::local_file::ProcessLock;
-use super::store::Store;
+use super::store::{Store, StoreOpenMode, StoreSource};
 use crate::application::sharing::selected_directory;
 use crate::domain::LibraryPath;
 use crate::domain::sharing::{SharePolicy, eligible_extension};
@@ -15,7 +17,6 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -44,7 +45,7 @@ fn generation(store: &Store) -> Result<i64> {
 /// Nonblocking admission: publication retries at its existing job boundary
 /// rather than waiting indefinitely for a slow response or upload.
 pub(crate) fn publication_visibility_write(store: &Store) -> Result<ProcessLock> {
-    ProcessLock::acquire(store.database_path(), "share-visibility")
+    store.source().state_lock("share-visibility")
 }
 
 #[derive(Clone)]
@@ -52,7 +53,7 @@ struct Binding {
     id: i64,
     location: i64,
     relative: String,
-    native: NativeRoot,
+    snapshot: DirectorySnapshot,
 }
 
 fn binding(store: &Store, id: i64) -> Result<Binding> {
@@ -75,7 +76,7 @@ fn binding(store: &Store, id: i64) -> Result<Binding> {
         id,
         location: saved.0,
         relative: saved.1,
-        native: serde_json::from_str(&saved.2)?,
+        snapshot: serde_json::from_str(&saved.2)?,
     })
 }
 
@@ -85,7 +86,7 @@ fn bound_directory(store: &Store, binding: &Binding) -> Result<LibraryDirectory>
         binding.location,
         &LibraryPath::parse(&binding.relative)?,
     )?;
-    if opened.native_root() != &binding.native {
+    if opened.snapshot() != binding.snapshot {
         return Err(stale());
     }
     Ok(opened)
@@ -95,7 +96,7 @@ fn bound_directory(store: &Store, binding: &Binding) -> Result<LibraryDirectory>
 /// `check` rejects a stopped worker, changed root, or invalidated generation.
 pub struct ShareVisibilityGuard {
     _lock: ProcessLock,
-    database: PathBuf,
+    database: StoreSource,
     generation: i64,
     bindings: Vec<Binding>,
     stop: Arc<AtomicBool>,
@@ -107,7 +108,7 @@ impl ShareVisibilityGuard {
         if self.stop.load(Ordering::Acquire) {
             return Err(Error::WorkerStopping);
         }
-        let store = Store::open_read_current(&self.database)?;
+        let store = self.database.open(StoreOpenMode::ReadCurrent)?;
         if generation(&store)? != self.generation {
             return Err(stale());
         }
@@ -169,7 +170,7 @@ fn evidence(file: &File, directory: &LibraryDirectory) -> Result<Evidence> {
         modified: modified.as_nanos().to_string(),
         directory: format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(directory.native_root())?)
+            Sha256::digest(serde_json::to_vec(&directory.snapshot())?)
         ),
     })
 }
@@ -262,18 +263,7 @@ fn excluded(name: &str) -> bool {
 }
 
 fn check_private_ancestry(store: &Store, directory: &LibraryDirectory) -> Result<()> {
-    let mut statement = store
-        .sharing_connection()
-        .prepare("SELECT body FROM filesystem_roots WHERE kind<>'media'")?;
-    for row in statement.query_map([], |row| row.get::<_, String>(0))? {
-        let private: NativeRoot = serde_json::from_str(&row?)?;
-        if directory.native_root().overlaps(&private) {
-            return Err(Error::InvalidInput(
-                "shared traversal intersects a private native directory".into(),
-            ));
-        }
-    }
-    Ok(())
+    store.check_private_ancestry(directory)
 }
 
 /// One rule for browse and open. Retained destination intents hide incomplete
@@ -331,10 +321,9 @@ fn publication_eligible(
         return Ok(false);
     }
     let location = store.location(binding.location)?;
-    let root = LibraryDirectory::open(Path::new(&location.root))?;
-    store.check_native_root(&location.root, "media", root.native_root())?;
+    let root = store.open_registered_root(&location.root, "media")?;
     let album = root.open_directory(&LibraryPath::parse(folder)?)?;
-    if &root.native_root().identity != root_identity
+    if &store.root_binding_identity(&location.root, "media")? != root_identity
         || album.native_root().identity != *album_identity.as_ref().ok_or_else(stale)?
     {
         return Err(stale());
@@ -421,7 +410,7 @@ fn publication_eligible(
 /// Owns a complete immutable generation in local SQLite. No username policy is
 /// stored here: the live session authorizes every operation separately.
 pub struct ShareCatalog {
-    database: PathBuf,
+    database: StoreSource,
     id: i64,
     visibility: i64,
     bindings: Vec<Binding>,
@@ -437,11 +426,15 @@ impl ShareCatalog {
         Ok(())
     }
 
-    pub fn build(database: &Path, policy: &SharePolicy, stop: Arc<AtomicBool>) -> Result<Self> {
+    pub fn build(
+        database: &StoreSource,
+        policy: &SharePolicy,
+        stop: Arc<AtomicBool>,
+    ) -> Result<Self> {
         policy.validate()?;
-        let store = Store::open_current_existing(database)?;
-        let _builder = ProcessLock::acquire(store.database_path(), "share-catalog")?;
-        let _lock = ProcessLock::acquire(store.database_path(), "share-visibility")?;
+        let store = database.open(StoreOpenMode::Current)?;
+        let _builder = database.state_lock("share-catalog")?;
+        let _lock = database.state_lock("share-visibility")?;
         if stop.load(Ordering::Acquire) {
             return Err(Error::WorkerStopping);
         }
@@ -451,16 +444,17 @@ impl ShareCatalog {
             .iter()
             .map(|root| binding(&store, root.binding_id))
             .collect::<Result<Vec<_>>>()?;
-        for (index, selected) in bindings.iter().enumerate() {
-            bound_directory(&store, selected)?;
-            if bindings[..index]
-                .iter()
-                .any(|other| other.native.overlaps(&selected.native))
-            {
+        let mut retained = Vec::with_capacity(bindings.len());
+        for selected in &bindings {
+            let directory = bound_directory(&store, selected)?;
+            if retained.iter().any(|other: &LibraryDirectory| {
+                other.native_root().overlaps(directory.native_root())
+            }) {
                 return Err(Error::InvalidInput(
                     "selected share folders overlap through native ancestry".into(),
                 ));
             }
+            retained.push(directory);
         }
         // A single builder and current-generation handles keep retained disk use
         // finite. Rebuilding deliberately invalidates all older catalog objects.
@@ -473,7 +467,7 @@ impl ShareCatalog {
         )?;
         let id = store.sharing_connection().last_insert_rowid();
         let catalog = Self {
-            database: store.database_path().to_owned(),
+            database: database.clone(),
             id,
             visibility,
             bindings,
@@ -504,7 +498,7 @@ impl ShareCatalog {
             store.sharing_connection().execute(
                 "INSERT INTO share_catalog_paths(catalog_id,binding_id,relative_path,wire_path,wire_key,parent_wire,kind,directory_body)
                  VALUES(?1,?2,'',?3,?4,'','directory',?5)",
-                params![self.id, binding.id, root.alias, root.alias.to_uppercase(), serde_json::to_string(&binding.native)?],
+                params![self.id, binding.id, root.alias, root.alias.to_uppercase(), serde_json::to_string(&binding.snapshot)?],
             )?;
         }
         let mut files = 0u32;
@@ -540,7 +534,7 @@ impl ShareCatalog {
             }
             let root = bound_directory(store, binding)?;
             let directory = root.open_directory(&portable(&relative)?)?;
-            if *directory.native_root() != serde_json::from_str::<NativeRoot>(&native_body)? {
+            if directory.snapshot() != serde_json::from_str::<DirectorySnapshot>(&native_body)? {
                 return Err(stale());
             }
             check_private_ancestry(store, &directory)?;
@@ -607,7 +601,7 @@ impl ShareCatalog {
                     }
                     // Open from the retained parent; never authorize using dirent metadata.
                     let child = directory.open_directory(&portable(&name)?)?;
-                    directory_body = Some(serde_json::to_string(child.native_root())?);
+                    directory_body = Some(serde_json::to_string(&child.snapshot())?);
                     None
                 };
                 paths = paths.checked_add(1).ok_or_else(stale)?;
@@ -691,7 +685,7 @@ impl ShareCatalog {
 
     /// Begin a protected response. An old generation can never create a new guard.
     pub fn check(&self) -> Result<ShareVisibilityGuard> {
-        let lock = ProcessLock::acquire_shared(&self.database, "share-visibility")?;
+        let lock = self.database.state_read_lock("share-visibility")?;
         let guard = ShareVisibilityGuard {
             _lock: lock,
             database: self.database.clone(),
@@ -724,7 +718,7 @@ impl ShareCatalog {
 
     pub fn counts(&self) -> Result<(u32, u32)> {
         let _guard = self.check()?;
-        let store = Store::open_read_current(&self.database)?;
+        let store = self.database.open(StoreOpenMode::ReadCurrent)?;
         self.current(&store)?;
         Ok(store.sharing_connection().query_row(
             "SELECT (SELECT count(*) FROM share_catalog_paths WHERE catalog_id=?1 AND kind='directory'),
@@ -745,7 +739,7 @@ impl ShareCatalog {
     ) -> Result<Vec<SharedFile>> {
         crate::domain::Page::new(after, limit)?;
         let _guard = self.check()?;
-        let store = Store::open_read_current(&self.database)?;
+        let store = self.database.open(StoreOpenMode::ReadCurrent)?;
         self.current(&store)?;
         let folder = folder.map(|folder| folder.replace('\\', "/"));
         if let Some(folder) = &folder {
@@ -839,7 +833,7 @@ impl ShareCatalog {
             portable(path)?;
         }
         let _guard = self.check()?;
-        let store = Store::open_read_current(&self.database)?;
+        let store = self.database.open(StoreOpenMode::ReadCurrent)?;
         self.current(&store)?;
         let mut statement = store.sharing_connection().prepare(
             "SELECT d.wire_path,(SELECT count(*) FROM share_catalog_paths f
@@ -871,7 +865,8 @@ impl ShareCatalog {
                 let root = bound_directory(&store, binding)?;
                 let directory = root.open_directory(&portable(&relative)?)?;
                 check_private_ancestry(&store, &directory)?;
-                if *directory.native_root() != serde_json::from_str::<NativeRoot>(&native_body)? {
+                if directory.snapshot() != serde_json::from_str::<DirectorySnapshot>(&native_body)?
+                {
                     return Err(stale());
                 }
                 Ok(SharedDirectory {
@@ -886,7 +881,7 @@ impl ShareCatalog {
         let path = wire_path.replace('\\', "/");
         portable(&path)?;
         let _guard = self.check()?;
-        let store = Store::open_read_current(&self.database)?;
+        let store = self.database.open(StoreOpenMode::ReadCurrent)?;
         self.current(&store)?;
         let row: Option<(i64, i64, i64, String, String)> = store
             .sharing_connection()
@@ -919,7 +914,7 @@ impl ShareCatalog {
 
     pub fn open(&self, shared: &SharedFile) -> Result<SharedRead> {
         let guard = self.check()?;
-        let store = Store::open_read_current(&self.database)?;
+        let store = self.database.open(StoreOpenMode::ReadCurrent)?;
         self.current(&store)?;
         if shared.catalog != self.id {
             return Err(stale());

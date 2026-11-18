@@ -315,40 +315,35 @@ Inspection cannot open a new database/cache/staging root, validate TLS, contact
 providers or change the active read-only policy. APIs without a service return an
 explicit unavailable error.
 
-The typed validation/save routes call the same service and authoritative startup
+The typed validation routes call the same service and authoritative startup
 rules on blocking workers. Passive validation can read protected local files and
 TLS material and query current-schema database records. No file or network I/O
 runs inside a database transaction. The service enforces active and saved
 read-only restrictions independently of the transport guard. Browser DTOs cannot
 change the operator switch.
 
-Saves hold the cooperating-writer OS lock through revision checks, secret merging,
-validation, synced temporary output, native handle-relative replacement, and
-result verification. Parent and target identities are checked. Pre-commit errors
-preserve the old file; post-replacement errors identify uncertainty explicitly.
-Successful saves retain only revision-bound validation evidence in memory.
-Changed external bytes invalidate it. Backend JSON changes require explicit reload or restart.
+Existing host JSON is operator-managed and immutable to application components.
+The old save and API-only reload routes return `410 Gone` under both policy
+values. No configuration writer lock, pending-file replacement or host handover
+channel remains. Stop all components, edit and validate the file, then restart
+them with the same selection. `configuration-check` uses the passive service
+without opening a listener and fails for invalid input.
 Startup loading is still not a safe dry-run validator: the runtime can migrate
 the database and bind the selected cache after service loading.
 
-Typed section commands share this service and the same persistence implementation.
+Typed section validation shares this service.
 They carry complete updates for selected sections, not a replacement document.
 The service rejects duplicate/unknown sections and stale whole-file revisions,
-merges hidden references, and validates the full candidate before atomic save.
+merges hidden references in memory, and validates the full candidate without saving.
 It reports per-section active/saved differences without disclosing hidden values.
 Music output policy and root configuration delegate to their existing Store and
 application operations through ConfigurationService. Their persistence semantics
 remain separate from backend JSON.
 
-The service owns one bounded reload channel and pending/active/failed state.
-The API host consumes exact-revision requests. A candidate service keeps a new
-immutable active snapshot while sharing the writer identity and lifecycle gate.
-Host preparation runs beside the existing listener. Busy local effects reject
-reload. A local-runtime permit prevents new effects during preparation.
-After revision verification, the old generation drains and the new generation
-uses the same guarded listener implementation. A retained bound socket permits
-restoration on handover failure. Separate worker processes remain unchanged.
-Passive service operations cannot enter this lifecycle path.
+The API retains one immutable host snapshot through its lifecycle. Managed
+certificate renewal and validated manual TLS material refresh remain active;
+neither reloads host JSON. Protected SQLite policy commands still check both
+active and saved `system_settings_read_only`, with existing version checks.
 
 ## Certificate and listener boundary
 

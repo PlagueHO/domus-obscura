@@ -46,7 +46,7 @@ impl StateDirectory {
             };
         let native = directory.native_root().clone();
         crate::infrastructure::permissions::FilePermissions::current()?
-            .check(&directory.into_directory().into_std_file(), true)?;
+            .check(&directory.directory_file()?, true)?;
         Ok(Self {
             path,
             native,
@@ -70,16 +70,22 @@ impl StateDirectory {
 #[serde(deny_unknown_fields)]
 pub struct ManagedTlsConfiguration {
     pub environment: AcmeEnvironment,
+    #[serde(default = "default_state_directory")]
     pub state_directory: PathBuf,
     pub dns: azure::AzureDnsConfiguration,
     pub terms_of_service_agreed: bool,
 }
 
+fn default_state_directory() -> PathBuf {
+    "certificates".into()
+}
+
 pub fn status(configuration: &std::path::Path) -> Result<state::CertificateStatus> {
-    let (managed, hostname, _) = crate::infrastructure::server::configuration::ConfigurationService::certificate_configuration(configuration)?;
-    state::StateStore::status(
+    let (managed, hostname, database) = crate::infrastructure::server::configuration::ConfigurationService::certificate_configuration(configuration)?;
+    state::StateStore::status_for(
+        &database,
         &managed.state_directory,
-        &managed.binding(&hostname)?,
+        &managed.binding_for(&hostname, &database.source())?,
         managed.environment,
     )
 }
@@ -115,6 +121,7 @@ impl ManagedTlsConfiguration {
 
     /// Bind account/resource/hostname policy and the exact credential contents.
     /// Rotation is an explicit recovery boundary, never an ambient fallback.
+    #[cfg(test)]
     pub fn binding(&self, hostname: &str) -> Result<String> {
         self.validate(hostname)?;
         let bytes = crate::infrastructure::local_file::read_local(
@@ -122,10 +129,26 @@ impl ManagedTlsConfiguration {
             4096,
             true,
         )?;
+        self.binding_bytes(hostname, bytes)
+    }
+
+    pub(crate) fn binding_for(
+        &self,
+        hostname: &str,
+        source: &crate::infrastructure::store::StoreSource,
+    ) -> Result<String> {
+        self.validate(hostname)?;
+        self.binding_bytes(
+            hostname,
+            source.read_input(&self.dns.client_secret_file, 4096, true)?,
+        )
+    }
+
+    fn binding_bytes(&self, hostname: &str, bytes: Vec<u8>) -> Result<String> {
+        self.validate(hostname)?;
         let mut hash = Sha256::new();
-        hash.update(serde_json::to_vec(self)?);
-        hash.update([0]);
-        hash.update(hostname.as_bytes());
+        hash.update(b"domus-certificate-binding-v2\0");
+        hash.update(self.resource_binding(hostname)?.as_bytes());
         hash.update([0]);
         hash.update(bytes);
         Ok(format!("{:x}", hash.finalize()))
@@ -141,7 +164,7 @@ fn validate_state_directory(path: &std::path::Path) -> Result<()> {
             ));
         }
         let directory = match crate::infrastructure::filesystem::LibraryDirectory::open(ancestor) {
-            Ok(directory) => directory.into_directory(),
+            Ok(directory) => directory,
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 continue;
             }

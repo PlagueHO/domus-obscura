@@ -5,7 +5,9 @@ use domus::infrastructure::store::{Observation, Store};
 use id3::TagLike;
 use std::io::Write;
 use std::path::Path;
-use tempfile::tempdir;
+#[path = "support/private.rs"]
+mod private;
+use private::tempdir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

@@ -1,12 +1,12 @@
 use std::path::Path;
 
-pub fn tempdir() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
     let root = tempfile::tempdir()?;
     directory(root.path())?;
     Ok(root)
 }
 
-pub fn directory(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub fn directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -24,9 +24,12 @@ pub fn directory(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             .GetTokenInformation(co::TOKEN_INFORMATION_CLASS::User)
             .map_err(std::io::Error::other)?;
         let winsafe::TokenInfo::User(user) = information else {
-            return Err("fixture process user is absent".into());
+            return Err(std::io::Error::other("fixture process user is absent"));
         };
-        let sid = user.User.Sid().ok_or("fixture process SID is absent")?;
+        let sid = user
+            .User
+            .Sid()
+            .ok_or_else(|| std::io::Error::other("fixture process SID is absent"))?;
         let handle = std::fs::OpenOptions::new()
             .read(true)
             .access_mode(0x0006_0000)

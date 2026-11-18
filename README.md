@@ -103,12 +103,18 @@ directory. Debug builds use `frontend/dist-app` when packaged files are absent.
 Build these files with `pnpm --dir frontend build:app`. Missing browser files
 and an occupied port are errors, not an API-only fallback.
 
-First launch creates private `DomusObscura` state below `LOCALAPPDATA` on Windows
-or `XDG_DATA_HOME` on Linux. Linux falls back to `$HOME/.local/share`.
-Later launches load existing `service.json` and reuse `state.db`. Omitting the
+First launch uses `%LOCALAPPDATA%\DomusObscura` on Windows and
+`$XDG_DATA_HOME/domus-obscura` on Linux. Linux falls back to
+`$HOME/.local/share/domus-obscura` when `XDG_DATA_HOME` is unset or empty.
+Use `domus serve --storage-root <absolute-application-storage>` to select a
+different private directory. First launch writes `config.json` at its root and
+creates `state/state.db`. Relative configuration paths resolve from that root.
+Later launches load the existing configuration and state. Omitting the
 configuration argument does not reset authentication, providers, or certificates;
 use the saved origin and review configured startup effects. Existing configuration
-and interrupted `.service.json.pending` files are not replaced automatically.
+and interrupted `.config.json.pending` files are not replaced automatically.
+Without `config.json`, nonempty selected storage is refused before SQLite opens.
+Previous layouts are not adopted or moved. Select an empty directory for fresh setup.
 Provider services are disabled and system settings are read-only in a fresh default configuration.
 Configure local roots and optional services separately through the existing
 operator commands. No media operation is approved by starting the app.
@@ -196,8 +202,8 @@ Waiting and failed requests count. Lowering the limit never discards work.
 Equivalent duplicate commands return the saved request. Conflicting commands
 and full queues fail explicitly. Requests can be queued while the worker is
 offline. The browser shows offline state, active worker configuration revision,
-saved requests, and bounded progress. Configuration saves and API reloads do not
-restart the worker; restart it separately at a safe boundary.
+saved requests, and bounded progress. Host JSON changes require stopping all
+components, editing and validating the file, then restarting them.
 
 The worker runs one transfer/normalization/publication pipeline and one separate
 scan. Waiting albums release the pipeline slot. Scheduling selects the oldest
@@ -307,9 +313,9 @@ spool budget at startup. Insufficient space or too many retained files blocks
 sharing with an operator error. Review these exact files with the worker stopped;
 do not remove live spool files or stable lock files.
 
-Saving or validating settings does not start sharing, build a catalog or contact
-Soulseek. Restart the separate worker at a safe boundary to activate changes.
-The API reload command does not restart that worker. Its reported configuration
+Validating settings does not start sharing, build a catalog or contact
+Soulseek. Stop all components, edit and validate the file, then restart them.
+The worker's reported configuration
 revision, not the API's active revision, identifies the worker configuration.
 Generated fixtures check native-root rejection, read-only uploads, publication
 visibility, queue fairness and one-session routing. A 60,000-entry wire fixture
@@ -639,7 +645,7 @@ cache. Use an existing local database. This command creates no job or plan:
 .\target\debug\domus.exe catalog-release C:\DomusTest\state.db <exact-release-id>
 ```
 
-Use `domus catalog-plan-prepare <local-database> <release-id> <request-json>`
+Use `domus catalog-plan-prepare --host <absolute-host-file> <release-id> <request-json>`
 to prepare a provider-backed plan without running an API listener. The request
 uses the same `CatalogPlanRequest` fields as the API: `job_id`,
 `expected_version`, `settings_version`, optional `format`, `locations`,
@@ -757,9 +763,9 @@ JSON file. Do not pass the complete report or add an approval field. This file
 contains remote identifiers, not local media paths. Then use:
 
 ```text
-domus source-candidate-prepare <local-database> <job-id> <plan-version> <absolute-listing-json>
-domus source-candidate <local-database> <candidate-id>
-domus source-candidate-approve <local-database> <candidate-id> <plan-version> <review-sha256> --reviewed-exact-edition-and-permitted-download
+domus source-candidate-prepare --host <absolute-host-file> <job-id> <plan-version> <absolute-listing-json>
+domus source-candidate --host <absolute-host-file> <candidate-id>
+domus source-candidate-approve --host <absolute-host-file> <candidate-id> <plan-version> <review-sha256> --reviewed-exact-edition-and-permitted-download
 ```
 
 Preparation saves an unapproved, immutable listing and its assessment against
@@ -808,10 +814,10 @@ These commands require current-schema state and never create or upgrade it.
 
 ## Safe job pause and cancel
 
-`domus job-control <local-database> <job-id> <plan-version> <pause|cancel>`
+`domus job-control --host <absolute-host-file> <job-id> <plan-version> <pause|cancel>`
 records an immutable operator request for the current job version. The database
 must already have the current schema. The command does not create or migrate it.
-Read a request with `domus job-control-status <local-database> <control-id>`.
+Read a request with `domus job-control-status --host <absolute-host-file> <control-id>`.
 
 An idle job with no uncertain transfer can stop immediately. A live worker keeps
 its claim until a file/transfer boundary. The request blocks new transfer
@@ -825,7 +831,7 @@ returns the same ID. A different pending action is rejected.
 Pause saves the previous state in a separate control receipt and creates an
 `awaiting_input` question with `Resume` and `Cancel` choices. Use the returned
 `question_id` with `question-answer`. Then run
-`domus job-control-continue <local-database> <control-id> <plan-version>`.
+`domus job-control-continue --host <absolute-host-file> <control-id> <plan-version>`.
 The answer alone cannot claim or resume the job. Continue applies only that
 saved answer. `Resume` rechecks the current plan and indexed destination
 observations; active-stage work still requires its approved provider-backed plan.
@@ -858,7 +864,7 @@ requires Entra. These routes do not start a worker or expose a public listener.
 
 ## Experimental one-shot worker
 
-`domus artwork-preview <local-database> <job-id> <plan-version> <candidate-id>`
+`domus artwork-preview --host <absolute-host-file> <job-id> <plan-version> <candidate-id>`
 writes the exact retained JPEG bytes to standard output. It uses a read-only,
 current-schema snapshot. It does not approve the image or create an output file.
 Use binary-safe redirection to a new preview file. In PowerShell 7.4 or later:
@@ -875,7 +881,7 @@ image. A failed lookup writes no JPEG bytes and returns an error.
 Run a local check before starting the worker:
 
 ```powershell
-.\target\debug\domus.exe worker-check C:\DomusTest\worker.json
+.\target\debug\domus.exe worker-check --host C:\DomusTest\config.json C:\DomusTest\worker.json
 ```
 
 `worker-check` reads the same configuration, private credentials, current approved
@@ -893,10 +899,15 @@ server/account reachability, available disk space, retained staged bytes or
 future worker ownership. Another worker can still own the job. `worker-once`
 reloads all inputs and performs the full claim/staging checks before network use.
 
-`domus worker-once <absolute-configuration-file>` runs an explicitly selected source through acquisition and normalization. It requires a provider-backed approved plan, current observation bindings and an explicitly approved cover. For an existing `downloading` job, it uses the immutable complete source journal and refuses unresolved transfers. For a `queued` or `searching` job without a source, the optional selection below records the user's complete mapping before any network connection. It does not search for peers or independently prove an edition match. The browser harness does not create these prerequisites. Do not insert source or provider rows manually to make a job runnable.
+`domus worker-once --host <absolute-host-file> <absolute-operation-file>` runs an explicitly selected source through acquisition and normalization. It requires a provider-backed approved plan, current observation bindings and an explicitly approved cover. For an existing `downloading` job, it uses the immutable complete source journal and refuses unresolved transfers. For a `queued` or `searching` job without a source, the optional selection below records the user's complete mapping before any network connection. It does not search for peers or independently prove an edition match. The browser harness does not create these prerequisites. Do not insert source or provider rows manually to make a job runnable.
 
-The worker also requires current-schema state. Upgrade it separately with an
-explicit `domus init <local-database>` operation. Startup must not migrate it.
+State commands require `--host` and the main host's external storage selection.
+They do not accept bare database paths or migrate old state. The operation file's
+database must identify the host's selected database. Provider commands also enforce
+the host's enabled providers and selected cache.
+Use `domus init --storage-root <absolute-application-storage>` only for fresh setup.
+It refuses existing configuration or nonempty storage. It starts no listener or
+provider. This pre-release change has no existing-state migration procedure.
 
 Configuration uses local file references, not inline credentials. This example contains placeholders; replace them before use:
 
@@ -1098,8 +1109,8 @@ an original and returns a digest/count, not a JPEG or approval.
 The same `ImageService` also supports artist photos through the replaceable
 `ArtistImageProvider` port. Wikimedia Commons is the only installed source.
 `services.artist_images` defaults to `[]`; select `["wikimedia-commons"]` only
-with a configured shared file cache. Save and explicitly reload the backend
-configuration to activate the source.
+with a configured shared file cache. Stop all components, edit and validate the
+backend configuration, then restart them to activate the source.
 
 In System > Media > Music > Providers, enter an exact MusicBrainz artist UUID and
 one Commons `File:` title. **Check photo** retrieves the exact source and preview.
@@ -1722,51 +1733,30 @@ Failed refreshes retain the last values with a stale warning, not a current-stat
 claim. APIs without a file-backed Configuration service return an explicit unavailable
 error instead of invented values.
 
-When both active and saved configuration permit editing, select the required
-System section. The form covers all supported host and provider fields,
-including optional cache, browser assets, and development acquisition.
-Entra identifiers and secret-file references use write-only replacement controls.
-**Keep saved value** and a blank replacement preserve the current value.
-Removing an optional hidden value requires **Remove saved value**.
-Disabling an optional group removes its configuration, not its files.
-The form never accepts credential contents or edits `system_settings_read_only`.
+Host JSON is always operator-managed and read-only to application components.
+System settings has no host-save or API-reload controls. Existing save and reload
+routes return `410 Gone`, even when `system_settings_read_only` is `false`.
+Authentication, loopback, exact Origin and CSRF guards remain active.
+That flag controls protected SQLite policy commands, not host file ownership.
+Music output-policy saves and artist-photo binding commands remain separate.
+Output-policy changes apply to new plans immediately.
 
-Under **Advanced**, **Check changes before saving** runs passive checks through
-`POST /api/system/configuration/sections/validate`. **Save changes** repeats
-those checks and uses `POST /api/system/configuration/sections/save`. Both use the existing
-authentication, loopback, exact Origin, and CSRF guards. Validation reads local
-inputs and checks TLS without contacting providers. It uses a current-schema
-read-only database connection; it cannot migrate SQLite, create or bind roots,
-activate TLS, or start work. New cache/staging roots need separate operator setup.
+Stop the API and all workers at safe boundaries before editing host JSON.
+Run `domus configuration-check <absolute-configuration-file>` before restarting.
+It reports redacted validation errors and exits unsuccessfully for invalid input.
+Validation reads existing local inputs, checks TLS and queries current-schema
+SQLite. It does not migrate, create or bind roots, contact providers, activate
+TLS or start work. New cache/staging roots need separate operator setup.
+Startup rechecks all references. Passive validation does not reserve them.
 
-Backend JSON saves do not activate changes. Successful saves distinguish the
-passively validated saved revision from the active startup snapshot.
-Startup must recheck the files; passive validation is not activation.
-The Configuration service owns every backend JSON read and write, including
-startup loading, redaction, revision checks, secret merging, and atomic saves.
-
-The sidebar separates General, Identity, TLS, and Storage/cache from Music
-Providers, Acquisition, Output policy, and Library roots. A section save sends
-only that section. **Save all changed sections** saves related changes
-together. Unchanged saved sections and other browser drafts are preserved.
-The existing whole-draft validate/save routes remain supported.
-
-**Refresh saved values** reads saved JSON without activation. **Reload** calls
-`POST /api/system/configuration/reload` with the expected saved revision.
-It prepares a replacement API host and hands over the guarded HTTPS listener.
-Preparation failures retain the previous host and report a failed reload.
-Busy local media operations reject reload; separate workers are not restarted.
-Unsaved drafts block the button. Same-origin activation is confirmed against
-the active revision before the browser refreshes. Changed origins require an
-explicit link and can require login. Commands never retry automatically.
-Music output-policy saves still apply to new plans immediately.
-
-Saves reject stale revisions and use a shared native file lock. Failed commands
-retain the draft and never retry. After a conflict or uncertain result, reload
-the saved values and review them before discarding the draft and editing again.
-An error before replacement preserves the old file. An error after replacement
-reports that the saved result needs review, rather than claiming rollback.
-For manual editing and the required writer protocol, see
+`ConfigurationService` owns startup loading, passive inspection and validation.
+Whole-draft and section-validation HTTP routes remain available to guarded tools.
+They reject stale revisions and never persist submitted drafts.
+**Refresh settings** reads saved JSON without activation. Restart all components
+with the same validated file, then check active revisions and fresh worker
+heartbeats. A changed origin can require explicit navigation and a new sign-in.
+Managed certificate renewal and validated TLS material refresh remain separate.
+For the operator procedure, see
 [configuration operations](docs/agent-operations.md#backend-configuration-writers).
 
 Artwork size, accepted and preferred audio formats, quality priorities and output

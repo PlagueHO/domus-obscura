@@ -334,7 +334,7 @@ async fn approved_album(recover_backup: bool) -> TestResult {
     drop(StagingRoot::open(&mut store, &scratch)?);
     seed_release(&database)?;
     let local = LocalRuntime::new(
-        database.clone(),
+        store.source(),
         LocalAcquisition {
             staging_root: scratch.clone(),
             credentials_file: credentials,

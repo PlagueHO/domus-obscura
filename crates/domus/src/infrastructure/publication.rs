@@ -9,13 +9,12 @@ use super::store::{
 };
 use crate::domain::LibraryPath;
 use crate::{Error, Result};
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
 
 fn conflict() -> Error {
     Error::Conflict("publication destination changed, is incomplete or contains existing content; nothing was overwritten".into())
@@ -269,7 +268,7 @@ fn inspect_album_restore(
 }
 
 struct RestoreFolders {
-    parent: Dir,
+    parent: LibraryDirectory,
     permissions: FilePermissions,
     final_name: String,
     retained_name: String,
@@ -278,9 +277,8 @@ struct RestoreFolders {
 
 impl RestoreFolders {
     fn open(store: &Store, restore: &AlbumReplacementRestore) -> Result<Self> {
-        let root = LibraryDirectory::open(Path::new(&restore.root))?;
-        store.check_native_root(&restore.root, "media", root.native_root())?;
-        if root.native_root().identity != restore.root_identity {
+        let root = store.open_registered_root(&restore.root, "media")?;
+        if store.root_binding_identity(&restore.root, "media")? != restore.root_identity {
             return Err(conflict());
         }
 
@@ -302,7 +300,7 @@ impl RestoreFolders {
         }
 
         let permissions = FilePermissions::current()?;
-        let mut parent = root.into_directory();
+        let mut parent = root;
         checked(&parent, &permissions)?;
         for name in parent_path.split('/').filter(|part| !part.is_empty()) {
             check_case(&parent, name)?;
@@ -418,7 +416,7 @@ enum FolderVersion {
 }
 
 fn folder_version(
-    parent: &Dir,
+    parent: &LibraryDirectory,
     name: &str,
     old: (&str, &[ReplacementFile]),
     new: (&str, &[ReplacementFile]),
@@ -428,8 +426,7 @@ fn folder_version(
         return Ok(None);
     };
     checked(&directory, permissions)?;
-    let identity =
-        super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
+    let identity = super::filesystem::native_file_identity(&directory.directory_file()?)?;
     let (version, files) = if identity == old.0 {
         (FolderVersion::Old, old.1)
     } else if identity == new.0 {
@@ -542,7 +539,7 @@ fn album_replacement_previews_for_location(
         .into_iter()
         .filter(|target| location_id.is_none_or(|location| target.location_id == location))
     {
-        let root = match super::filesystem::LibraryDirectory::open(Path::new(&target.root)) {
+        let root = match store.open_registered_root(&target.root, "media") {
             Ok(root) => root,
             Err(Error::Io(error)) => {
                 let mut preview = AlbumReplacementPreview {
@@ -568,15 +565,13 @@ fn album_replacement_previews_for_location(
             }
             Err(error) => return Err(error),
         };
-        store.check_native_root(&target.root, "media", root.native_root())?;
         let album = match root.open_directory(&relative) {
             Ok(album) => Some(album),
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
         let (album_identity, existing_files) = if let Some(album) = album {
-            let (identity, files) =
-                replacement_snapshot(&album.into_directory(), &FilePermissions::current()?)?;
+            let (identity, files) = replacement_snapshot(&album, &FilePermissions::current()?)?;
             (Some(identity), files)
         } else {
             (None, Vec::new())
@@ -585,8 +580,8 @@ fn album_replacement_previews_for_location(
             job_id: job,
             plan_version: version,
             location_id: target.location_id,
+            root_identity: store.root_binding_identity(&target.root, "media")?,
             root: target.root,
-            root_identity: root.native_root().identity.clone(),
             kind: target.kind,
             relative_folder: folder.clone(),
             output_files: output_files.clone(),
@@ -612,8 +607,8 @@ fn album_replacement_previews_for_location(
 }
 
 pub(crate) struct PublicationDirectory {
-    directory: Dir,
-    parent: Dir,
+    directory: LibraryDirectory,
+    parent: LibraryDirectory,
     identity: String,
     permissions: FilePermissions,
     prepared_folder: String,
@@ -632,9 +627,8 @@ impl PublicationDirectory {
         target: &PublicationDestination,
         preparation: &PublicationPreparation,
     ) -> Result<Option<Self>> {
-        let root = LibraryDirectory::open(Path::new(&target.root))?;
-        store.check_native_root(&target.root, "media", root.native_root())?;
-        if root.native_root().identity != target.root_identity {
+        let root = store.open_registered_root(&target.root, "media")?;
+        if store.root_binding_identity(&target.root, "media")? != target.root_identity {
             return Err(conflict());
         }
         let final_path = LibraryPath::parse(&target.relative_folder)?;
@@ -651,7 +645,7 @@ impl PublicationDirectory {
             return Err(conflict());
         }
         let permissions = FilePermissions::current()?;
-        let mut parent = root.into_directory();
+        let mut parent = root;
         checked(&parent, &permissions)?;
         let mut parts = final_parent.split('/').filter(|part| !part.is_empty());
         for name in parts.by_ref() {
@@ -699,10 +693,9 @@ impl PublicationDirectory {
                 .ok_or_else(conflict)?;
             check_case(&parent, name)?;
             let retained_directory = open_child_directory(&parent, name)?;
-            let original_at = |directory: &Dir| -> Result<bool> {
-                let identity = super::filesystem::native_file_identity(
-                    &directory.try_clone()?.into_std_file(),
-                )?;
+            let original_at = |directory: &LibraryDirectory| -> Result<bool> {
+                let identity =
+                    super::filesystem::native_file_identity(&directory.directory_file()?)?;
                 if identity != replacement.original_album_identity {
                     return Ok(false);
                 }
@@ -720,9 +713,8 @@ impl PublicationDirectory {
                 .transpose()?
                 .unwrap_or(false);
             let final_is_new = if let Some(directory) = final_directory.as_ref() {
-                let identity = super::filesystem::native_file_identity(
-                    &directory.try_clone()?.into_std_file(),
-                )?;
+                let identity =
+                    super::filesystem::native_file_identity(&directory.directory_file()?)?;
                 target.album_identity.as_deref() == Some(identity.as_str())
             } else {
                 false
@@ -784,9 +776,8 @@ impl PublicationDirectory {
             } else if let Some(directory) = prepared_directory.take() {
                 directory
             } else if let Some(directory) = final_directory.take() {
-                let identity = super::filesystem::native_file_identity(
-                    &directory.try_clone()?.into_std_file(),
-                )?;
+                let identity =
+                    super::filesystem::native_file_identity(&directory.directory_file()?)?;
                 if target.album_identity.as_deref() != Some(identity.as_str()) {
                     return Err(conflict());
                 }
@@ -814,8 +805,7 @@ impl PublicationDirectory {
                 }
             }
         };
-        let identity =
-            super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
+        let identity = super::filesystem::native_file_identity(&directory.directory_file()?)?;
         if target
             .album_identity
             .as_ref()
@@ -843,9 +833,8 @@ impl PublicationDirectory {
     }
 
     pub(crate) fn check(&self, store: &Store, target: &PublicationDestination) -> Result<()> {
-        let root = LibraryDirectory::open(Path::new(&target.root))?;
-        store.check_native_root(&target.root, "media", root.native_root())?;
-        if root.native_root().identity != target.root_identity {
+        let root = store.open_registered_root(&target.root, "media")?;
+        if store.root_binding_identity(&target.root, "media")? != target.root_identity {
             return Err(conflict());
         }
         let folder = if self.visible {
@@ -883,9 +872,8 @@ impl PublicationDirectory {
             }
             let retained_name = self.retained_name.as_deref().ok_or_else(conflict)?;
             if let Some(retained) = open_child_directory(&self.parent, retained_name)? {
-                let identity = super::filesystem::native_file_identity(
-                    &retained.try_clone()?.into_std_file(),
-                )?;
+                let identity =
+                    super::filesystem::native_file_identity(&retained.directory_file()?)?;
                 if identity != replacement.original_album_identity {
                     return Err(conflict());
                 }
@@ -896,9 +884,8 @@ impl PublicationDirectory {
             } else {
                 let original =
                     open_child_directory(&self.parent, &self.final_name)?.ok_or_else(conflict)?;
-                let identity = super::filesystem::native_file_identity(
-                    &original.try_clone()?.into_std_file(),
-                )?;
+                let identity =
+                    super::filesystem::native_file_identity(&original.directory_file()?)?;
                 if identity != replacement.original_album_identity {
                     return Err(conflict());
                 }
@@ -957,8 +944,7 @@ impl PublicationDirectory {
         let Some(directory) = open_child_directory(&self.parent, &self.final_name)? else {
             return Ok(false);
         };
-        let identity =
-            super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
+        let identity = super::filesystem::native_file_identity(&directory.directory_file()?)?;
         if identity != replacement.original_album_identity {
             return Err(conflict());
         }
@@ -1079,7 +1065,7 @@ impl PublicationDirectory {
     }
 }
 
-fn open_child_directory(parent: &Dir, name: &str) -> Result<Option<Dir>> {
+fn open_child_directory(parent: &LibraryDirectory, name: &str) -> Result<Option<LibraryDirectory>> {
     match parent.open_dir_nofollow(name) {
         Ok(directory) => Ok(Some(directory)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),

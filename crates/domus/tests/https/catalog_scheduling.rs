@@ -49,7 +49,7 @@ async fn saved_headers(database: &std::path::Path, seconds: u32) -> TestResult {
 
 #[tokio::test]
 async fn catalog_concurrent_reads_reuse_cache_and_distinct_requests_keep_cadence() -> TestResult {
-    let root = tempfile::tempdir()?;
+    let root = private::tempdir()?;
     let database = root.path().join("state.db");
     let fixture = CatalogFixture::default();
     let (api, cookie, metadata, identity) = configured_api(&database, &fixture).await?;
@@ -95,7 +95,7 @@ async fn catalog_concurrent_reads_reuse_cache_and_distinct_requests_keep_cadence
 
 #[tokio::test]
 async fn catalog_capacity_and_cancelled_waits_never_submit_network_requests() -> TestResult {
-    let root = tempfile::tempdir()?;
+    let root = private::tempdir()?;
     let database = root.path().join("state.db");
     let fixture = CatalogFixture::default();
     let (api, cookie, metadata, identity) = configured_api(&database, &fixture).await?;
@@ -170,7 +170,7 @@ async fn catalog_capacity_and_cancelled_waits_never_submit_network_requests() ->
 
 #[tokio::test]
 async fn catalog_disconnected_browser_drains_response_and_keeps_header_backoff() -> TestResult {
-    let root = tempfile::tempdir()?;
+    let root = private::tempdir()?;
     let database = root.path().join("state.db");
     let fixture = CatalogFixture::default();
     fixture.mode.store(16, Ordering::SeqCst);
@@ -247,7 +247,7 @@ fn catalog_header_owner_child() -> TestResult {
 #[tokio::test]
 async fn catalog_process_exit_after_headers_preserves_delay_and_manual_pause() -> TestResult {
     for (mode, delay) in [(16, 120), (17, u32::MAX)] {
-        let root = tempfile::tempdir()?;
+        let root = private::tempdir()?;
         let database = root.path().join("state.db");
         let mut store = Store::open(&database)?;
         let fixture = CatalogFixture::default();

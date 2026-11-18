@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn normalization_heartbeat_renews_at_thirty_seconds_and_rejects_reclaimed_ownership()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let state = tempfile::tempdir()?;
+        let state = crate::infrastructure::private_fixture::tempdir()?;
         let database = state.path().join("state.db");
         let mut store = Store::open(&database)?;
         let job = store.enqueue(1)?;

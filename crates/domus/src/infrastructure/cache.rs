@@ -5,7 +5,7 @@ use super::store::Store;
 use crate::application::services::cache::{Cache, CacheKey, CacheLookup, CachedContent};
 use crate::{Error, Result};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, OpenOptions};
+use cap_std::fs::OpenOptions;
 use sha2::{Digest, Sha256};
 use std::fs::{File, TryLockError};
 use std::io::{Read, Write};
@@ -42,9 +42,14 @@ impl Default for CacheLimits {
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheConfiguration {
+    #[serde(default = "default_root")]
     pub root: std::path::PathBuf,
     #[serde(default)]
     pub limits: CacheLimits,
+}
+
+fn default_root() -> std::path::PathBuf {
+    "cache".into()
 }
 
 impl CacheConfiguration {
@@ -56,7 +61,7 @@ impl CacheConfiguration {
     ) -> Result<()> {
         self.limits.validate()?;
         require_local_disk(&self.root)?;
-        let (root, opened) = LibraryDirectory::canonical(&self.root)?;
+        let (root, opened) = store.open_candidate_root(&self.root, "cache")?;
         let permissions = FilePermissions::current()?;
         let native = opened.native_root().clone();
         for path in protected {
@@ -75,8 +80,8 @@ impl CacheConfiguration {
                 ));
             }
         }
-        let directory = opened.into_directory();
-        permissions.check(&directory.try_clone()?.into_std_file(), true)?;
+        let directory = opened;
+        permissions.check(&directory.directory_file()?, true)?;
         if bound {
             store.check_native_root(
                 root.to_str()
@@ -93,7 +98,10 @@ impl CacheConfiguration {
             let expected = format!(
                 "domus-cache-v1\n{}\n{}\n",
                 store.application_identity()?,
-                native.identity
+                store.root_binding_identity(
+                    &store.root_key_for_directory(&root, &directory, "cache")?,
+                    "cache",
+                )?
             );
             if bytes != expected.as_bytes() {
                 return Err(Error::Conflict(
@@ -153,7 +161,7 @@ impl CacheLimits {
 }
 
 struct CacheDirectory {
-    directory: Dir,
+    directory: LibraryDirectory,
     permissions: FilePermissions,
     limits: CacheLimits,
     _marker: File,
@@ -303,12 +311,12 @@ impl FileCache {
     ) -> Result<Self> {
         let limits = limits.validate()?;
         require_local_disk(root)?;
-        let (root, opened) = LibraryDirectory::canonical(root)?;
+        let (root, opened) = store.open_candidate_root(root, "cache")?;
         require_local_disk(&root)?;
         let native = opened.native_root().clone();
-        let directory = opened.into_directory();
+        let directory = opened;
         let permissions = FilePermissions::current()?;
-        permissions.check(&directory.try_clone()?.into_std_file(), true)?;
+        permissions.check(&directory.directory_file()?, true)?;
         if bound_only {
             store.check_private_root_location(&root, &native)?;
         }
@@ -352,7 +360,10 @@ impl FileCache {
         let expected = format!(
             "domus-cache-v1\n{}\n{}\n",
             store.application_identity()?,
-            native.identity
+            store.root_binding_identity(
+                &store.root_key_for_directory(&root, &directory, "cache")?,
+                "cache",
+            )?
         );
         if marker_exists {
             let mut saved = Vec::new();

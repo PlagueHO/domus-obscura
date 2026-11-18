@@ -2,7 +2,7 @@
 //! An interrupted pending file is retained, not overwritten on the next attempt.
 use crate::domain::certificates::{AcmeEnvironment, CertificatePhase, TxtReceipt};
 use crate::infrastructure::filesystem::{
-    LibraryDirectory, NativeRoot, rename_no_replace, sync_directory,
+    DirectorySnapshot, LibraryDirectory, NativeRoot, rename_no_replace, sync_directory,
 };
 use crate::infrastructure::local_file::ProcessLock;
 use crate::infrastructure::permissions::FilePermissions;
@@ -103,7 +103,7 @@ impl StateStore {
 #[serde(deny_unknown_fields)]
 pub struct Journal {
     version: u8,
-    root: NativeRoot,
+    root: DirectorySnapshot,
     pub binding: String,
     pub environment: AcmeEnvironment,
     pub phase: CertificatePhase,
@@ -140,7 +140,7 @@ pub struct Journal {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Archive {
-    root: NativeRoot,
+    root: DirectorySnapshot,
     binding: String,
     environment: AcmeEnvironment,
     previous: Option<String>,
@@ -174,7 +174,7 @@ pub struct CertificateSelection {
 pub struct StateStore {
     path: PathBuf,
     root: NativeRoot,
-    directory: Dir,
+    directory: LibraryDirectory,
     _lock: ProcessLock,
     revision: String,
     pub journal: Journal,
@@ -218,13 +218,62 @@ impl StateStore {
             });
         }
         let opened = LibraryDirectory::open(path)?;
-        let root = opened.native_root().clone();
-        let directory = opened.into_directory();
+        Self::status_opened(path, opened, binding, environment, expected)
+    }
+
+    pub(crate) fn status_for(
+        store: &crate::infrastructure::store::Store,
+        path: &Path,
+        binding: &str,
+        environment: AcmeEnvironment,
+    ) -> Result<CertificateStatus> {
+        Self::status_bound_for(store, path, binding, environment, None)
+    }
+
+    pub(crate) fn status_bound_for(
+        store: &crate::infrastructure::store::Store,
+        path: &Path,
+        binding: &str,
+        environment: AcmeEnvironment,
+        expected: Option<&CertificateSelection>,
+    ) -> Result<CertificateStatus> {
+        let (_, directory) = store.open_candidate_root(path, "certificate")?;
+        Self::status_opened(path, directory, binding, environment, expected)
+    }
+
+    fn status_opened(
+        path: &Path,
+        directory: LibraryDirectory,
+        binding: &str,
+        environment: AcmeEnvironment,
+        expected: Option<&CertificateSelection>,
+    ) -> Result<CertificateStatus> {
+        validate_binding(binding)?;
+        FilePermissions::current()?.check(&directory.directory_file()?, true)?;
+        if expected.is_none()
+            && matches!(directory.snapshot(), DirectorySnapshot::Logical(_))
+            && directory.entries()?.next().is_none()
+        {
+            return Ok(CertificateStatus {
+                phase: CertificatePhase::Uninitialized,
+                active_generation: None,
+                expires_at: None,
+                renew_at: None,
+                next_attempt: None,
+                attempts: 0,
+                recovery_required: false,
+                cleanup_pending: false,
+                last_success: None,
+            });
+        }
+        let root = directory.native_root().clone();
         let bytes = read(&directory, "lifecycle.json")?;
         let journal: Journal = serde_json::from_slice(&bytes)
             .map_err(|_| Error::InvalidInput("certificate journal is invalid".into()))?;
         validate_journal(&journal)?;
-        if journal.root != root || journal.binding != binding || journal.environment != environment
+        if journal.root != directory.snapshot()
+            || journal.binding != binding
+            || journal.environment != environment
         {
             return Err(Error::Conflict(
                 "certificate status binding changed; local recovery is required".into(),
@@ -260,7 +309,7 @@ impl StateStore {
             (None, None)
         };
         if read(&directory, "lifecycle.json")? != bytes
-            || LibraryDirectory::open(path)?.native_root() != &root
+            || directory.reopen_at(path)?.native_root() != &root
         {
             return Err(Error::Conflict(
                 "certificate status changed during inspection".into(),
@@ -317,9 +366,8 @@ impl StateStore {
         let parent =
             LibraryDirectory::open(path.parent().ok_or_else(|| {
                 Error::InvalidInput("certificate state parent is missing".into())
-            })?)?
-            .into_directory();
-        FilePermissions::current()?.check(&parent.try_clone()?.into_std_file(), false)?;
+            })?)?;
+        FilePermissions::current()?.check(&parent.directory_file()?, false)?;
         let name = path
             .file_name()
             .ok_or_else(|| Error::InvalidInput("certificate state name is missing".into()))?;
@@ -334,13 +382,48 @@ impl StateStore {
         parent.create_dir_with(name, &builder)?;
         sync_directory(&parent)?;
         let opened = LibraryDirectory::open(path)?;
-        let root = opened.native_root().clone();
-        let directory = opened.into_directory();
-        FilePermissions::current()?.check(&directory.try_clone()?.into_std_file(), true)?;
-        let lock = ProcessLock::acquire(&path.join("lifecycle.json"), "certificate-lifecycle")?;
+        Self::initialize_opened(path, opened, binding, environment)
+    }
+
+    /// Explicit selected setup accepts only an admitted, completely empty root.
+    /// It never adopts a journal, lock, pending file or copied owner record.
+    pub(crate) fn initialize_for(
+        store: &crate::infrastructure::store::Store,
+        path: &Path,
+        binding: &str,
+        environment: AcmeEnvironment,
+    ) -> Result<Self> {
+        validate_binding(binding)?;
+        super::validate_state_directory(path)?;
+        let (_, directory) = store.open_candidate_root(path, "certificate")?;
+        if directory.entries()?.next().is_some() {
+            return Err(Error::Conflict(
+                "fresh certificate state requires an empty selected root".into(),
+            ));
+        }
+        Self::initialize_opened(path, directory, binding, environment)
+    }
+
+    fn initialize_opened(
+        path: &Path,
+        directory: LibraryDirectory,
+        binding: &str,
+        environment: AcmeEnvironment,
+    ) -> Result<Self> {
+        let root = directory.native_root().clone();
+        FilePermissions::current()?.check(&directory.directory_file()?, true)?;
+        let lock = ProcessLock::acquire_in(&directory, "certificate-lifecycle")?;
+        directory.reopen_at(path)?;
+        for entry in directory.entries()? {
+            if entry?.file_name() != ".domus-certificate-lifecycle.lock" {
+                return Err(Error::Conflict(
+                    "certificate root changed before fresh initialization".into(),
+                ));
+            }
+        }
         let journal = Journal {
             version: 1,
-            root: root.clone(),
+            root: directory.snapshot(),
             binding: binding.into(),
             environment,
             phase: CertificatePhase::Uninitialized,
@@ -381,15 +464,44 @@ impl StateStore {
 
     /// Opening an existing journal never silently creates or rebinds state.
     pub fn open(path: &Path, binding: &str, environment: AcmeEnvironment) -> Result<Self> {
-        Self::open_checked(path, Some(binding), environment, false)
+        Self::open_checked(
+            path,
+            Some(binding),
+            environment,
+            false,
+            LibraryDirectory::open(path)?,
+        )
     }
 
+    pub(crate) fn open_for(
+        store: &crate::infrastructure::store::Store,
+        path: &Path,
+        binding: Option<&str>,
+        environment: AcmeEnvironment,
+        pending: bool,
+    ) -> Result<Self> {
+        Self::open_checked(
+            path,
+            binding,
+            environment,
+            pending,
+            store.open_candidate_root(path, "certificate")?.1,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn open_recovery(
         path: &Path,
         environment: AcmeEnvironment,
         pending: bool,
     ) -> Result<Self> {
-        Self::open_checked(path, None, environment, pending)
+        Self::open_checked(
+            path,
+            None,
+            environment,
+            pending,
+            LibraryDirectory::open(path)?,
+        )
     }
 
     fn open_checked(
@@ -397,17 +509,16 @@ impl StateStore {
         binding: Option<&str>,
         environment: AcmeEnvironment,
         pending: bool,
+        directory: LibraryDirectory,
     ) -> Result<Self> {
         if let Some(binding) = binding {
             validate_binding(binding)?;
         }
         super::validate_state_directory(path)?;
-        let opened = LibraryDirectory::open(path)?;
-        let root = opened.native_root().clone();
-        let directory = opened.into_directory();
-        FilePermissions::current()?.check(&directory.try_clone()?.into_std_file(), true)?;
-        let lock = ProcessLock::acquire(&path.join("lifecycle.json"), "certificate-lifecycle")?;
-        if LibraryDirectory::open(path)?.native_root() != &root {
+        let root = directory.native_root().clone();
+        FilePermissions::current()?.check(&directory.directory_file()?, true)?;
+        let lock = ProcessLock::acquire_in(&directory, "certificate-lifecycle")?;
+        if directory.reopen_at(path)?.native_root() != &root {
             return Err(Error::Conflict(
                 "certificate state root changed during ownership acquisition".into(),
             ));
@@ -417,7 +528,7 @@ impl StateStore {
             .map_err(|_| Error::InvalidInput("certificate journal is invalid".into()))?;
         validate_journal(&journal)?;
         if journal.version != 1
-            || journal.root != root
+            || journal.root != directory.snapshot()
             || binding.is_some_and(|binding| journal.binding != binding)
             || journal.environment != environment
         {
@@ -472,7 +583,7 @@ impl StateStore {
             )
         })?;
         validate_journal(&proposed)?;
-        if proposed.root != self.root
+        if proposed.root != self.directory.snapshot()
             || proposed.binding != self.journal.binding
             || proposed.environment != self.journal.environment
         {
@@ -616,7 +727,7 @@ impl StateStore {
         let previous: Journal =
             serde_json::from_slice(&read(&self.directory, "lifecycle.json")?)
                 .map_err(|_| Error::InvalidInput("certificate journal is invalid".into()))?;
-        if self.journal.root != self.root
+        if self.journal.root != self.directory.snapshot()
             || self.journal.version != 1
             || self.journal.binding != previous.binding
             || self.journal.environment != previous.environment
@@ -670,7 +781,7 @@ impl StateStore {
         let archive: Archive = serde_json::from_slice(&bytes)
             .map_err(|_| Error::InvalidInput("certificate archive is invalid".into()))?;
         if hash(&bytes) != digest
-            || archive.root != self.root
+            || archive.root != self.directory.snapshot()
             || archive.binding != previous.binding
             || archive.environment != previous.environment
             || archive.previous != previous.archive_head
@@ -737,7 +848,7 @@ impl StateStore {
             self.generation(*number)?;
         }
         let archive = Archive {
-            root: self.root.clone(),
+            root: self.directory.snapshot(),
             binding: self.journal.binding.clone(),
             environment: self.journal.environment,
             previous: self.journal.archive_head.clone(),
@@ -929,17 +1040,46 @@ impl StateStore {
         Generation,
         axum_server::tls_rustls::RustlsConfig,
     )> {
+        Self::load_active_opened(path, LibraryDirectory::open(path)?, binding, hostname)
+    }
+
+    pub(crate) fn load_active_for(
+        store: &crate::infrastructure::store::Store,
+        path: &Path,
+        binding: &str,
+        hostname: &str,
+    ) -> Result<(
+        CertificateSelection,
+        Generation,
+        axum_server::tls_rustls::RustlsConfig,
+    )> {
+        Self::load_active_opened(
+            path,
+            store.open_candidate_root(path, "certificate")?.1,
+            binding,
+            hostname,
+        )
+    }
+
+    fn load_active_opened(
+        path: &Path,
+        directory: LibraryDirectory,
+        binding: &str,
+        hostname: &str,
+    ) -> Result<(
+        CertificateSelection,
+        Generation,
+        axum_server::tls_rustls::RustlsConfig,
+    )> {
         validate_binding(binding)?;
         super::validate_state_directory(path)?;
-        let opened = LibraryDirectory::open(path)?;
-        let root = opened.native_root().clone();
-        let directory = opened.into_directory();
-        FilePermissions::current()?.check(&directory.try_clone()?.into_std_file(), true)?;
+        let root = directory.native_root().clone();
+        FilePermissions::current()?.check(&directory.directory_file()?, true)?;
         let bytes = read(&directory, "lifecycle.json")?;
         let journal: Journal = serde_json::from_slice(&bytes)
             .map_err(|_| Error::InvalidInput("certificate journal is invalid".into()))?;
         validate_journal(&journal)?;
-        if journal.root != root || journal.binding != binding {
+        if journal.root != directory.snapshot() || journal.binding != binding {
             return Err(Error::Conflict(
                 "active certificate state binding changed".into(),
             ));
@@ -962,7 +1102,7 @@ impl StateStore {
         }
         let configuration = validated_active(&generation, hostname)?;
         if read(&directory, "lifecycle.json")? != bytes
-            || LibraryDirectory::open(path)?.native_root() != &root
+            || directory.reopen_at(path)?.native_root() != &root
         {
             return Err(Error::Conflict(
                 "active certificate changed during passive preparation".into(),
@@ -980,9 +1120,9 @@ impl StateStore {
     }
 
     pub(crate) fn check_current(&self) -> Result<()> {
-        self._lock
-            .verify(&self.path.join("lifecycle.json"), "certificate-lifecycle")?;
-        if LibraryDirectory::open(&self.path)?.native_root() != &self.root
+        let current = self.directory.reopen_at(&self.path)?;
+        self._lock.verify_in(&current, "certificate-lifecycle")?;
+        if current.native_root() != &self.root
             || hash(&read(&self.directory, "lifecycle.json")?) != self.revision
         {
             return Err(Error::Conflict(
@@ -1140,6 +1280,134 @@ fn hash(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn certificates_selected_journal_and_archive_survive_provider_relocation_without_adoption()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::domain::LibraryPath;
+        use crate::infrastructure::filesystem::{
+            DirectoryExpectation, FilesystemClient, StorageConfiguration, StorageRole, StorageRoot,
+        };
+        use crate::infrastructure::store::{Store, StoreOpenMode};
+        let provider = crate::infrastructure::permissions::private_test_directory()?;
+        for name in ["state", "certificates"] {
+            std::fs::create_dir(provider.path().join(name))?;
+            crate::infrastructure::permissions::private_fixture::directory(
+                &provider.path().join(name),
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+        let database = provider.path().join("state").join("state.db");
+        drop(Store::open(&database)?);
+        let mut configuration =
+            StorageConfiguration::inspect_initial(provider.path(), &LibraryPath::parse("state")?)?;
+        let (expected, _) =
+            DirectoryExpectation::inspect(provider.path(), &LibraryPath::parse("certificates")?)?;
+        configuration.roots.push(StorageRoot {
+            root_id: "certificate".into(),
+            binding_revision: 1,
+            role: StorageRole::Certificate,
+            provider_scope: "application".into(),
+            relative: "certificates".into(),
+            expected,
+        });
+        let client = FilesystemClient::new(configuration.clone(), "a".repeat(64))?;
+        let store = Store::open_scoped(&database, &client, StoreOpenMode::Current)?;
+        let path = provider.path().join("certificates");
+        let binding = "a".repeat(64);
+        assert_eq!(
+            StateStore::status_for(&store, &path, &binding, AcmeEnvironment::Staging)?.phase,
+            CertificatePhase::Uninitialized
+        );
+        assert_eq!(std::fs::read_dir(&path)?.count(), 0);
+        let mut state =
+            StateStore::initialize_for(&store, &path, &binding, AcmeEnvironment::Staging)?;
+        state.bind_database_root(&store)?;
+        assert!(
+            StateStore::initialize_for(&store, &path, &binding, AcmeEnvironment::Staging).is_err()
+        );
+        let generation = staging_generation()?;
+        for _ in 0..6 {
+            state.publish_generation(&generation)?;
+        }
+        state.select_generation(1)?;
+        state.journal.phase = CertificatePhase::Ready;
+        state.save()?;
+        state.archive_generations()?;
+        let archive = format!(
+            ".archive-{}.json",
+            state.journal.archive_head.as_ref().ok_or("archive")?
+        );
+        let journal_bytes = read(&state.directory, "lifecycle.json")?;
+        let archive_bytes = read(&state.directory, &archive)?;
+        assert!(matches!(state.journal.root, DirectorySnapshot::Logical(_)));
+        assert!(
+            !String::from_utf8(journal_bytes.clone())?
+                .contains(provider.path().to_str().ok_or("provider path")?)
+        );
+        drop(state);
+        drop(store);
+        drop(client);
+
+        let parent = crate::infrastructure::permissions::private_test_directory()?;
+        let relocated = parent.path().join("provider");
+        std::fs::rename(provider.path(), &relocated)?;
+        configuration.providers[0].boundary = relocated.clone();
+        let client = FilesystemClient::new(configuration.clone(), "b".repeat(64))?;
+        let store = Store::open_scoped(
+            &relocated.join("state").join("state.db"),
+            &client,
+            StoreOpenMode::Current,
+        )?;
+        let path = relocated.join("certificates");
+        let mut state = StateStore::open_for(
+            &store,
+            &path,
+            Some(&binding),
+            AcmeEnvironment::Staging,
+            false,
+        )?;
+        state.check_database_root(&store)?;
+        assert_eq!(read(&state.directory, "lifecycle.json")?, journal_bytes);
+        assert_eq!(read(&state.directory, &archive)?, archive_bytes);
+        assert_eq!(state.active_generation_number(), Some(1));
+        assert_eq!(state.publish_generation(&generation)?, 7);
+        assert!(
+            StateStore::load_active_for(&store, &path, &binding, &generation.hostname).is_err()
+        );
+        drop(state);
+        drop(store);
+        drop(client);
+
+        configuration
+            .roots
+            .iter_mut()
+            .find(|root| root.role == StorageRole::Certificate)
+            .ok_or("certificate root")?
+            .binding_revision += 1;
+        let client = FilesystemClient::new(configuration, "c".repeat(64))?;
+        let store = Store::open_scoped(
+            &relocated.join("state").join("state.db"),
+            &client,
+            StoreOpenMode::Current,
+        )?;
+        let retained = std::fs::read(path.join("lifecycle.json"))?;
+        assert!(
+            StateStore::open_for(
+                &store,
+                &path,
+                Some(&binding),
+                AcmeEnvironment::Staging,
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            StateStore::initialize_for(&store, &path, &binding, AcmeEnvironment::Staging).is_err()
+        );
+        assert_eq!(std::fs::read(path.join("lifecycle.json"))?, retained);
+        Ok(())
+    }
 
     fn staging_generation() -> std::result::Result<Generation, Box<dyn std::error::Error>> {
         let generated = rcgen::generate_simple_self_signed(vec!["api.home.example".into()])?;
