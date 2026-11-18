@@ -19,6 +19,16 @@ The separate [production worker](../README.md#separate-production-worker) uses
 `production_worker`, not this guide's optional `local_acquisition` runtime.
 Do not enable both. Production source discovery is not part of that worker.
 
+## Native build sources
+
+The build uses CMake to download checksum-pinned native JPEG and SQLite sources.
+SQLite uses the small [build wrapper](../crates/native-sqlite-sys/README.md);
+complete upstream sources stay outside Git. Its first build needs HTTPS access
+to `static.crates.io`. The verified archive is cached under `target/ns`.
+With that cache and the Rust dependencies available, `CARGO_NET_OFFLINE=true`
+builds without downloading SQLite. A missing or changed archive is an error.
+Do not delete or replace a changed cached archive to hide a checksum failure.
+
 ## Artist-photo checks
 
 For connected-app workflow checks, run `.\dev.ps1 browser` on Windows or

@@ -398,6 +398,14 @@ Malformed, truncated and oversized records fail without repair.
 ### Native SQLite integration in progress
 
 The five Store open modes now use the pinned native SQLite namespace adapter.
+The small [build wrapper](../crates/native-sqlite-sys/README.md) downloads and
+verifies the exact upstream archive, then applies the native namespace patch
+inside ignored build storage. Complete upstream SQLite and SQLCipher sources
+are not committed. The patched engine must match the accepted engine byte for
+byte. First build needs HTTPS; a verified cached archive supports
+`CARGO_NET_OFFLINE=true`. Package notices retain the MIT license, SQLite notice,
+source pin and patch. This changes dependency packaging, not runtime authority.
+
 The adapter retains actual no-follow state ancestry and the private `sqlite-tmp`
 directory through SQLite file operations and deferred native lifetimes. Main,
 sidecar and temporary names do not fall back to ambient pathname opens.

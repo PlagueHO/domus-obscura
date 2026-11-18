@@ -345,6 +345,12 @@ pub(crate) fn notices(root: &Path, target: &str, compiler: Option<&Path>) -> Res
         Path::new("third_party/file-id-0.2.3"),
         &root.join("file-id-provenance"),
     )?;
+    for file in ["README.md", "source.cmake", "sqlite3.patch"] {
+        copy(
+            &Path::new("crates/native-sqlite-sys").join(file),
+            &root.join("sqlite-provenance").join(file),
+        )?;
+    }
     copy(
         Path::new("third_party/certificate-dependencies"),
         &root.join("certificate-dependencies"),
