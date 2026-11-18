@@ -6,7 +6,8 @@ This is the design and implementation record for
 [#68](https://github.com/PlagueHO/domus-obscura/issues/68).
 The user approved production implementation under the operator-trusted logical
 filesystem contract after reviewing the prototypes. Production integration is
-implemented. Final repository checks and native Ubuntu CI remain incomplete.
+implemented. Issue #68 and its attached acceptance evidence record the exact
+source, platform checks and remaining delivery gates for each revision.
 
 The user selected one private application directory with overridable child
 folders and separate primary/backup media libraries. Media can be local or on

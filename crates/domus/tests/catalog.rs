@@ -7,6 +7,8 @@ use std::time::{Duration, SystemTime};
 
 #[path = "support/private.rs"]
 mod private;
+#[path = "support/storage.rs"]
+mod storage_fixture;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -190,17 +192,7 @@ fn catalog_plan_cli_uses_only_fresh_verified_cache_and_never_approves_or_starts_
     let database = directory.path().join("state.db");
     let configuration = directory.path().join("host.json");
     let request_path = directory.path().join("request.json");
-    let mut store = Store::open(&database)?;
-    let location = domus::application::add_location(&store, media.path(), "main")?;
-    domus::application::scan_location(&mut store, location)?;
-    let settings = store.save_settings(None, &OutputSettings::default())?;
-    let job = store.enqueue(1)?;
-    let request = json!({
-        "job_id":job,"expected_version":1,"settings_version":settings,
-        "format":"mp3","locations":[location],"accepts_incomplete_coverage":false,
-        "bucket":null
-    });
-    std::fs::write(&request_path, serde_json::to_vec(&request)?)?;
+    drop(Store::open(&database)?);
     std::fs::write(
         &configuration,
         serde_json::to_vec(&json!({
@@ -211,6 +203,27 @@ fn catalog_plan_cli_uses_only_fresh_verified_cache_and_never_approves_or_starts_
             )?
         }))?,
     )?;
+    storage_fixture::select_host_roots(
+        &configuration,
+        &[(
+            "media",
+            domus::infrastructure::filesystem::StorageRole::Media,
+            media.path(),
+        )],
+    )?;
+    let mut store =
+        domus::infrastructure::server::configuration::ConfigurationService::open(&configuration)?
+            .open_store(domus::infrastructure::store::StoreOpenMode::Current)?;
+    let location = domus::application::add_location(&store, media.path(), "main")?;
+    domus::application::scan_location(&mut store, location)?;
+    let settings = store.save_settings(None, &OutputSettings::default())?;
+    let job = store.enqueue(1)?;
+    let request = json!({
+        "job_id":job,"expected_version":1,"settings_version":settings,
+        "format":"mp3","locations":[location],"accepts_incomplete_coverage":false,
+        "bucket":null
+    });
+    std::fs::write(&request_path, serde_json::to_vec(&request)?)?;
     let run = || -> std::io::Result<std::process::Output> {
         Command::new(env!("CARGO_BIN_EXE_domus"))
             .arg("catalog-plan-prepare")
