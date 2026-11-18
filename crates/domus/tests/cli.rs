@@ -68,6 +68,73 @@ fn initialized_storage(
     Ok((root.join("state").join("state.db"), host))
 }
 
+fn select_host_roots(
+    host: &std::path::Path,
+    additional: &[(
+        &str,
+        domus::infrastructure::filesystem::StorageRole,
+        &std::path::Path,
+    )],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use domus::infrastructure::filesystem::{StorageConfiguration, StorageRoot};
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(host)?)?;
+    let mut storage: StorageConfiguration = serde_json::from_value(value["storage"].clone())?;
+    for provider in &mut storage.providers {
+        if provider.boundary.is_relative() {
+            provider.boundary = host
+                .parent()
+                .ok_or("host directory")?
+                .join(&provider.boundary);
+        }
+    }
+    let mut roots = storage
+        .roots
+        .iter()
+        .map(|root| {
+            (
+                root.root_id.clone(),
+                root.role,
+                storage.providers[0]
+                    .boundary
+                    .join(root.relative.replace('/', std::path::MAIN_SEPARATOR_STR)),
+            )
+        })
+        .collect::<Vec<_>>();
+    roots.extend(
+        additional
+            .iter()
+            .map(|(id, role, path)| ((*id).to_owned(), *role, path.to_path_buf())),
+    );
+    let boundary = roots[0]
+        .2
+        .ancestors()
+        .find(|boundary| roots.iter().all(|(_, _, path)| path.starts_with(boundary)))
+        .ok_or("fixture roots have no common boundary")?;
+    storage.providers[0].boundary = boundary.to_path_buf();
+    storage.roots = roots
+        .iter()
+        .map(|(id, role, path)| {
+            let relative = path
+                .strip_prefix(boundary)?
+                .iter()
+                .map(|part| part.to_str().ok_or("fixture path is not Unicode"))
+                .collect::<Result<Vec<_>, _>>()?
+                .join("/");
+            Ok(StorageRoot::inspect(
+                id,
+                1,
+                *role,
+                "application",
+                boundary,
+                &domus::domain::LibraryPath::parse(&relative)?,
+            )?)
+        })
+        .collect::<Result<_, Box<dyn std::error::Error>>>()?;
+    value["storage"] = serde_json::to_value(storage)?;
+    std::fs::write(host, serde_json::to_vec(&value)?)?;
+    Ok(())
+}
+
 #[test]
 fn fresh_cli_setup_preserves_existing_configuration_and_orphaned_storage()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -615,6 +682,14 @@ fn local_cli_can_initialize_scan_and_report_coverage() -> Result<(), Box<dyn std
     let state = tempdir()?;
     let media = tempdir()?;
     let (_database, host) = initialized_storage(state.path())?;
+    select_host_roots(
+        &host,
+        &[(
+            "media",
+            domus::infrastructure::filesystem::StorageRole::Media,
+            media.path(),
+        )],
+    )?;
     let host = host.to_str().ok_or("host path")?;
     let root = media.path().to_str().ok_or("non-Unicode media")?;
     std::fs::write(
@@ -734,9 +809,13 @@ fn invalid_usage_fails_explicitly() -> Result<(), Box<dyn std::error::Error>> {
 fn worker_cli_rejects_invalid_configuration_without_network_or_database_creation()
 -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
+    let fixture_database = state.path().join("fixture.db");
+    drop(domus::infrastructure::store::Store::open(
+        &fixture_database,
+    )?);
     let configuration = state.path().join("worker.json");
     let database = state.path().join("missing.db");
-    let host = write_host(state.path(), &database)?;
+    let host = write_host(state.path(), &fixture_database)?;
     let body = serde_json::json!({
         "database":database,"staging_root":state.path(),
         "credentials_file":state.path().join("secret.json"),
@@ -864,6 +943,15 @@ fn local_cli_can_save_preview_and_explicitly_approve_without_starting_work()
     let state = tempdir()?;
     let media = tempdir()?;
     let (database, host) = initialized_storage(state.path())?;
+    select_host_roots(
+        &host,
+        &[(
+            "media",
+            domus::infrastructure::filesystem::StorageRole::Media,
+            media.path(),
+        )],
+    )?;
+    let application = host.parent().ok_or("application directory")?;
     let host = host.to_str().ok_or("host path")?;
     let database = database.to_str().ok_or("non-Unicode database")?;
     let absent = run(&["settings", "--host", host])?;
@@ -871,7 +959,7 @@ fn local_cli_can_save_preview_and_explicitly_approve_without_starting_work()
         serde_json::from_slice::<serde_json::Value>(&absent.stdout)?,
         serde_json::Value::Null
     );
-    let settings_file = state.path().join("settings.json");
+    let settings_file = application.join("settings.json");
     std::fs::write(
         &settings_file,
         serde_json::to_vec(&domus::domain::OutputSettings::default())?,
@@ -900,7 +988,7 @@ fn local_cli_can_save_preview_and_explicitly_approve_without_starting_work()
     let job = run(&["job-create", "--host", host])?;
     assert!(job.status.success());
     let job = String::from_utf8(job.stdout)?.trim().to_owned();
-    let request_file = state.path().join("request.json");
+    let request_file = application.join("request.json");
     std::fs::write(
         &request_file,
         serde_json::to_vec(&serde_json::json!({
@@ -948,8 +1036,11 @@ fn local_cli_can_save_preview_and_explicitly_approve_without_starting_work()
 fn local_json_input_is_bounded_before_parsing() -> Result<(), Box<dyn std::error::Error>> {
     let state = tempdir()?;
     let (_database, host) = initialized_storage(state.path())?;
+    let file = host
+        .parent()
+        .ok_or("application directory")?
+        .join("large-settings.json");
     let host = host.to_str().ok_or("host path")?;
-    let file = state.path().join("large-settings.json");
     std::fs::write(&file, vec![b' '; 16385])?;
     let output = run(&[
         "settings-save",
