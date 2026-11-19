@@ -439,6 +439,83 @@ impl LibraryDirectory {
         }
     }
 
+    /// Delete only this retained file. Unix still requires cooperative writers
+    /// between the parent-relative identity recheck and unlinkat.
+    pub(crate) fn remove_child_file(&self, name: &str, file: std::fs::File) -> Result<()> {
+        let relative = LibraryPath::parse(name)?;
+        if relative.as_str().is_empty() || relative.as_str().contains('/') {
+            return Err(Error::InvalidInput(
+                "file removal requires one component".into(),
+            ));
+        }
+        #[cfg(windows)]
+        native_file_delete::ValidatedHandle::file(file)?.delete()?;
+        #[cfg(unix)]
+        {
+            let current = self.open_file(OsStr::new(name))?;
+            if !current.metadata()?.is_file()
+                || binding::persistent_file_identity(&current)?
+                    != binding::persistent_file_identity(&file)?
+            {
+                return Err(Error::Conflict("removal source changed".into()));
+            }
+            rustix::fs::unlinkat(&self.directory, name, rustix::fs::AtFlags::empty())
+                .map_err(std::io::Error::from)?;
+            drop(file);
+        }
+        self.require_removed(name)
+    }
+
+    /// Remove an exact empty child, never a root or a recursive tree. The
+    /// original DELETE-capable Windows handle survives through the effect.
+    pub(crate) fn remove_child_directory(&self, source: Self) -> Result<()> {
+        if NativeRoot::read(&source.parents)? != self.native
+            || source.entries()?.next().transpose()?.is_some()
+        {
+            return Err(Error::Conflict(
+                "removal requires an exact empty retained child".into(),
+            ));
+        }
+        let name = source
+            .names
+            .last()
+            .and_then(|name| name.to_str())
+            .ok_or(Error::Internal("removal source name is missing"))?
+            .to_owned();
+        #[cfg(windows)]
+        {
+            let file = source.directory_file()?;
+            drop(source);
+            native_file_delete::ValidatedHandle::directory(file)?.delete()?;
+        }
+        #[cfg(unix)]
+        {
+            let current = self.open_directory(&LibraryPath::parse(&name)?)?;
+            if current.native != source.native {
+                return Err(Error::Conflict("removal directory changed".into()));
+            }
+            rustix::fs::unlinkat(
+                &self.directory,
+                name.as_str(),
+                rustix::fs::AtFlags::REMOVEDIR,
+            )
+            .map_err(std::io::Error::from)?;
+            drop(source);
+        }
+        self.require_removed(&name)
+    }
+
+    fn require_removed(&self, name: &str) -> Result<()> {
+        match self.directory.symlink_metadata(name) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+            Ok(_) => Err(Error::Conflict(
+                "removal is pending or the name is occupied; inspect saved intent before retry"
+                    .into(),
+            )),
+        }
+    }
+
     pub(crate) fn require_local(&self) -> Result<()> {
         require_local_file(&self.directory_file()?)
     }

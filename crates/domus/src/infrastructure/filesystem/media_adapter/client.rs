@@ -12,6 +12,8 @@ mod mutation;
 pub use mutation::MediaOutput;
 mod moves;
 pub use moves::MediaMove;
+mod removal;
+pub use removal::MediaRemoval;
 
 /// One bounded media session, either native or explicitly paired. Neither
 /// variant exposes a native path or private-storage lease. New output requires

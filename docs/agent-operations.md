@@ -136,13 +136,21 @@ Never create or rebind missing roots, generate pairing material automatically,
 install a service, or use these commands to activate production library routing.
 See [native adapter configuration](docker.md#configure-the-native-foreground-adapter).
 Selected media roots default to read-only. Explicit `writable_roots` grants
-enable only the implemented new-output and retained-source move primitives. They do not approve an
+enable only the implemented new-output, exact verification, retained-source move
+and removal primitives. They do not approve an
 application operation or connect publication and recovery routing.
 Keep a move's actual source handle through verification and no-replace rename.
 Ordinary read leases and selected roots cannot be move sources. Close child
 leases first. Use the typed checked operations to renew claims and check approval
 between bounded name-check and hash requests. Lost replies remain uncertain;
 never reopen a source pathname and replay a move automatically.
+Existing-file verification never exposes a write lease or repairs bytes.
+Removal requires full verification on the actual DELETE-capable source.
+Commit exact per-file deletion intent before the final request. Ordinary files
+cannot authorize removal. Directory removal requires an empty retained source;
+never recurse or delete a selected root. An occupied or delete-pending name
+is not confirmed absence. Reconcile uncertain effects through the existing
+application journal, not a second adapter journal.
 
 `domus media-client-check --host <absolute-host-file> <absolute-media-client-file>`
 loads the paired read-only client through `ConfigurationService` without

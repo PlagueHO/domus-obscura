@@ -25,7 +25,117 @@ pub(super) fn component(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn receipt(length: u64, sha256: &str) -> Result<()> {
+    if length > i64::MAX as u64
+        || sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(Error::InvalidInput(
+            "invalid bounded native file receipt".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn file_options(create: bool) -> cap_std::fs::OpenOptions {
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create_new(create)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.mode(0o644);
+    }
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.share_mode(0);
+    }
+    options
+}
+
+fn removal_options() -> cap_std::fs::OpenOptions {
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.access_mode(0x8003_0000).share_mode(1);
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    }
+    options
+}
+
 impl Session {
+    fn verification(&mut self, adapter: &NativeAdapter, request: Request) -> Result<Response> {
+        let removal = matches!(&request, Request::PrepareRemoval { .. });
+        let (Request::VerifyFile {
+            parent,
+            name,
+            expected,
+            length,
+            sha256,
+        }
+        | Request::PrepareRemoval {
+            parent,
+            name,
+            expected,
+            length,
+            sha256,
+        }) = request
+        else {
+            return Err(Error::Internal("not a native verification request"));
+        };
+        component(&name)?;
+        receipt(length, &sha256)?;
+        if expected.kind != Kind::File || expected.links != 1 || expected.length != length {
+            return Err(conflict());
+        }
+        let id = self.require(&parent)?;
+        self.mutation_capacity()?;
+        let directory = self.mutation_parent(adapter, id)?;
+        let options = if removal {
+            removal_options()
+        } else {
+            file_options(false)
+        };
+        let file = directory.open_with(&name, &options)?.into_std();
+        let observed = adapter.observe(&file, Kind::File)?;
+        if observed != expected {
+            return Err(conflict());
+        }
+        let file = PendingFile {
+            file,
+            parent: directory,
+            length,
+            sha256,
+            written: length,
+            verified: 0,
+            hash: Sha256::new(),
+            failed: false,
+        };
+        self.insert(Entry {
+            writable: true,
+            parent: Some(id),
+            depth: self.entries.get(&id).ok_or_else(conflict)?.depth + 1,
+            observed,
+            object: if removal {
+                Object::Removal { file, name }
+            } else {
+                Object::Verification(file)
+            },
+        })
+    }
+
     pub(super) fn mutation_parent(
         &self,
         adapter: &NativeAdapter,
@@ -121,13 +231,8 @@ impl Session {
                 sha256,
             } => {
                 component(&name)?;
-                if length == 0
-                    || length > i64::MAX as u64
-                    || sha256.len() != 64
-                    || !sha256
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                {
+                receipt(length, &sha256)?;
+                if length == 0 {
                     return Err(Error::InvalidInput(
                         "invalid bounded native output receipt".into(),
                     ));
@@ -138,23 +243,7 @@ impl Session {
                 if let Some(checked) = self.check_new_name(id, &directory, &name)? {
                     return Ok(Response::CheckingName { checked });
                 }
-                let mut options = cap_std::fs::OpenOptions::new();
-                options
-                    .read(true)
-                    .write(true)
-                    .create_new(true)
-                    .follow(FollowSymlinks::No);
-                #[cfg(unix)]
-                {
-                    use cap_std::fs::OpenOptionsExt;
-                    options.mode(0o644);
-                }
-                #[cfg(windows)]
-                {
-                    use cap_std::fs::OpenOptionsExt;
-                    options.share_mode(0);
-                }
-                let file = directory.open_with(&name, &options)?.into_std();
+                let file = directory.open_with(&name, &file_options(true))?.into_std();
                 let observed = adapter.observe(&file, Kind::File)?;
                 if observed.links != 1 || observed.length != 0 {
                     return Err(conflict());
@@ -164,7 +253,7 @@ impl Session {
                     parent: Some(id),
                     depth: self.entries.get(&id).ok_or_else(conflict)?.depth + 1,
                     observed,
-                    object: Object::Writing {
+                    object: Object::NewOutput(PendingFile {
                         file,
                         parent: directory,
                         length,
@@ -173,9 +262,12 @@ impl Session {
                         verified: 0,
                         hash: Sha256::new(),
                         failed: false,
-                    },
+                    }),
                 };
                 self.created(adapter, id, entry)
+            }
+            request @ (Request::VerifyFile { .. } | Request::PrepareRemoval { .. }) => {
+                self.verification(adapter, request)
             }
             Request::Write {
                 file,
@@ -189,16 +281,16 @@ impl Session {
                 }
                 let id = self.require(&file)?;
                 let entry = self.entries.get_mut(&id).ok_or_else(conflict)?;
-                let Object::Writing {
+                let Object::NewOutput(work) = &mut entry.object else {
+                    return Err(conflict());
+                };
+                let PendingFile {
                     file,
                     length,
                     written,
                     failed,
                     ..
-                } = &mut entry.object
-                else {
-                    return Err(conflict());
-                };
+                } = work;
                 let end = offset
                     .checked_add(bytes.len() as u64)
                     .ok_or_else(conflict)?;
@@ -229,7 +321,17 @@ impl Session {
             Request::Seal { file } => {
                 let id = self.require(&file)?;
                 let entry = self.entries.get_mut(&id).ok_or_else(conflict)?;
-                let Object::Writing {
+                let removal_name = match &entry.object {
+                    Object::Removal { name, .. } => Some(name.clone()),
+                    _ => None,
+                };
+                let (Object::NewOutput(work)
+                | Object::Verification(work)
+                | Object::Removal { file: work, .. }) = &mut entry.object
+                else {
+                    return Err(conflict());
+                };
+                let PendingFile {
                     file,
                     parent,
                     length,
@@ -238,10 +340,7 @@ impl Session {
                     verified,
                     hash,
                     failed,
-                } = &mut entry.object
-                else {
-                    return Err(conflict());
-                };
+                } = work;
                 if !entry.writable || *failed || written != length {
                     return Err(conflict());
                 }
@@ -250,7 +349,7 @@ impl Session {
                 if before != entry.observed || before.links != 1 || before.length != *length {
                     return Err(conflict());
                 }
-                if *verified == 0 {
+                if *verified == 0 && removal_name.is_none() {
                     file.sync_all()?;
                 }
                 file.seek(SeekFrom::Start(*verified))?;
@@ -278,6 +377,7 @@ impl Session {
                 let retained = file.try_clone()?;
                 let parent = parent.try_clone()?;
                 entry.object = Object::File {
+                    removal_name,
                     file: retained,
                     _parent: parent,
                 };
@@ -347,6 +447,176 @@ mod tests {
             }
             _ => Err(Error::Internal("expected native mutation lease")),
         }
+    }
+
+    #[test]
+    fn media_adapter_verify_has_no_write_or_early_read_capability() -> Result<()> {
+        for writable in [false, true] {
+            let mut fixture = Fixture::new()?;
+            if writable {
+                fixture.selection.writable_roots.push("library".into());
+            }
+            let media = fixture
+                .selection
+                .provider
+                .boundary
+                .join("parent")
+                .join("media");
+            let path = media.join("album").join("track.flac");
+            let bytes = vec![37; MAX_READ + 3];
+            std::fs::write(&path, &bytes)?;
+            let adapter = NativeAdapter::new(fixture.selection.clone(), Vec::new())?;
+            let mut session = Session::new()?;
+            let root = lease(session.dispatch(&adapter, fixture.request()?)?)?;
+            let parent = adapter
+                .roots
+                .get("library")
+                .ok_or(Error::Internal("generated root missing"))?;
+            let observed = adapter.observe(
+                &parent
+                    .open_directory(&LibraryPath::parse("album")?)?
+                    .directory_file()?,
+                Kind::Directory,
+            )?;
+            let album = lease(session.dispatch(
+                &adapter,
+                Request::OpenChild {
+                    parent: root.clone(),
+                    name: "album".into(),
+                    expected: observed,
+                },
+            )?)?;
+            let Response::Page { entries, .. } = session.dispatch(
+                &adapter,
+                Request::Page {
+                    directory: album.clone(),
+                    limit: MAX_PAGE,
+                },
+            )?
+            else {
+                return Err(Error::Internal("generated verification listing missing"));
+            };
+            let listed = entries
+                .first()
+                .ok_or(Error::Internal("generated file missing"))?;
+            let request = Request::VerifyFile {
+                parent: album,
+                name: listed.name.clone(),
+                expected: listed.observed.clone(),
+                length: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+            };
+            if !writable {
+                assert!(matches!(
+                    session.dispatch(&adapter, request),
+                    Err(Error::Conflict(_))
+                ));
+                assert_eq!(std::fs::read(&path)?, bytes);
+                continue;
+            }
+            let file = lease(session.dispatch(&adapter, request.clone())?)?;
+            for offset in [0, bytes.len() as u64] {
+                assert!(
+                    session
+                        .dispatch(
+                            &adapter,
+                            Request::Write {
+                                file: file.clone(),
+                                offset,
+                                bytes: vec![99],
+                            }
+                        )
+                        .is_err()
+                );
+            }
+            assert!(
+                session
+                    .dispatch(
+                        &adapter,
+                        Request::Read {
+                            file: file.clone(),
+                            offset: 0,
+                            count: 1,
+                        }
+                    )
+                    .is_err()
+            );
+            assert!(
+                matches!(session.dispatch(&adapter, Request::Seal { file: file.clone() })?,
+                Response::Sealing { verified } if verified == MAX_READ as u64)
+            );
+            assert!(
+                session
+                    .dispatch(
+                        &adapter,
+                        Request::Read {
+                            file: file.clone(),
+                            offset: 0,
+                            count: 1,
+                        }
+                    )
+                    .is_err()
+            );
+            assert!(
+                matches!(session.dispatch(&adapter, Request::Seal { file: file.clone() })?,
+                Response::Sealed { observed } if observed == listed.observed)
+            );
+            assert!(matches!(session.dispatch(&adapter, Request::Read {
+                file: file.clone(), offset: MAX_READ as u64, count: MAX_READ,
+            })?, Response::Read { bytes, complete: true } if bytes == vec![37; 3]));
+            session.dispatch(&adapter, Request::Close { reference: file })?;
+            let mut missing = request.clone();
+            let Request::VerifyFile { name, .. } = &mut missing else {
+                return Err(Error::Internal("generated verification request missing"));
+            };
+            *name = "missing.flac".into();
+            assert!(session.dispatch(&adapter, missing).is_err());
+            assert!(!media.join("album").join("missing.flac").exists());
+            let Request::VerifyFile {
+                parent,
+                name,
+                expected,
+                length,
+                ..
+            } = request
+            else {
+                return Err(Error::Internal("generated verification request missing"));
+            };
+            let file = lease(session.dispatch(
+                &adapter,
+                Request::VerifyFile {
+                    parent,
+                    name,
+                    expected,
+                    length,
+                    sha256: "00".repeat(32),
+                },
+            )?)?;
+            assert!(matches!(
+                session.dispatch(&adapter, Request::Seal { file: file.clone() })?,
+                Response::Sealing { .. }
+            ));
+            assert!(
+                session
+                    .dispatch(&adapter, Request::Seal { file: file.clone() })
+                    .is_err()
+            );
+            assert!(
+                session
+                    .dispatch(
+                        &adapter,
+                        Request::Read {
+                            file,
+                            offset: 0,
+                            count: 1
+                        }
+                    )
+                    .is_err()
+            );
+            session.dispatch(&adapter, Request::Close { reference: root })?;
+            assert_eq!(std::fs::read(&path)?, bytes);
+        }
+        Ok(())
     }
 
     #[test]

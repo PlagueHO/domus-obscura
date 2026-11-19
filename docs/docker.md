@@ -290,9 +290,26 @@ journal and exact source/destination evidence. Unix namespace effects retain
 the existing cooperative-writer requirement. These primitives do not approve
 an album or verify its full manifest.
 
-The typed client's checked creation, move and seal methods accept an application
+Existing-file verification opens without creation or truncation. It independently
+hashes the exact retained file in bounded steps. Exact empty files are supported.
+On Windows, this internal handle needs write access for `FlushFileBuffers`, but
+the capability has no write operation. Partial, different, stale and hard-linked
+files fail without repair. See [FlushFileBuffers access requirements](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
+
+File removal uses a separate capability. It retains the actual DELETE-capable
+source through complete hash verification and final deletion. Ordinary readable
+files and unsealed removal references cannot authorize deletion. Directory
+removal consumes a retained move lease and requires an empty directory.
+There is no recursive deletion. Selected roots cannot be removed.
+Confirmed removal refreshes the parent and consumes the source reference.
+A pending delete, occupied name or lost response requires explicit reconciliation
+with saved application intent, not automatic replay. Unix removal still requires
+cooperative external writers.
+
+The typed client's checked creation, verification, removal, move and seal methods accept an application
 checkpoint before each bounded native request. Use it to renew the current
 claim and recheck approval and stop, including between name pages and hash steps.
+Commit per-file deletion intent before the final removal request.
 The production publication/recovery callers are not connected yet.
 
 ### Select and register a paired library root

@@ -3,7 +3,7 @@ use super::*;
 /// A reviewed directory retained for a same-parent, no-replace move. Close all
 /// child leases before moving it. Its contents can be inspected but not written.
 pub struct MediaMove {
-    directory: MediaDirectory,
+    pub(super) directory: MediaDirectory,
 }
 
 impl MediaMove {

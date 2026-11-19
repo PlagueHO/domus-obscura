@@ -403,6 +403,12 @@ fn require_response(request: &Request, response: &Response) -> Result<()> {
             }
             | Request::PrepareMove {
                 parent, expected, ..
+            }
+            | Request::VerifyFile {
+                parent, expected, ..
+            }
+            | Request::PrepareRemoval {
+                parent, expected, ..
             },
             Response::Opened {
                 reference,
@@ -434,6 +440,10 @@ fn require_response(request: &Request, response: &Response) -> Result<()> {
             observed.kind == super::Kind::Directory && parent.kind == super::Kind::Directory
         }
         (
+            Request::RemoveFile { .. } | Request::RemoveDirectory { .. },
+            Response::Removed { parent },
+        ) => parent.kind == super::Kind::Directory,
+        (
             Request::CreateDirectory { parent, .. } | Request::CreateFile { parent, .. },
             Response::Created {
                 reference,
@@ -461,7 +471,7 @@ fn require_response(request: &Request, response: &Response) -> Result<()> {
             *verified > 0 && *verified % super::MAX_READ as u64 == 0
         }
         (Request::Seal { .. }, Response::Sealed { observed }) => {
-            observed.kind == super::Kind::File && observed.length > 0 && observed.links == 1
+            observed.kind == super::Kind::File && observed.links == 1
         }
         (Request::Close { .. }, Response::Closed) => true,
         _ => false,

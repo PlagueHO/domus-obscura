@@ -21,6 +21,7 @@ pub use transport::{Client, PreparedAdapter};
 mod client;
 pub use client::{
     MediaClient, MediaDirectory, MediaFile, MediaMove, MediaNode, MediaOutput, MediaPage,
+    MediaRemoval,
 };
 mod selected;
 pub(crate) use selected::{MediaBinding, MediaPairing, SelectedMedia};
@@ -28,6 +29,7 @@ mod blocking;
 pub(crate) use blocking::{BlockingFile, BlockingMedia};
 mod moves;
 mod mutation;
+mod removal;
 #[cfg(test)]
 mod tests;
 
@@ -290,6 +292,26 @@ pub enum Request {
         length: u64,
         sha256: String,
     },
+    VerifyFile {
+        parent: Reference,
+        name: String,
+        expected: Observation,
+        length: u64,
+        sha256: String,
+    },
+    PrepareRemoval {
+        parent: Reference,
+        name: String,
+        expected: Observation,
+        length: u64,
+        sha256: String,
+    },
+    RemoveFile {
+        file: Reference,
+    },
+    RemoveDirectory {
+        directory: Reference,
+    },
     Write {
         file: Reference,
         offset: u64,
@@ -303,6 +325,9 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    Removed {
+        parent: Observation,
+    },
     Renamed {
         observed: Observation,
         parent: Observation,
@@ -521,6 +546,7 @@ impl NativeAdapter {
                     depth: parent.depth + 1,
                     observed,
                     object: Object::File {
+                        removal_name: None,
                         file,
                         _parent: directory.try_clone()?,
                     },
@@ -533,16 +559,23 @@ impl NativeAdapter {
     }
 }
 
+struct PendingFile {
+    file: File,
+    parent: LibraryDirectory,
+    length: u64,
+    sha256: String,
+    written: u64,
+    verified: u64,
+    hash: Sha256,
+    failed: bool,
+}
+
 enum Object {
-    Writing {
-        file: File,
-        parent: LibraryDirectory,
-        length: u64,
-        sha256: String,
-        written: u64,
-        verified: u64,
-        hash: Sha256,
-        failed: bool,
+    NewOutput(PendingFile),
+    Verification(PendingFile),
+    Removal {
+        file: PendingFile,
+        name: String,
     },
     Directory {
         movable: bool,
@@ -552,6 +585,7 @@ enum Object {
         name_check: Option<mutation::NameCheck>,
     },
     File {
+        removal_name: Option<String>,
         file: File,
         _parent: LibraryDirectory,
     },
@@ -615,11 +649,16 @@ impl Session {
 
     fn dispatch(&mut self, adapter: &NativeAdapter, request: Request) -> Result<Response> {
         match request {
+            request @ (Request::RemoveFile { .. } | Request::RemoveDirectory { .. }) => {
+                self.remove_object(adapter, request)
+            }
             request @ (Request::PrepareMove { .. } | Request::Rename { .. }) => {
                 self.move_directory(adapter, request)
             }
             request @ (Request::CreateDirectory { .. }
             | Request::CreateFile { .. }
+            | Request::VerifyFile { .. }
+            | Request::PrepareRemoval { .. }
             | Request::Write { .. }
             | Request::Seal { .. }) => self.mutate(adapter, request),
             Request::OpenRoot { selection, root } => {

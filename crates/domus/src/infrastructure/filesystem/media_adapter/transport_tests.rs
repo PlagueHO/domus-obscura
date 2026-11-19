@@ -307,6 +307,242 @@ async fn media_adapter_write_checkpoints_stop_before_effect_and_between_hash_ste
 }
 
 #[tokio::test]
+async fn media_adapter_removal_native_and_tls_delete_only_verified_files_and_empty_directories()
+-> TestResult {
+    use sha2::{Digest, Sha256};
+    let mut fixture = Fixture::new()?;
+    fixture.selection.writable_roots.push("library".into());
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    for index in 0..2 {
+        std::fs::write(media.join(format!("zero-{index}")), [])?;
+    }
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let native = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let remote = MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    let bytes = vec![37; MAX_READ + 3];
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    for (index, mut client) in [native, remote].into_iter().enumerate() {
+        let mut root = client.open_root("library").await?;
+        let page = client.page(&root, MAX_PAGE).await?;
+        let zero = format!("zero-{index}");
+        let listed = page
+            .entries
+            .iter()
+            .find(|entry| entry.name == zero)
+            .ok_or("generated empty file missing")?;
+        let source = client
+            .prepare_removal(&root, listed, 0, &format!("{:x}", Sha256::digest([])))
+            .await?;
+        client.remove_file(&mut root, source).await?;
+        assert!(!media.join(zero).exists());
+        let name = format!("owned-{index}");
+        let mut owned = client.create_directory(&mut root, &name).await?;
+        for file in ["remove.flac", "keep.flac"] {
+            let mut output = client
+                .create_file(&mut owned, file, bytes.len() as u64, &hash)
+                .await?;
+            for chunk in bytes.chunks(MAX_READ) {
+                client.write(&mut output, chunk).await?;
+            }
+            client.close_output(output).await?;
+        }
+        let page = client.page(&owned, MAX_PAGE).await?;
+        let listed = page
+            .entries
+            .iter()
+            .find(|entry| entry.name == "remove.flac")
+            .ok_or("generated removal file missing")?;
+        let source = client
+            .prepare_removal(&owned, listed, bytes.len() as u64, &hash)
+            .await?;
+        assert_eq!(source.observation(), &listed.observed);
+        #[cfg(windows)]
+        {
+            assert!(std::fs::write(media.join(&name).join("remove.flac"), b"changed").is_err());
+            assert!(
+                std::fs::rename(
+                    media.join(&name).join("remove.flac"),
+                    media.join(&name).join("swapped")
+                )
+                .is_err()
+            );
+        }
+        let mut checks = 0;
+        client
+            .remove_file_checked(&mut owned, source, &mut || {
+                checks += 1;
+                Ok(())
+            })
+            .await?;
+        assert_eq!(checks, 1);
+        assert!(!media.join(&name).join("remove.flac").exists());
+        let page = client.page(&owned, MAX_PAGE).await?;
+        assert!(page.complete);
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].name, "keep.flac");
+        let source = client
+            .prepare_removal(&owned, &page.entries[0], bytes.len() as u64, &hash)
+            .await?;
+        assert!(
+            client
+                .remove_file_checked(&mut owned, source, &mut || Err(Error::Conflict(
+                    "generated approval withdrawn".into()
+                )))
+                .await
+                .is_err()
+        );
+        client.close_directory(owned).await?;
+        assert_eq!(std::fs::read(media.join(&name).join("keep.flac"))?, bytes);
+        let name = format!("empty-{index}");
+        let empty = client.create_directory(&mut root, &name).await?;
+        client.close_directory(empty).await?;
+        let page = client.page(&root, MAX_PAGE).await?;
+        let listed = page
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or("generated empty directory missing")?;
+        let source = client.prepare_move(&root, listed).await?;
+        client.remove_directory(&mut root, source).await?;
+        assert!(!media.join(&name).exists());
+        assert!(media.join("album").join("track.flac").is_file());
+        client.close_directory(root).await?;
+    }
+    running.stop().await
+}
+
+#[tokio::test]
+async fn media_adapter_verify_native_and_tls_recover_only_complete_exact_existing_files()
+-> TestResult {
+    use sha2::{Digest, Sha256};
+    let mut fixture = Fixture::new()?;
+    fixture.selection.writable_roots.push("library".into());
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    std::fs::write(media.join("empty"), [])?;
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let bytes = vec![37; MAX_READ + 3];
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    for (index, remote) in [false, true].into_iter().enumerate() {
+        let connect = || -> Result<MediaClient> {
+            if remote {
+                MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)
+            } else {
+                MediaClient::local(fixture.selection.clone(), Vec::new())
+            }
+        };
+        let mut client = connect()?;
+        let mut root = client.open_root("library").await?;
+        let complete = format!("complete-{index}");
+        let partial = format!("partial-{index}");
+        let different = format!("different-{index}");
+        for (name, body) in [
+            (&complete, bytes.clone()),
+            (&partial, vec![7; 3]),
+            (&different, vec![55; bytes.len()]),
+        ] {
+            let mut output = client
+                .create_file(&mut root, name, bytes.len() as u64, &hash)
+                .await?;
+            for chunk in body.chunks(MAX_READ) {
+                client.write(&mut output, chunk).await?;
+            }
+            client.close_output(output).await?;
+        }
+        client.close_directory(root).await?;
+        drop(client);
+        let mut client = connect()?;
+        let root = client.open_root("library").await?;
+        let page = client.page(&root, MAX_PAGE).await?;
+        assert!(page.complete);
+        let entry = |name: &str| {
+            page.entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .ok_or("generated recovery file missing")
+        };
+        let listed = entry(&complete)?;
+        let mut stale = listed.clone();
+        stale.observed.modified_nanoseconds =
+            (stale.observed.modified_nanoseconds + 1) % 1_000_000_000;
+        assert!(
+            client
+                .verify_file(&root, &stale, bytes.len() as u64, &hash)
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .verify_file(&root, entry(&partial)?, bytes.len() as u64, &hash)
+                .await
+                .is_err()
+        );
+        let mut checks = 0;
+        let file = client
+            .verify_file_checked(&root, listed, bytes.len() as u64, &hash, &mut || {
+                checks += 1;
+                Ok(())
+            })
+            .await?;
+        assert_eq!(checks, 3);
+        assert_eq!(file.observation(), &listed.observed);
+        assert_eq!(
+            client.read(&file, MAX_READ as u64, MAX_READ).await?,
+            [37; 3]
+        );
+        client.close_file(file).await?;
+        let alias = fixture
+            .selection
+            .provider
+            .boundary
+            .join(format!("verification-alias-{index}"));
+        std::fs::hard_link(media.join(&complete), &alias)?;
+        assert!(
+            client
+                .verify_file(&root, listed, bytes.len() as u64, &hash)
+                .await
+                .is_err()
+        );
+        std::fs::remove_file(alias)?;
+        let empty = client
+            .verify_file(
+                &root,
+                entry("empty")?,
+                0,
+                &format!("{:x}", Sha256::digest([])),
+            )
+            .await?;
+        assert!(client.read(&empty, 0, MAX_READ).await?.is_empty());
+        client.close_file(empty).await?;
+        assert!(
+            client
+                .verify_file(&root, entry(&different)?, bytes.len() as u64, &hash)
+                .await
+                .is_err()
+        );
+        client.close_directory(root).await?;
+        assert_eq!(std::fs::read(media.join(&complete))?, bytes);
+        assert_eq!(std::fs::read(media.join(&partial))?, [7; 3]);
+        assert_eq!(
+            std::fs::read(media.join(&different))?,
+            vec![55; bytes.len()]
+        );
+    }
+    running.stop().await
+}
+
+#[tokio::test]
 async fn media_adapter_write_typed_native_and_tls_streams_preserve_exact_outputs() -> TestResult {
     use sha2::{Digest, Sha256};
     let mut fixture = Fixture::new()?;

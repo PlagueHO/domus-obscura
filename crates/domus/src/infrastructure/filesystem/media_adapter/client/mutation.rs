@@ -1,3 +1,4 @@
+use super::super::mutation::receipt;
 use super::*;
 use crate::domain::LibraryPath;
 
@@ -165,13 +166,8 @@ impl MediaClient {
         checkpoint: &mut dyn FnMut() -> Result<()>,
     ) -> Result<MediaOutput> {
         self.writable_parent(parent, name)?;
-        if length == 0
-            || length > i64::MAX as u64
-            || sha256.len() != 64
-            || !sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
+        receipt(length, sha256)?;
+        if length == 0 {
             return Err(Error::InvalidInput(
                 "invalid bounded native output receipt".into(),
             ));
@@ -196,6 +192,90 @@ impl MediaClient {
             }),
             _ => self.protocol_error(),
         }
+    }
+
+    /// Sync and verify an exact existing file without creating a write lease.
+    /// Partial, changed and different files are never repaired or truncated.
+    pub async fn verify_file(
+        &mut self,
+        parent: &MediaDirectory,
+        entry: &ListedEntry,
+        length: u64,
+        sha256: &str,
+    ) -> Result<MediaFile> {
+        self.verify_file_checked(parent, entry, length, sha256, &mut || Ok(()))
+            .await
+    }
+
+    /// Recheck the application claim before admission and each bounded hash
+    /// request. The actual Windows handle has sync rights, never a write API.
+    pub async fn verify_file_checked(
+        &mut self,
+        parent: &MediaDirectory,
+        entry: &ListedEntry,
+        length: u64,
+        sha256: &str,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<MediaFile> {
+        self.verify_existing(parent, entry, length, sha256, false, checkpoint)
+            .await
+    }
+
+    pub(super) async fn verify_existing(
+        &mut self,
+        parent: &MediaDirectory,
+        entry: &ListedEntry,
+        length: u64,
+        sha256: &str,
+        removal: bool,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<MediaFile> {
+        self.writable_parent(parent, &entry.name)?;
+        receipt(length, sha256)?;
+        self.check_observation(&entry.observed)?;
+        if entry.observed.kind != Kind::File
+            || entry.observed.links != 1
+            || entry.observed.length != length
+        {
+            return Err(Error::Conflict(
+                "existing media file differs from its receipt".into(),
+            ));
+        }
+        checkpoint()?;
+        let request = if removal {
+            Request::PrepareRemoval {
+                parent: parent.reference.clone(),
+                name: entry.name.clone(),
+                expected: entry.observed.clone(),
+                length,
+                sha256: sha256.into(),
+            }
+        } else {
+            Request::VerifyFile {
+                parent: parent.reference.clone(),
+                name: entry.name.clone(),
+                expected: entry.observed.clone(),
+                length,
+                sha256: sha256.into(),
+            }
+        };
+        let response = self.execute(request).await?;
+        if !matches!(&response, Response::Opened { observed, .. } if observed == &entry.observed) {
+            return self.protocol_error();
+        }
+        let MediaNode::File(file) = self.insert(response, Some(parent.reference.id))? else {
+            return self.protocol_error();
+        };
+        self.seal_checked(
+            MediaOutput {
+                owner: file.owner,
+                reference: file.reference,
+                length,
+                written: length,
+            },
+            checkpoint,
+        )
+        .await
     }
 
     /// Append one bounded chunk. A lost response retires the session; never
