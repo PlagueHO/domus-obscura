@@ -71,12 +71,13 @@ fn run_scan(store: &mut Store, claim: ScanClaim) -> Result<i64> {
     Ok(claim.id)
 }
 
-/// Open only the configured root and verify its saved native binding. This is
+/// Open only the configured root and verify its saved selected binding. This is
 /// a point-in-time availability check, not a scan or authority for later I/O.
 /// Keep cached coverage and entries unchanged when the root is unavailable.
+/// Run this synchronous native/network operation outside the async executor.
 pub fn check_location_availability(store: &Store, location_id: i64) -> Result<()> {
     let location = store.location(location_id)?;
-    store.open_registered_root(&location.root, "media")?;
+    store.check_registered_media(&location.root)?;
     Ok(())
 }
 

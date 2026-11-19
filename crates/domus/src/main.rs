@@ -21,6 +21,7 @@ const USAGE: &str = "Usage:
   domus media-adapter <absolute-adapter-configuration-file>
   domus media-client-check --host <absolute-host-configuration-file> <absolute-media-client-file>
   domus media-root-check --host <absolute-host-configuration-file> <absolute-media-client-file> <root-id>
+  domus media-storage-digest --host <absolute-host-configuration-file> <absolute-media-client-file>
   domus certificate-status <absolute-configuration-file>
   domus certificate-bootstrap <absolute-configuration-file>
   domus certificate-recover <absolute-configuration-file> <resume|pending|bindings|cleanup|cleanup-owned|archive|generation|restart>
@@ -61,6 +62,8 @@ const USAGE: &str = "Usage:
   domus question-answer --host <absolute-host-configuration-file> <question-id> <plan-version> <offered-choice>
   domus artwork-approve --host <absolute-host-configuration-file> <job-id> <plan-version> <candidate-id> <preview-sha256>
   domus location-add --host <absolute-host-configuration-file> <absolute-root> <main|backup>
+  domus location-add-paired --host <absolute-host-configuration-file> <selected-root-id> <main|backup>
+  domus location-check --host <absolute-host-configuration-file> <location-id>
   domus location --host <absolute-host-configuration-file> <location-id>
   domus root-identity <absolute-root>
   domus storage-root-inspect <absolute-provider-boundary> <provider-scope> <root-id> <binding-revision> <application|state|cache|staging|certificate|media> <library-relative-path>
@@ -96,6 +99,14 @@ fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     match args {
+        [command, flag, host, configuration]
+            if command == "media-storage-digest" && flag == "--host" =>
+        {
+            let source = domus::infrastructure::server::configuration::ConfigurationService::open(
+                Path::new(host),
+            )?;
+            println!("{}", source.media_storage_digest(Path::new(configuration))?);
+        }
         [command, flag, host, configuration]
             if command == "media-client-check" && flag == "--host" =>
         {

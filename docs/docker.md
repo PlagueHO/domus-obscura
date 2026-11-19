@@ -71,9 +71,10 @@ It does not approve host changes, installation, or service registration.
 
 The read-only implementation is `infrastructure::filesystem::media_adapter`.
 The explicit `media-adapter` foreground command can now start its listener from
-operator-managed configuration. It is not connected to production API, worker,
-scanning, sharing, or publication operations. Do not treat this implementation
-as Windows Docker acceptance.
+operator-managed configuration. Host-selected paired roots can now be registered
+explicitly and checked through the application's location availability operation.
+Scanning, JPEG reads, sharing, publication and recovery are not routed through
+the adapter. Do not treat this implementation as Windows Docker acceptance.
 
 The adapter verifies complete selected native chains and retains the opened
 directories and files. Only the Windows/native host maps root IDs to paths.
@@ -130,7 +131,7 @@ Certificate verification and exact peer pinning remain enabled.
 Generated containers, fixtures and the API check's private volume were removed.
 
 These fixtures need no service installation, live provider, or existing library.
-Production media-provider integration, approved mutation/recovery operations,
+The remaining production media consumers, approved mutation/recovery operations,
 and whole-image supported-host checks remain required. The successful channel
 diagnostic does not place the adapter in the cached Linux image or route
 production operations through it. SQLite and other private application storage
@@ -199,7 +200,7 @@ admitted to local filesystem access.
 
 The client uses a separate operator-managed document beneath the main host's
 admitted private inputs. Load it through `ConfigurationService` with the main
-host configuration. It does not change `config.json` or register a media location.
+host configuration. The client document alone does not register a media location.
 Unknown or duplicate fields fail.
 
 | Field                | Meaning                                                                         |
@@ -232,9 +233,71 @@ The first command validates without contacting the peer. The second explicitly
 opens and closes one selected root over authenticated TLS. It fails if the
 adapter is unavailable, the selection differs or the root ID is not selected.
 Neither command scans, registers a location, starts a worker or mutates media.
-Production browsing, scanning, sharing, publication and recovery still use their
-existing local paths. Their routing through this client remains incomplete.
 These checks do not establish whole-image or external-folder lifecycle acceptance.
+
+### Select and register a paired library root
+
+The main host document can select one paired provider with `paired_media`.
+Its required fields are `client_file` and `topology_assurances`. The client file
+is a private local path, resolved relative to the main host document. Its
+contents and pairing material are frozen during host preparation. Each later
+availability operation opens its own authenticated session. It does not reread
+the client document or share a live connection with another operation.
+
+Keep all local private roots in the existing `storage` selection.
+Do not put foreign media expectations into that local selection or give them a
+dummy native path. The paired provider scope and all root IDs must be distinct
+from the local provider scopes and root IDs.
+
+Before adding `paired_media`, obtain the exact review digest from the stopped
+host's existing local selection and the candidate client document:
+
+```powershell
+domus media-storage-digest --host D:\DomusData\config.json D:\DomusData\media-client.json
+```
+
+This command reads private configuration. It does not contact the peer or
+approve a topology. For each paired media root and each local root, the operator
+must supply a `TopologyAssurance` with `left`, `right` and `selection_digest`.
+`left` and `right` each contain `root_id` and `binding_revision`. Order the two
+root IDs lexically. Use the printed digest for `selection_digest`. Also supply
+an assurance between the adapter's private root and each local media root.
+Do not add private-to-private assurances.
+
+These are explicit operator declarations that the selected namespaces do not
+overlap. Review the real host/share mappings before making them. Every required
+pair must appear exactly once. Unknown roots, stale revisions, wrong digests,
+duplicate pairs and known native overlap fail. An assurance cannot override a
+known overlap. This uses logical filesystem mappings, not physical-device
+identity. The main host document retains its existing 16 KiB limit.
+
+Add the reviewed `paired_media` section while all state users are stopped.
+Validate the saved host configuration, then restart all components together.
+Passive host preparation does not contact the adapter. Missing or invalid
+selected client configuration fails; there is no provider fallback.
+
+Register one selected root explicitly, then check its saved binding:
+
+```powershell
+domus location-add-paired --host D:\DomusData\config.json library main
+domus location-check --host D:\DomusData\config.json 1
+```
+
+Registration requires writable system settings and an authenticated root-open
+and close before its database transaction. It saves only the provider/root
+definition, not Windows paths, TLS keys or live tokens. Existing limits of
+100 locations and one main location remain. A saved root cannot be replaced.
+An unrelated selection revision can change without rewriting that root.
+Changing its provider, binding revision or complete expectation fails against
+the saved record. Removing a provider with registered roots also fails.
+
+The existing API location-availability operation uses the same saved binding.
+It performs network I/O on a blocking thread without a SQL transaction.
+Peer loss does not change indexed entries, coverage or observation dates.
+Native filesystem and publication accessors reject paired roots explicitly.
+Scanning, JPEG reads, sharing, publication and recovery are not yet routed
+through this provider. A scan attempt records an incomplete result, not an empty
+successful library. These limits remain required work for issue #66.
 
 ## Build and verify
 

@@ -1,4 +1,5 @@
 use super::Store;
+use crate::infrastructure::filesystem::media_adapter::{MediaBinding, SelectedMedia};
 use crate::infrastructure::filesystem::{
     FilesystemClient, LibraryDirectory, LogicalRootBinding, NativeRoot, StorageRole,
 };
@@ -15,6 +16,7 @@ fn conflict() -> Error {
 pub(super) enum SavedRoot {
     Native(NativeRoot),
     Logical(LogicalRootBinding),
+    Paired(MediaBinding),
 }
 
 impl SavedRoot {
@@ -22,6 +24,7 @@ impl SavedRoot {
         match self {
             Self::Native(_) => native_path.into(),
             Self::Logical(binding) => binding.key(),
+            Self::Paired(binding) => binding.key(),
         }
     }
 
@@ -31,6 +34,7 @@ impl SavedRoot {
                 Ok(native.identity.clone())
             }
             Self::Logical(binding) => binding.identity(),
+            Self::Paired(binding) => binding.identity(),
             _ => Err(conflict()),
         }
     }
@@ -93,7 +97,7 @@ fn inspect_roots(
 ) -> Result<()> {
     inspect_saved_roots(connection, |path, kind, saved| match saved {
         SavedRoot::Native(native) => inspect(path, kind, native),
-        SavedRoot::Logical(_) => Err(conflict()),
+        SavedRoot::Logical(_) | SavedRoot::Paired(_) => Err(conflict()),
     })
 }
 
@@ -117,10 +121,11 @@ pub(super) fn register(
     kind: &str,
     saved: &SavedRoot,
     client: Option<&FilesystemClient>,
+    media: Option<&SelectedMedia>,
 ) -> Result<()> {
-    require_saved(client, kind, saved)?;
+    require_saved(client, media, kind, saved)?;
     inspect_saved_roots(connection, |path, other_kind, other| {
-        require_saved(client, other_kind, other)?;
+        require_saved(client, media, other_kind, other)?;
         if path != root
             && let (SavedRoot::Native(native), SavedRoot::Native(other)) = (saved, other)
             && native.overlaps(other)
@@ -155,19 +160,48 @@ pub(super) fn register(
     Ok(())
 }
 
-fn require_saved(client: Option<&FilesystemClient>, kind: &str, saved: &SavedRoot) -> Result<()> {
+fn require_saved(
+    client: Option<&FilesystemClient>,
+    media: Option<&SelectedMedia>,
+    kind: &str,
+    saved: &SavedRoot,
+) -> Result<()> {
     match (client, saved) {
         (Some(client), SavedRoot::Logical(binding)) => client.require_binding(binding, role(kind)?),
         (None, SavedRoot::Native(_)) => Ok(()),
+        (_, SavedRoot::Paired(binding)) if kind == "media" => {
+            media.ok_or_else(conflict)?.require_binding(binding)
+        }
         _ => Err(conflict()),
     }
 }
 
 impl Store {
+    pub(super) fn require_paired_media_bindings(&self) -> Result<()> {
+        // Attaching a provider must not turn passive legacy metadata reads into
+        // native-root admission. Native effects retain their existing checks.
+        inspect_saved_roots(&self.connection, |_, kind, saved| {
+            if matches!(saved, SavedRoot::Paired(_)) {
+                require_saved(
+                    self.filesystem.as_deref(),
+                    self.paired_media.as_deref(),
+                    kind,
+                    saved,
+                )?;
+            }
+            Ok(())
+        })
+    }
+
     pub(crate) fn require_current_root_bindings(&self) -> Result<()> {
         require_bound_roots(&self.connection)?;
         inspect_saved_roots(&self.connection, |_, kind, saved| {
-            require_saved(self.filesystem.as_deref(), kind, saved)
+            require_saved(
+                self.filesystem.as_deref(),
+                self.paired_media.as_deref(),
+                kind,
+                saved,
+            )
         })
     }
 
@@ -196,7 +230,12 @@ impl Store {
             .optional()?
             .ok_or_else(conflict)?;
         let saved = SavedRoot::read(&identity, &body)?;
-        require_saved(self.filesystem.as_deref(), kind, &saved)?;
+        require_saved(
+            self.filesystem.as_deref(),
+            self.paired_media.as_deref(),
+            kind,
+            &saved,
+        )?;
         Ok(saved)
     }
 
@@ -216,7 +255,39 @@ impl Store {
                 }
                 Ok(directory)
             }
+            SavedRoot::Paired(_) => Err(Error::Conflict(
+                "paired media cannot be opened through a native filesystem path".into(),
+            )),
         }
+    }
+
+    pub(crate) fn check_registered_media(&self, root: &str) -> Result<()> {
+        match self.saved_root(root, "media")? {
+            SavedRoot::Paired(binding) => {
+                if !self.connection.is_autocommit() {
+                    return Err(Error::Conflict(
+                        "media network I/O cannot run inside a database transaction".into(),
+                    ));
+                }
+                self.paired_media
+                    .as_ref()
+                    .ok_or_else(conflict)?
+                    .check(&binding)
+            }
+            _ => self.open_registered_root(root, "media").map(|_| ()),
+        }
+    }
+
+    pub(super) fn selected_media_binding(&self, root_id: &str) -> Result<SavedRoot> {
+        if !self.connection.is_autocommit() {
+            return Err(Error::Conflict(
+                "media network I/O cannot run inside a database transaction".into(),
+            ));
+        }
+        let media = self.paired_media.as_ref().ok_or_else(conflict)?;
+        let binding = media.binding(root_id)?;
+        media.check(&binding)?;
+        Ok(SavedRoot::Paired(binding))
     }
 
     pub(crate) fn root_binding_identity(&self, root: &str, kind: &str) -> Result<String> {
@@ -236,6 +307,9 @@ impl Store {
                 .source()
                 .filesystem()?
                 .binding_path(&binding, role(kind)?),
+            SavedRoot::Paired(_) => Err(Error::Conflict(
+                "paired media has no local native path".into(),
+            )),
         }
     }
 
@@ -266,6 +340,7 @@ impl Store {
                     .open_binding(&binding, role(kind)?)?
                     .into_directory()?,
             )),
+            SavedRoot::Paired(_) => Err(conflict()),
         }
     }
 
@@ -274,7 +349,12 @@ impl Store {
             client.require_media_component(&directory.directory_file()?)?;
         }
         inspect_saved_roots(&self.connection, |_, kind, saved| {
-            require_saved(self.filesystem.as_deref(), kind, saved)?;
+            require_saved(
+                self.filesystem.as_deref(),
+                self.paired_media.as_deref(),
+                kind,
+                saved,
+            )?;
             if kind != "media"
                 && let SavedRoot::Native(native) = saved
                 && directory.native_root().overlaps(native)
@@ -335,6 +415,7 @@ impl Store {
             "certificate",
             &binding,
             self.filesystem.as_deref(),
+            self.paired_media.as_deref(),
         )?;
         transaction.commit()?;
         Ok(())
@@ -388,6 +469,7 @@ impl Store {
             "media",
             &binding,
             self.filesystem.as_deref(),
+            self.paired_media.as_deref(),
         )?;
         transaction.commit()?;
         Ok(())
@@ -423,6 +505,7 @@ impl Store {
             "staging",
             &binding,
             self.filesystem.as_deref(),
+            self.paired_media.as_deref(),
         )?;
         transaction.commit()?;
         Ok(())

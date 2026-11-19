@@ -1,5 +1,6 @@
-//! Read-only native media capabilities. Production library consumers are not
-//! connected yet. This is not remote private storage or permission to mutate media.
+//! Read-only native media capabilities and selected-root availability.
+//! Content consumers are not connected yet. This is not remote private storage
+//! or permission to mutate media.
 //!
 //! The transport owns one table per authenticated TLS connection. Frozen
 //! logical selections survive reconnection; live references never do.
@@ -20,6 +21,8 @@ mod transport;
 pub use transport::{Client, PreparedAdapter};
 mod client;
 pub use client::{MediaClient, MediaDirectory, MediaFile, MediaNode, MediaPage};
+mod selected;
+pub(crate) use selected::{MediaBinding, MediaPairing, SelectedMedia};
 #[cfg(test)]
 mod tests;
 
@@ -152,6 +155,19 @@ impl MediaSelection {
             &self.provider_scope,
             media,
             &self.private,
+        ))?);
+        Ok(format!("{:x}", hash.finalize()))
+    }
+
+    /// Exact logical topology review for one local selection and one paired
+    /// media declaration. Locators and TLS secrets are not part of this value.
+    pub fn storage_digest(&self, local: &super::StorageConfiguration) -> Result<String> {
+        self.validate()?;
+        let mut hash = Sha256::new();
+        hash.update(b"domus-paired-media-storage-v1\0");
+        hash.update(serde_json::to_vec(&(
+            local.selection_digest()?,
+            self.digest()?,
         ))?);
         Ok(format!("{:x}", hash.finalize()))
     }

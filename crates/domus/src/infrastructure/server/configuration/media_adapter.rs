@@ -1,7 +1,7 @@
 use super::{ConfigurationService, FilePermissions, LibraryDirectory, valid_reference};
 use crate::domain::LibraryPath;
 use crate::infrastructure::filesystem::media_adapter::{
-    Client, MediaClient, MediaSelection, PreparedAdapter, Selection,
+    MediaClient, MediaPairing, MediaSelection, PreparedAdapter, SelectedMedia, Selection,
 };
 use crate::{Error, Result};
 use serde::Deserialize;
@@ -39,6 +39,13 @@ struct ClientConfiguration {
     private_key_file: String,
 }
 
+#[derive(Clone, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PairedMediaConfiguration {
+    pub(crate) client_file: std::path::PathBuf,
+    pub(crate) topology_assurances: Vec<crate::infrastructure::filesystem::TopologyAssurance>,
+}
+
 /// A frozen, read-only media export prepared through ConfigurationService.
 /// Preparation retains the selected native roots and private input handles.
 /// It does not open SQLite, bind a listener, register a service or save JSON.
@@ -52,6 +59,33 @@ impl ConfigurationService {
     /// This does not connect to its peer or admit foreign identities to local
     /// storage. Production root registration and topology remain separate.
     pub fn prepare_media_client(&self, path: &Path) -> Result<MediaClient> {
+        let (selection, pairing) = self.media_pairing(path)?;
+        pairing.client(&selection)
+    }
+
+    /// Print the logical review value without contacting or admitting the peer.
+    pub fn media_storage_digest(&self, path: &Path) -> Result<String> {
+        let (selection, _) = self.media_pairing(path)?;
+        selection.storage_digest(self.active.storage.as_ref().ok_or_else(|| {
+            Error::Conflict("paired media requires selected local storage".into())
+        })?)
+    }
+
+    pub(super) fn selected_media(
+        &self,
+        configuration: &PairedMediaConfiguration,
+        local: &crate::infrastructure::filesystem::StorageConfiguration,
+    ) -> Result<SelectedMedia> {
+        let (selection, pairing) = self.media_pairing(&configuration.client_file)?;
+        SelectedMedia::new(
+            selection,
+            pairing,
+            local,
+            &configuration.topology_assurances,
+        )
+    }
+
+    fn media_pairing(&self, path: &Path) -> Result<(MediaSelection, MediaPairing)> {
         let bytes = self.read_input(path, MAX_CONFIGURATION, true)?;
         let configuration: ClientConfiguration = serde_json::from_slice(&bytes).map_err(|_| {
             Error::InvalidInput("saved media client configuration JSON is invalid".into())
@@ -85,10 +119,16 @@ impl ConfigurationService {
         let peer = read(&configuration.paired_server_file, MAX_TLS_INPUT)?;
         let certificate = read(&configuration.certificate_file, MAX_TLS_INPUT)?;
         let key = read(&configuration.private_key_file, MAX_PRIVATE_KEY)?;
-        MediaClient::remote(
+        Ok((
             configuration.selection,
-            Client::new(configuration.address, &ca, &peer, &certificate, &key)?,
-        )
+            MediaPairing {
+                address: configuration.address,
+                server_ca: ca,
+                paired_server: peer,
+                certificate,
+                private_key: key,
+            },
+        ))
     }
 
     /// Load the separate operator-managed native adapter document. It must

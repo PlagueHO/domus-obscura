@@ -138,7 +138,7 @@ See [native adapter configuration](docker.md#configure-the-native-foreground-ada
 `domus media-client-check --host <absolute-host-file> <absolute-media-client-file>`
 loads the paired read-only client through `ConfigurationService` without
 contacting the peer. Keep the document and its relative TLS inputs in admitted
-private local storage. This command does not change the main host schema.
+private local storage. This command does not select or register a provider.
 `domus media-root-check --host <absolute-host-file> <absolute-media-client-file>
 <root-id>` explicitly opens and closes one selected root. Missing peers, changed
 selections and unselected root IDs fail. Neither command registers a location,
@@ -146,6 +146,27 @@ scans or activates production library routing. Native and paired clients share
 opaque session leases; cancellation or connection loss requires explicit
 recreation. Never fall back to a guest-mounted path. See
 [paired client configuration](docker.md#configure-the-paired-read-only-client).
+
+The operator-managed host field `paired_media` selects a private `client_file`
+and exact `topology_assurances`. Keep foreign roots out of the local `storage`
+inventory. Never create dummy native paths or admit foreign identities to local
+filesystem opens. `domus media-storage-digest --host <absolute-host-file>
+<absolute-media-client-file>` prints the combined logical review digest without
+contacting the peer. It does not grant topology approval. Every paired-media to
+local-root pair and adapter-private to local-media pair needs its exact reviewed
+root revisions and digest. Known overlap always fails.
+
+`domus location-add-paired --host <absolute-host-file> <selected-root-id>
+<main|backup>` requires writable system settings and explicitly registers a
+selected paired root. Authenticate and close the root before opening its database
+transaction. Persist only immutable logical meaning. Never save a connection,
+native peer path or credential. `domus location-check --host <absolute-host-file>
+<location-id>` uses that binding for availability without scanning or changing
+coverage. The API's existing availability operation uses the same path on its
+blocking executor. Do not put network I/O in a database transaction.
+Scanning, JPEG reads, sharing and mutations still reject paired roots through
+their native-only accessors. Do not report them as supported or bypass those
+refusals. See [selected paired roots](docker.md#select-and-register-a-paired-library-root).
 
 `domus storage-root-inspect <absolute-provider-boundary> <provider-scope>
 <root-id> <binding-revision> <role> <library-relative-path>` prints a complete

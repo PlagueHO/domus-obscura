@@ -225,6 +225,15 @@ pub(super) fn run(args: &[String]) -> Result<bool> {
             let store = editable_store(configuration)?;
             println!("{}", add_location(&store, Path::new(root), kind)?);
         }
+        ("location-add-paired", [root_id, kind]) => {
+            let store = editable_store(configuration)?;
+            println!("{}", store.add_paired_location(root_id, kind)?);
+        }
+        ("location-check", [location]) => {
+            let store = store(configuration, StoreOpenMode::ReadCurrent)?;
+            domus::application::check_location_availability(&store, number(location)?)?;
+            println!("Registered library root is available; no scan performed.");
+        }
         ("scan", [location]) => {
             let mut store = store(configuration, StoreOpenMode::Current)?;
             println!("{}", scan_location(&mut store, number(location)?)?);

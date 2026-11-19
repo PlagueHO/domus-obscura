@@ -45,6 +45,7 @@ pub(crate) struct Configuration {
     pub(crate) database: PathBuf,
     #[serde(default)]
     pub(crate) storage: Option<StorageConfiguration>,
+    pub(crate) paired_media: Option<media_adapter::PairedMediaConfiguration>,
     pub(super) listen: std::net::SocketAddr,
     pub(super) origin: String,
     pub(super) tenant_id: Option<String>,
@@ -355,6 +356,7 @@ pub struct ConfigurationService {
     certificate_recovery: Arc<std::sync::atomic::AtomicBool>,
     state_storage: StorageLease,
     _configuration_storage: StorageLease,
+    paired_media: Option<Arc<crate::infrastructure::filesystem::media_adapter::SelectedMedia>>,
 }
 
 impl ConfigurationService {
@@ -367,7 +369,8 @@ impl ConfigurationService {
     /// Open only the state selected by this frozen host configuration.
     /// The caller chooses current-schema or snapshot behavior explicitly.
     pub fn open_store(&self, mode: StoreOpenMode) -> Result<Store> {
-        Store::open_scoped(&self.active.database, self.state_storage.client(), mode)
+        Store::open_scoped(&self.active.database, self.state_storage.client(), mode)?
+            .with_paired_media(self.paired_media.clone())
     }
 
     /// Read bounded local input through an admitted private directory handle.
@@ -532,6 +535,9 @@ impl ConfigurationService {
         if let Some(storage) = configuration.storage.as_mut() {
             storage.resolve_paths(root);
         }
+        if let Some(media) = configuration.paired_media.as_mut() {
+            resolve(&mut media.client_file);
+        }
         if let Some(managed) = configuration.managed_tls.as_mut() {
             resolve(&mut managed.state_directory);
             resolve(&mut managed.dns.client_secret_file);
@@ -577,7 +583,7 @@ impl ConfigurationService {
                     "storage selection is missing; explicit fresh setup is required".into(),
                 )
             })?;
-        Ok(Self {
+        let mut service = Self {
             path: path.to_owned(),
             parent,
             _directory: directory,
@@ -588,7 +594,26 @@ impl ConfigurationService {
             certificate_recovery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             state_storage,
             _configuration_storage: configuration_storage,
-        })
+            paired_media: None,
+        };
+        service.paired_media = service
+            .active
+            .paired_media
+            .as_ref()
+            .map(|configuration| {
+                service
+                    .selected_media(
+                        configuration,
+                        service
+                            .active
+                            .storage
+                            .as_ref()
+                            .ok_or(Error::Internal("selected local storage is missing"))?,
+                    )
+                    .map(Arc::new)
+            })
+            .transpose()?;
+        Ok(service)
     }
 
     fn parse(bytes: &[u8]) -> Result<Configuration> {
@@ -1057,6 +1082,24 @@ impl ConfigurationService {
             })?;
         let store = Store::open_scoped(&saved.database, storage.client(), StoreOpenMode::ReadCurrent)
             .map_err(|_| issue("database", "Use an accessible local database with the current schema. Upgrade separately if needed."))?;
+        let paired_media = saved
+            .paired_media
+            .as_ref()
+            .map(|configuration| {
+                self.selected_media(
+                    configuration,
+                    saved
+                        .storage
+                        .as_ref()
+                        .ok_or(Error::Internal("selected local storage is missing"))?,
+                )
+                .map(Arc::new)
+            })
+            .transpose()
+            .map_err(|error| issue_for_error(&error))?;
+        let store = store
+            .with_paired_media(paired_media)
+            .map_err(|error| issue_for_error(&error))?;
         self.check_files(&saved, &store)
             .map_err(|error| issue_for_error(&error))?;
         if let Some(cache) = &saved.cache {
@@ -1151,7 +1194,7 @@ impl ConfigurationService {
             ),
             (
                 ConfigurationSection::Storage,
-                &["database", "cache", "storage"][..],
+                &["database", "cache", "storage", "paired_media"][..],
             ),
             (ConfigurationSection::MusicProviders, &["services"][..]),
             (
@@ -1473,6 +1516,12 @@ impl ConfigurationService {
 
     pub(super) fn protected(&self, configuration: &Configuration) -> Vec<PathBuf> {
         let mut paths = vec![self.path.clone()];
+        paths.extend(
+            configuration
+                .paired_media
+                .iter()
+                .map(|media| media.client_file.clone()),
+        );
         if !matches!(configuration.environment, Environment::SingleUser) {
             match configuration.tls_mode {
                 TlsMode::Manual => {

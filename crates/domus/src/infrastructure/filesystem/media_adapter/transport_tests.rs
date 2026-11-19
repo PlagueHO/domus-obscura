@@ -365,6 +365,311 @@ fn configured_client_fixture(
     Ok((host, path, original))
 }
 
+fn select_paired_fixture(
+    host: &std::path::Path,
+    client_path: &std::path::Path,
+    selection: &super::super::MediaSelection,
+) -> TestResult<serde_json::Value> {
+    use crate::infrastructure::filesystem::{
+        RootRevision, StorageConfiguration, StorageRole, TopologyAssurance,
+    };
+    let mut document: serde_json::Value = serde_json::from_slice(&std::fs::read(host)?)?;
+    let local: StorageConfiguration = serde_json::from_value(document["storage"].clone())?;
+    let digest = selection.storage_digest(&local)?;
+    let mut assurances = Vec::new();
+    for remote in selection
+        .media
+        .iter()
+        .chain(std::iter::once(&selection.private))
+    {
+        for root in &local.roots {
+            if remote.role != StorageRole::Media && root.role != StorageRole::Media {
+                continue;
+            }
+            let revision = |root: &crate::infrastructure::filesystem::StorageRoot| RootRevision {
+                root_id: root.root_id.clone(),
+                binding_revision: root.binding_revision,
+            };
+            let (left, right) = if remote.root_id < root.root_id {
+                (remote, root)
+            } else {
+                (root, remote)
+            };
+            assurances.push(TopologyAssurance {
+                left: revision(left),
+                right: revision(right),
+                selection_digest: digest.clone(),
+            });
+        }
+    }
+    document["paired_media"] = serde_json::json!({
+        "client_file": client_path,
+        "topology_assurances": assurances,
+    });
+    document["system_settings_read_only"] = serde_json::json!(false);
+    std::fs::write(host, serde_json::to_vec(&document)?)?;
+    Ok(document)
+}
+
+#[tokio::test]
+async fn media_adapter_selected_registration_is_frozen_and_survives_reopen_without_native_paths()
+-> TestResult {
+    use crate::infrastructure::server::configuration::ConfigurationService;
+    use crate::infrastructure::store::StoreOpenMode;
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let (host, path, client_document) =
+        configured_client_fixture(&fixture, &keys, running.address)?;
+    select_paired_fixture(&host, &path, &fixture.selection.logical())?;
+    let source = ConfigurationService::open(&host)?;
+    let host_again = host.clone();
+    let location = tokio::task::spawn_blocking(move || -> Result<i64> {
+        let store = source.open_store(StoreOpenMode::Current)?;
+        assert!(store.add_paired_location("unselected", "main").is_err());
+        assert!(store.add_paired_location("library", "invalid").is_err());
+        let location = store.add_paired_location("library", "main")?;
+        assert!(store.add_paired_location("library", "backup").is_err());
+        assert!(store.add_paired_location("library", "main").is_err());
+        let record = store.location(location)?;
+        assert_eq!(record.root, "paired-media-root:library");
+        assert!(
+            record
+                .native_identity
+                .as_ref()
+                .is_some_and(|identity| identity.starts_with("paired-media-v1:"))
+        );
+        assert!(store.open_registered_root(&record.root, "media").is_err());
+        assert!(store.registered_root_path(&record.root, "media").is_err());
+        crate::application::check_location_availability(&store, location)?;
+        let reopen = store.source();
+        drop(store);
+        std::fs::write(&path, b"invalid replacement document")?;
+        let store = reopen.open(StoreOpenMode::ReadCurrent)?;
+        crate::application::check_location_availability(&store, location)?;
+        assert!(ConfigurationService::open(&host_again).is_err());
+        std::fs::write(&path, serde_json::to_vec(&client_document)?)?;
+        let fresh = ConfigurationService::open(&host_again)?;
+        let reopened = fresh.open_store(StoreOpenMode::ReadCurrent)?;
+        crate::application::check_location_availability(&reopened, location)?;
+        let snapshot = fresh.open_store(StoreOpenMode::Snapshot)?;
+        assert!(matches!(
+            crate::application::check_location_availability(&snapshot, location),
+            Err(Error::Conflict(_))
+        ));
+        Ok(location)
+    })
+    .await??;
+    running.stop().await?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let source = ConfigurationService::open(&host)?;
+        let mut store = source.open_store(StoreOpenMode::Current)?;
+        let before = store.location(location)?;
+        assert!(matches!(
+            crate::application::check_location_availability(&store, location),
+            Err(Error::Remote(_))
+        ));
+        assert_eq!(store.location(location)?.root, before.root);
+        assert_eq!(store.location(location)?.coverage, before.coverage);
+        assert_eq!(store.location(location)?.observed_at, before.observed_at);
+        assert_eq!(store.location(location)?.last_error, before.last_error);
+        assert!(crate::application::scan_location(&mut store, location).is_err());
+        assert_eq!(store.location(location)?.coverage, "incomplete");
+        assert!(store.location(location)?.last_error.is_some());
+        assert!(store.open_registered_root(&before.root, "media").is_err());
+        Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn media_adapter_selected_configuration_requires_exact_topology_and_refuses_known_overlap()
+-> TestResult {
+    use crate::infrastructure::server::configuration::ConfigurationService;
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let reserved = TcpListener::bind(("127.0.0.1", 0))?;
+    let (host, path, client_document) =
+        configured_client_fixture(&fixture, &keys, reserved.local_addr()?)?;
+    let original = select_paired_fixture(&host, &path, &fixture.selection.logical())?;
+    ConfigurationService::open(&host)?;
+    for change in 0..5 {
+        let mut document = original.clone();
+        let assurances = document["paired_media"]["topology_assurances"]
+            .as_array_mut()
+            .ok_or("missing fixture assurances")?;
+        match change {
+            0 => {
+                assurances.pop();
+            }
+            1 => {
+                assurances[0]["selection_digest"] = serde_json::json!("0".repeat(64));
+            }
+            2 => {
+                assurances[0]["left"]["binding_revision"] = serde_json::json!(2);
+            }
+            3 => {
+                assurances.push(assurances[0].clone());
+            }
+            _ => {
+                assurances[0]["right"]["root_id"] = serde_json::json!("unselected");
+            }
+        }
+        std::fs::write(&host, serde_json::to_vec(&document)?)?;
+        assert!(ConfigurationService::open(&host).is_err());
+    }
+    std::fs::write(&host, serde_json::to_vec(&original)?)?;
+    let mut selection = fixture.selection.logical();
+    let native: crate::infrastructure::filesystem::StorageConfiguration =
+        serde_json::from_value(original["storage"].clone())?;
+    let state = native
+        .roots
+        .iter()
+        .find(|root| root.role == crate::infrastructure::filesystem::StorageRole::State)
+        .ok_or("missing state")?;
+    selection.media[0].relative = state.relative.clone();
+    selection.media[0].expected = state.expected.clone();
+    selection.private.expected.components[0] = state.expected.components[0].clone();
+    let mut changed_client = client_document.clone();
+    changed_client["selection"] = serde_json::to_value(&selection)?;
+    std::fs::write(&path, serde_json::to_vec(&changed_client)?)?;
+    select_paired_fixture(&host, &path, &selection)?;
+    assert!(matches!(
+        ConfigurationService::open(&host),
+        Err(Error::Conflict(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn media_adapter_selected_saved_binding_rejects_replacement_selection_and_provider_removal()
+-> TestResult {
+    use crate::infrastructure::server::configuration::ConfigurationService;
+    use crate::infrastructure::store::StoreOpenMode;
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let (host, path, mut client_document) =
+        configured_client_fixture(&fixture, &keys, running.address)?;
+    let original = select_paired_fixture(&host, &path, &fixture.selection.logical())?;
+    let source = ConfigurationService::open(&host)?;
+    tokio::task::spawn_blocking(move || {
+        source
+            .open_store(StoreOpenMode::Current)?
+            .add_paired_location("library", "main")
+    })
+    .await??;
+    let mut selection = fixture.selection.logical();
+    selection.revision += 1;
+    client_document["selection"] = serde_json::to_value(&selection)?;
+    std::fs::write(&path, serde_json::to_vec(&client_document)?)?;
+    select_paired_fixture(&host, &path, &selection)?;
+    ConfigurationService::open(&host)?.open_store(StoreOpenMode::ReadCurrent)?;
+    selection.media[0].binding_revision += 1;
+    client_document["selection"] = serde_json::to_value(&selection)?;
+    std::fs::write(&path, serde_json::to_vec(&client_document)?)?;
+    select_paired_fixture(&host, &path, &selection)?;
+    assert!(
+        ConfigurationService::open(&host)?
+            .open_store(StoreOpenMode::ReadCurrent)
+            .is_err()
+    );
+    let mut removed = original;
+    removed["paired_media"] = serde_json::Value::Null;
+    std::fs::write(&host, serde_json::to_vec(&removed)?)?;
+    assert!(
+        ConfigurationService::open(&host)?
+            .open_store(StoreOpenMode::ReadCurrent)
+            .is_err()
+    );
+    running.stop().await
+}
+
+#[tokio::test]
+async fn media_adapter_selected_foreign_profile_is_passive_and_never_admitted_locally() -> TestResult
+{
+    use crate::infrastructure::filesystem::DirectoryIdentityProfile;
+    use crate::infrastructure::server::configuration::ConfigurationService;
+    use crate::infrastructure::store::StoreOpenMode;
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let reserved = TcpListener::bind(("127.0.0.1", 0))?;
+    let (host, path, mut document) =
+        configured_client_fixture(&fixture, &keys, reserved.local_addr()?)?;
+    let mut selection = fixture.selection.logical();
+    for (index, root) in selection
+        .media
+        .iter_mut()
+        .chain(std::iter::once(&mut selection.private))
+        .enumerate()
+    {
+        #[cfg(windows)]
+        {
+            root.expected.profile = DirectoryIdentityProfile::LinuxExportfs;
+            root.expected.components = (0..root.expected.components.len())
+                .map(|depth| {
+                    format!(
+                        "linuxfh:0000000000000001:00000001:{:02x}",
+                        if depth == 0 {
+                            0
+                        } else {
+                            (index + 1) * 32 + depth
+                        }
+                    )
+                })
+                .collect();
+        }
+        #[cfg(not(windows))]
+        {
+            root.expected.profile = DirectoryIdentityProfile::WindowsFileId128;
+            root.expected.components = (0..root.expected.components.len())
+                .map(|depth| {
+                    format!(
+                        "win128:0000000000000001:{:032x}",
+                        if depth == 0 {
+                            0
+                        } else {
+                            (index + 1) * 32 + depth
+                        }
+                    )
+                })
+                .collect();
+        }
+    }
+    document["selection"] = serde_json::to_value(&selection)?;
+    std::fs::write(&path, serde_json::to_vec(&document)?)?;
+    select_paired_fixture(&host, &path, &selection)?;
+    let source = ConfigurationService::open(&host)?;
+    assert_eq!(
+        source
+            .open_store(StoreOpenMode::ReadCurrent)?
+            .locations(crate::domain::Page::new(0, 10)?)?
+            .len(),
+        0
+    );
+    for root in &selection.media {
+        assert!(
+            root.expected
+                .open(
+                    &fixture.selection.provider.boundary,
+                    &crate::domain::LibraryPath::parse(&root.relative)?
+                )
+                .is_err()
+        );
+    }
+    // No listener is serving on the reserved port; preparation must not connect.
+    assert_eq!(
+        reserved.local_addr()?.port(),
+        document["address"]
+            .as_str()
+            .ok_or("missing address")?
+            .parse::<SocketAddr>()?
+            .port()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn media_adapter_client_configuration_is_private_passive_and_peer_bound() -> TestResult {
     use crate::infrastructure::server::configuration::ConfigurationService;
@@ -1001,6 +1306,7 @@ async fn media_adapter_cli_foreground_probe() -> TestResult {
     let address = reserved.local_addr()?;
     let (path, _) = configured_fixture(&fixture, &keys, address)?;
     let (host, client_path, _) = configured_client_fixture(&fixture, &keys, address)?;
+    select_paired_fixture(&host, &client_path, &fixture.selection.logical())?;
     let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -1025,6 +1331,18 @@ async fn media_adapter_cli_foreground_probe() -> TestResult {
     .success()
     {
         return Err("passive client CLI configuration check failed".into());
+    }
+    if !checked(
+        Command::new(&binary)
+            .arg("media-storage-digest")
+            .arg("--host")
+            .arg(&host)
+            .arg(&client_path),
+    )
+    .await?
+    .success()
+    {
+        return Err("passive media topology digest failed".into());
     }
     drop(reserved);
     let mut child = Command::new(&binary)
@@ -1056,6 +1374,22 @@ async fn media_adapter_cli_foreground_probe() -> TestResult {
                     .arg(&host)
                     .arg(&client_path)
                     .arg(root_id),
+            )
+            .await?;
+            assert_eq!(status.success(), success);
+        }
+        for (command, arguments, success) in [
+            ("location-add-paired", vec!["unselected", "main"], false),
+            ("location-add-paired", vec!["library", "main"], true),
+            ("location-check", vec!["1"], true),
+            ("location-add-paired", vec!["library", "backup"], false),
+        ] {
+            let status = checked(
+                Command::new(&binary)
+                    .arg(command)
+                    .arg("--host")
+                    .arg(&host)
+                    .args(arguments),
             )
             .await?;
             assert_eq!(status.success(), success);
