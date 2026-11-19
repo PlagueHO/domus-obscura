@@ -334,6 +334,29 @@ Publication and recovery are not yet routed through this provider. Their
 native-only accessors still fail explicitly. These limits remain required work
 for issue #66.
 
+### Selected-folder lifecycle
+
+A missing selected native folder fails adapter validation and startup. Neither
+operation creates the folder. A different folder at the same path also fails,
+even when it contains copied media with identical bytes. Do not inspect that
+replacement and save new expectations as automatic recovery.
+
+The generated Windows retained-handle check also verifies that the active
+selection denies renaming its root with a sharing violation. Stop the adapter
+before an operator changes its selected-folder layout. This is not permission
+to change an existing library. After stopping, a missing or copied replacement
+still fails against the saved configuration. Restoring the exact original
+folder permits restart without rebinding the library or its share folders.
+These checks do not prove drive-disconnection or power-loss behavior.
+
+The clean `f192685` Linux image was checked against generated Windows folders
+for missing-root refusal, copied-root refusal and exact-original restoration.
+After restoration and adapter restart, the existing API returned the indexed
+JPEG and the same share binding. Cached location coverage and observation
+evidence stayed unchanged. This extends read-only Windows Docker Desktop
+evidence only. Writable publication, recovery and both full supported-host
+acceptance results remain separate gates.
+
 ## Build and verify
 
 From a checkout on Windows:

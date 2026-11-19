@@ -1094,6 +1094,123 @@ async fn media_adapter_selected_registration_is_frozen_and_survives_reopen_witho
 }
 
 #[tokio::test]
+async fn media_adapter_selected_root_lifecycle_never_creates_or_adopts_a_missing_or_copied_root()
+-> TestResult {
+    use crate::application::{
+        check_location_availability, scan_location,
+        sharing::{BindShareFolder, InspectShareFolder, bind_share_folder, inspect_share_folder},
+    };
+    use crate::domain::{LibraryPath, Page};
+    use crate::infrastructure::{
+        server::configuration::ConfigurationService, store::StoreOpenMode,
+    };
+
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let (host, path, mut client_document) =
+        configured_client_fixture(&fixture, &keys, running.address)?;
+    select_paired_fixture(&host, &path, &fixture.selection.logical())?;
+    let source = ConfigurationService::open(&host)?;
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    let held = media.with_file_name("original-media");
+    let active_media = media.clone();
+    let active_held = held.clone();
+    let (location, binding, before, cached) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut store = source.open_store(StoreOpenMode::Current)?;
+        let location = store.add_paired_location("library", "main")?;
+        scan_location(&mut store, location)?;
+        let inspect = InspectShareFolder {
+            location_id: location,
+            relative_path: "album".into(),
+        };
+        let initial = inspect_share_folder(&store, &inspect)?;
+        let bound = bind_share_folder(
+            &store,
+            &BindShareFolder {
+                location_id: location,
+                relative_path: inspect.relative_path.clone(),
+                expected_identity: initial.native_identity.clone(),
+            },
+        )?;
+        let before = store.location(location)?;
+        let cached = serde_json::to_value(store.browse(
+            location,
+            &LibraryPath::parse("album")?,
+            Page::new(0, 20)?,
+        )?)?;
+        if cfg!(windows) {
+            let error = std::fs::rename(&active_media, &active_held)
+                .expect_err("the retained Windows selection must deny root renaming");
+            assert_eq!(error.raw_os_error(), Some(32));
+            assert!(active_media.is_dir());
+            assert!(!active_held.exists());
+        }
+        check_location_availability(&store, location)?;
+        Ok((location, bound, before, cached))
+    })
+    .await??;
+    running.stop().await?;
+    std::fs::rename(&media, &held)?;
+    assert!(Running::start(&fixture, &keys).is_err());
+    assert!(
+        !media.exists(),
+        "missing selected roots must not be created"
+    );
+    std::fs::create_dir_all(media.join("album"))?;
+    std::fs::copy(
+        held.join("album").join("track.flac"),
+        media.join("album").join("track.flac"),
+    )?;
+    assert!(Running::start(&fixture, &keys).is_err());
+    std::fs::remove_file(media.join("album").join("track.flac"))?;
+    std::fs::remove_dir(media.join("album"))?;
+    std::fs::remove_dir(&media)?;
+    std::fs::rename(&held, &media)?;
+    let restarted = Running::start(&fixture, &keys)?;
+    client_document["address"] = serde_json::json!(restarted.address.to_string());
+    std::fs::write(&path, serde_json::to_vec(&client_document)?)?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let source = ConfigurationService::open(&host)?;
+        let mut store = source.open_store(StoreOpenMode::Current)?;
+        check_location_availability(&store, location)?;
+        let record = store.location(location)?;
+        assert_eq!(record.native_identity, before.native_identity);
+        assert_eq!(record.coverage, before.coverage);
+        assert_eq!(record.observed_at, before.observed_at);
+        assert_eq!(record.last_error, before.last_error);
+        assert_eq!(
+            serde_json::to_value(store.browse(
+                location,
+                &LibraryPath::parse("album")?,
+                Page::new(0, 20)?,
+            )?)?,
+            cached
+        );
+        let current = inspect_share_folder(
+            &store,
+            &InspectShareFolder {
+                location_id: location,
+                relative_path: "album".into(),
+            },
+        )?;
+        assert!(current.bound);
+        assert_eq!(current.binding_id, binding.binding_id);
+        assert_eq!(current.native_identity, binding.native_identity);
+        scan_location(&mut store, location)?;
+        assert_eq!(store.location(location)?.coverage, "complete");
+        Ok(())
+    })
+    .await??;
+    restarted.stop().await
+}
+
+#[tokio::test]
 async fn media_adapter_paired_scan_stop_resumes_and_unsafe_refresh_never_confirms_absence()
 -> TestResult {
     use crate::application::{refresh_library_folder, scan_location};
