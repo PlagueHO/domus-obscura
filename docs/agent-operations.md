@@ -129,12 +129,15 @@ Do not extract embedded covers or infer artwork approval from a preview.
 `domus media-adapter-check <absolute-adapter-configuration-file>` validates and
 retains the separate native media configuration without opening SQLite or a
 listener. `domus media-adapter <absolute-adapter-configuration-file>` explicitly
-starts its read-only, mutually authenticated loopback listener in the foreground.
+starts its mutually authenticated loopback listener in the foreground.
 Both use `ConfigurationService`. Keep the document directly in its selected
 private application-role root. All TLS references stay beneath that root.
 Never create or rebind missing roots, generate pairing material automatically,
 install a service, or use these commands to activate production library routing.
 See [native adapter configuration](docker.md#configure-the-native-foreground-adapter).
+Selected media roots default to read-only. Explicit `writable_roots` grants
+enable only the implemented new-output primitives. They do not approve an
+application operation or connect publication and recovery routing.
 
 `domus media-client-check --host <absolute-host-file> <absolute-media-client-file>`
 loads the paired read-only client through `ConfigurationService` without
@@ -146,7 +149,7 @@ selections and unselected root IDs fail. Neither command registers a location,
 scans or activates production library routing. Native and paired clients share
 opaque session leases; cancellation or connection loss requires explicit
 recreation. Never fall back to a guest-mounted path. See
-[paired client configuration](docker.md#configure-the-paired-read-only-client).
+[paired client configuration](docker.md#configure-the-paired-client).
 
 The operator-managed host field `paired_media` selects a private `client_file`
 and exact `topology_assurances`. Keep foreign roots out of the local `storage`

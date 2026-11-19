@@ -1,6 +1,7 @@
-//! Internal Windows deletion boundary for already-open, validated file handles.
+//! Internal Windows effects on retained ordinary handles.
 //!
-//! There are no native path APIs. Callers must open each component without
+//! There are no native path APIs. New directories return their original creation
+//! handle, never a checked-name reopen. Callers must open each component without
 //! following links, exclude write/delete sharing, check the actual handle's
 //! permissions, and verify its full native identity and approved content before
 //! calling `ValidatedHandle::delete`. This crate does not grant authorization.
@@ -11,11 +12,24 @@
 //! patch. Unsafe code is limited to the private Windows FFI module.
 
 #[cfg(windows)]
-use std::{fs::File, io};
+use std::{ffi::OsStr, fs::File, io};
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
+
+/// Create one missing directory relative to an already retained ordinary parent.
+///
+/// The returned handle is the original creation handle. Existing names are
+/// never opened or adopted. It excludes delete sharing and retains
+/// traversal, enumeration, child-creation and permission-query rights.
+/// The caller must check selected-root authority and application approval
+/// before this effect, then check permissions on the returned handle.
+#[cfg(windows)]
+pub fn create_directory(parent: &File, name: &OsStr) -> io::Result<File> {
+    windows::validate(parent, true)?;
+    windows::create_directory(parent, name)
+}
 
 /// An owned ordinary Windows handle that passed structural deletion checks.
 ///
@@ -106,6 +120,55 @@ mod tests {
         let file = open(&path, false, false)?;
         drop(ValidatedHandle::file(file)?);
         assert_eq!(fs::read(path)?, b"unchanged");
+        Ok(())
+    }
+
+    #[test]
+    fn new_directory_returns_the_original_pin_and_never_adopts_an_existing_name() -> io::Result<()>
+    {
+        let root = fixture()?;
+        let parent = OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .custom_flags(0x0220_0000)
+            .open(root.path())?;
+        let created = create_directory(&parent, OsStr::new("new"))
+            .map_err(|error| io::Error::other(format!("create original directory: {error}")))?;
+        let directory = root.path().join("new");
+        fs::write(directory.join("keep"), b"generated")?;
+        assert!(fs::rename(&directory, root.path().join("moved")).is_err());
+        assert!(create_directory(&parent, OsStr::new("new")).is_err());
+        assert_eq!(fs::read(directory.join("keep"))?, b"generated");
+        drop(created);
+        fs::rename(&directory, root.path().join("moved"))?;
+        assert_eq!(
+            fs::read(root.path().join("moved").join("keep"))?,
+            b"generated"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn new_directory_rejects_names_and_wrong_parent_without_effects() -> io::Result<()> {
+        let root = fixture()?;
+        let parent = open(root.path(), true, false)?;
+        for name in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a\\b",
+            "a:stream",
+            "trailing.",
+            "trailing ",
+        ] {
+            assert!(create_directory(&parent, OsStr::new(name)).is_err());
+        }
+        assert!(create_directory(&parent, OsStr::new(&"a".repeat(256))).is_err());
+        fs::write(root.path().join("file"), b"keep")?;
+        let file = open(&root.path().join("file"), false, false)?;
+        assert!(create_directory(&file, OsStr::new("child")).is_err());
+        assert_eq!(fs::read_dir(root.path())?.count(), 1);
         Ok(())
     }
 

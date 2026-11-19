@@ -1,5 +1,5 @@
 use super::super::tests::Fixture;
-use super::super::{MAX_READ, MediaClient, MediaNode, Reference};
+use super::super::{MAX_PAGE, MAX_READ, MediaClient, MediaNode, Reference};
 use super::*;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -128,6 +128,166 @@ async fn media_client_file(
         return Err("expected media file".into());
     };
     Ok(file)
+}
+
+#[tokio::test]
+async fn media_adapter_write_typed_native_and_tls_streams_preserve_exact_outputs() -> TestResult {
+    use sha2::{Digest, Sha256};
+    let mut fixture = Fixture::new()?;
+    fixture.selection.writable_roots.push("library".into());
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    for index in 0..MAX_PAGE + 3 {
+        std::fs::write(media.join(format!("existing-{index}.flac")), [4])?;
+    }
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let native = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let remote = MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    let bytes = vec![37; MAX_READ + 11];
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    for (index, mut client) in [native, remote].into_iter().enumerate() {
+        let mut root = client.open_root("library").await?;
+        // Consume the cursor before creation, then require a fresh listing of
+        // the changed parent rather than a stale complete/enumerating cursor.
+        assert!(!client.page(&root, MAX_PAGE).await?.complete);
+        assert!(client.page(&root, MAX_PAGE).await?.complete);
+        let name = format!(".domus-pending-write-{index}");
+        let mut directory = client.create_directory(&mut root, &name).await?;
+        let mut found = false;
+        loop {
+            let page = client.page(&root, MAX_PAGE).await?;
+            found |= page.entries.iter().any(|entry| entry.name == name);
+            if page.complete {
+                break;
+            }
+        }
+        assert!(found);
+        assert!(
+            client
+                .create_directory(&mut root, &name.to_uppercase())
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .create_file(&mut directory, "invalid", 0, &digest)
+                .await
+                .is_err()
+        );
+        let mut output = client
+            .create_file(&mut directory, "track.flac", bytes.len() as u64, &digest)
+            .await?;
+        assert!(client.write(&mut output, &[]).await.is_err());
+        assert!(
+            client
+                .write(&mut output, &vec![0; MAX_READ + 1])
+                .await
+                .is_err()
+        );
+        for chunk in bytes.chunks(MAX_READ) {
+            client.write(&mut output, chunk).await?;
+        }
+        assert!(client.write(&mut output, &[0]).await.is_err());
+        let file = client.seal(output).await?;
+        assert_eq!(file.observation().links, 1);
+        assert_eq!(file.observation().length, bytes.len() as u64);
+        assert_eq!(client.read(&file, 0, MAX_READ).await?, bytes[..MAX_READ]);
+        assert_eq!(
+            client.read(&file, MAX_READ as u64, MAX_READ).await?,
+            bytes[MAX_READ..]
+        );
+        client.close_file(file).await?;
+        let mut partial = client
+            .create_file(&mut directory, "partial.flac", bytes.len() as u64, &digest)
+            .await?;
+        client.write(&mut partial, &[8, 9]).await?;
+        client.close_output(partial).await?;
+        assert!(
+            client
+                .create_file(&mut directory, "partial.flac", bytes.len() as u64, &digest)
+                .await
+                .is_err()
+        );
+        let mut wrong = client
+            .create_file(&mut directory, "wrong.flac", bytes.len() as u64, &digest)
+            .await?;
+        for chunk in vec![99; bytes.len()].chunks(MAX_READ) {
+            client.write(&mut wrong, chunk).await?;
+        }
+        assert!(client.seal(wrong).await.is_err());
+        client.close_directory(root).await?;
+        let path = fixture
+            .selection
+            .provider
+            .boundary
+            .join("parent")
+            .join("media")
+            .join(name);
+        assert_eq!(std::fs::read(path.join("track.flac"))?, bytes);
+        assert_eq!(std::fs::read(path.join("partial.flac"))?, [8, 9]);
+        assert_eq!(
+            std::fs::read(path.join("wrong.flac"))?,
+            vec![99; bytes.len()]
+        );
+    }
+    running.stop().await
+}
+
+#[tokio::test]
+async fn media_adapter_write_typed_tls_defaults_deny_and_disconnect_never_reopens() -> TestResult {
+    use sha2::{Digest, Sha256};
+    let mut fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let mut client =
+        MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    let mut root = client.open_root("library").await?;
+    assert!(matches!(
+        client.create_directory(&mut root, "denied").await,
+        Err(Error::Conflict(_))
+    ));
+    client.close_directory(root).await?;
+    drop(client);
+    running.stop().await?;
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    assert!(!media.join("denied").exists());
+    fixture.selection.writable_roots.push("library".into());
+    let running = Running::start(&fixture, &keys)?;
+    let mut client =
+        MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    let mut root = client.open_root("library").await?;
+    let digest = format!("{:x}", Sha256::digest([7; 6]));
+    let mut output = client
+        .create_file(&mut root, "interrupted.flac", 6, &digest)
+        .await?;
+    client.write(&mut output, &[7; 3]).await?;
+    running.stop().await?;
+    assert!(client.write(&mut output, &[7; 3]).await.is_err());
+    drop(client);
+    let running = Running::start(&fixture, &keys)?;
+    let mut client =
+        MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    let mut root = client.open_root("library").await?;
+    assert!(
+        client
+            .create_file(&mut root, "interrupted.flac", 6, &digest)
+            .await
+            .is_err()
+    );
+    client.close_directory(root).await?;
+    running.stop().await?;
+    assert_eq!(std::fs::read(media.join("interrupted.flac"))?, [7; 3]);
+    Ok(())
 }
 
 #[tokio::test]
@@ -1145,8 +1305,11 @@ async fn media_adapter_selected_root_lifecycle_never_creates_or_adopts_a_missing
             Page::new(0, 20)?,
         )?)?;
         if cfg!(windows) {
-            let error = std::fs::rename(&active_media, &active_held)
-                .expect_err("the retained Windows selection must deny root renaming");
+            let Err(error) = std::fs::rename(&active_media, &active_held) else {
+                return Err(Error::Internal(
+                    "the retained Windows selection permitted root renaming",
+                ));
+            };
             assert_eq!(error.raw_os_error(), Some(32));
             assert!(active_media.is_dir());
             assert!(!active_held.exists());

@@ -8,8 +8,12 @@ use std::fs::File;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 
+mod mutation;
+pub use mutation::MediaOutput;
+
 /// One bounded media session, either native or explicitly paired. Neither
-/// variant exposes a native path, private-storage lease or mutation operation.
+/// variant exposes a native path or private-storage lease. New output requires
+/// an explicit selected-root write grant on both peers.
 /// Close leases explicitly; dropping the client retires the complete session.
 pub struct MediaClient {
     selection: MediaSelection,
@@ -30,6 +34,7 @@ enum Transport {
 }
 
 struct Live {
+    writable: bool,
     reference: Reference,
     parent: Option<u64>,
     depth: usize,
@@ -109,6 +114,7 @@ impl MediaClient {
 
     pub async fn open_root(&mut self, root_id: &str) -> Result<MediaDirectory> {
         self.capacity()?;
+        let writable = self.selection.permits_writes(root_id)?;
         let root = self
             .selection
             .media
@@ -123,7 +129,13 @@ impl MediaClient {
             })
             .await?;
         match self.insert(response, None)? {
-            MediaNode::Directory(directory) => Ok(directory),
+            MediaNode::Directory(directory) => {
+                self.live
+                    .get_mut(&directory.reference.id)
+                    .ok_or(Error::Internal("media root lease disappeared"))?
+                    .writable = writable;
+                Ok(directory)
+            }
             MediaNode::File(_) => self.protocol_error(),
         }
     }
@@ -309,6 +321,9 @@ impl MediaClient {
         self.live.insert(
             reference.id,
             Live {
+                writable: parent
+                    .and_then(|id| self.live.get(&id))
+                    .is_some_and(|parent| parent.writable),
                 reference: reference.clone(),
                 parent,
                 depth,

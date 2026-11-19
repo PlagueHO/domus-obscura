@@ -6,16 +6,132 @@
 //! - https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_standard_info
 //! - https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_stream_info
 //! - https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_disposition_info
+//! - https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntcreatefile
 
-use std::ffi::c_void;
+use std::ffi::{OsStr, c_void};
 use std::fs::File;
 use std::io;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
 
 const FILE_STANDARD_INFO: i32 = 1;
 const FILE_DISPOSITION_INFO: i32 = 4;
 const FILE_STREAM_INFO: i32 = 7;
+
+#[repr(C)]
+struct UnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[repr(C)]
+struct ObjectAttributes {
+    length: u32,
+    root: *mut c_void,
+    name: *mut UnicodeString,
+    attributes: u32,
+    security_descriptor: *mut c_void,
+    security_qos: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct IoStatus {
+    status: usize,
+    information: usize,
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateFile(
+        file: *mut *mut c_void,
+        access: u32,
+        attributes: *mut ObjectAttributes,
+        status: *mut IoStatus,
+        allocation: *const i64,
+        file_attributes: u32,
+        share: u32,
+        disposition: u32,
+        options: u32,
+        extended_attributes: *const c_void,
+        extended_bytes: u32,
+    ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
+}
+
+pub(super) fn create_directory(parent: &File, name: &OsStr) -> io::Result<File> {
+    let mut name = name.encode_wide().take(256).collect::<Vec<_>>();
+    if name.is_empty()
+        || name.len() > 255
+        || name == [46]
+        || name == [46, 46]
+        || name.last().is_some_and(|unit| [32, 46].contains(unit))
+        || name
+            .iter()
+            .any(|unit| *unit < 32 || [34, 42, 47, 58, 60, 62, 63, 92, 124].contains(unit))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "one bounded directory name is required",
+        ));
+    }
+    let length = (name.len() * 2) as u16;
+    let mut text = UnicodeString {
+        length,
+        maximum_length: length,
+        buffer: name.as_mut_ptr(),
+    };
+    let mut attributes = ObjectAttributes {
+        length: std::mem::size_of::<ObjectAttributes>() as u32,
+        root: parent.as_raw_handle(),
+        name: &mut text,
+        attributes: 0x1040, // OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE.
+        security_descriptor: std::ptr::null_mut(),
+        security_qos: std::ptr::null_mut(),
+    };
+    let mut status = IoStatus::default();
+    let mut handle = std::ptr::null_mut();
+    // SAFETY: All ABI structures and the bounded UTF-16 name remain live through
+    // synchronous creation. FILE_CREATE cannot open an existing object.
+    // DIRECTORY_FILE and OPEN_REPARSE_POINT prohibit traversal through a link.
+    let result = unsafe {
+        NtCreateFile(
+            &mut handle,
+            0x0012_00a7,
+            &mut attributes,
+            &mut status,
+            std::ptr::null(),
+            0,
+            3,
+            2,
+            0x0020_0021,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if result < 0 {
+        // SAFETY: This pure conversion takes no pointers or owned resources.
+        return Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(result) } as i32,
+        ));
+    }
+    if handle.is_null() || handle as isize == -1 {
+        return Err(io::Error::other(
+            "native directory creation returned no handle",
+        ));
+    }
+    // SAFETY: A successful synchronous NtCreateFile transfers one owned handle.
+    let file = unsafe { File::from_raw_handle(handle) };
+    if result != 0 || status.information != 2 {
+        return Err(io::Error::other(
+            "native directory creation outcome is uncertain",
+        ));
+    }
+    validate(&file, true)?;
+    Ok(file)
+}
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -168,6 +284,16 @@ mod tests {
             bytes.extend_from_slice(&unit.to_ne_bytes());
         }
         bytes
+    }
+
+    #[test]
+    fn nt_create_structures_match_the_documented_pointer_width_layout() {
+        let pointer = std::mem::size_of::<usize>();
+        assert_eq!(std::mem::size_of::<UnicodeString>(), pointer * 2);
+        assert_eq!(std::mem::offset_of!(UnicodeString, buffer), pointer);
+        assert_eq!(std::mem::size_of::<ObjectAttributes>(), pointer * 6);
+        assert_eq!(std::mem::offset_of!(ObjectAttributes, root), pointer);
+        assert_eq!(std::mem::size_of::<IoStatus>(), pointer * 2);
     }
 
     #[test]

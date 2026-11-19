@@ -69,7 +69,7 @@ Linux image. External Windows folders remain in scope. This changes their
 planned access from guest 9p mounts to authenticated native provider roots.
 It does not approve host changes, installation, or service registration.
 
-The read-only implementation is `infrastructure::filesystem::media_adapter`.
+The implementation is `infrastructure::filesystem::media_adapter`.
 The explicit `media-adapter` foreground command can now start its listener from
 operator-managed configuration. Host-selected paired roots can now be registered
 explicitly and checked through the application's location availability operation.
@@ -85,18 +85,19 @@ References belong to one authenticated connection. Closing a parent closes its
 descendants. A new connection or adapter restart cannot reuse those references.
 Private adapter directories and supplied private-input hard-link aliases are
 excluded. Configuration and TLS inputs remain in memory after preparation.
-The adapter cannot open a remote database or mutate media.
+The adapter cannot open a remote database. Media writes default to denied.
+The new-output primitives below require an explicit per-root write declaration.
 
 The loopback-only channel requires mutual TLS and exact paired leaf certificates
 on both sides. Pinning supplements normal chain, validity, usage and hostname
 checks. It does not replace them. The listener reuses the guarded API server.
-It rejects browser headers and bounds request time, frames, pages, reads,
+It rejects browser headers and bounds request time, frames, pages, reads, writes,
 blocking tasks and live references. A failed enumeration remains incomplete.
 Connection loss never becomes an empty page or a fallback to 9p.
 Each connection permits 32 live references. Pages have at most 64 entries.
 File chunks are at most 16 KiB, and frames are at most 256 KiB.
 At most eight native operations run at once. Each request has a 10-second
-deadline. A deadline closes the connection; it cannot cancel an OS read already
+deadline. A deadline closes the connection; it cannot cancel an OS operation already
 running on a bounded blocking task.
 
 Run the generated native and TLS fixtures on Windows:
@@ -186,14 +187,15 @@ domus media-adapter D:\DomusAdapter\private\adapter.json
 These are operator examples, not permission to change an existing host.
 The commands do not install or register a service. Stop with Ctrl+C.
 On Unix, SIGTERM also requests a stop. Shutdown stops new admission and gives
-active read-only requests up to ten seconds to drain. Stop before editing the
+active requests up to ten seconds to drain. Stop before editing the
 document or TLS files. Restart to activate changes; there is no live reload,
 automatic pairing, certificate generation or fallback provider.
 
-### Configure the paired read-only client
+### Configure the paired client
 
-`MediaClient` provides the same bounded read-only operations for native and
-paired TLS sessions. Directory and file leases are opaque and belong to one
+`MediaClient` provides the same bounded operations for native and
+paired TLS sessions. Writes require the separate grants below.
+Directory and file leases are opaque and belong to one
 client. Closing a directory invalidates its descendants. Cancellation, transport
 loss or inconsistent peer evidence retires the session. Recreate it explicitly;
 never resume a lost cursor or reopen a Windows file through a guest mount.
@@ -215,7 +217,8 @@ Unknown or duplicate fields fail.
 | `certificate_file`   | The client certificate chain.                                                   |
 | `private_key_file`   | The matching client private key.                                                |
 
-The logical selection has `revision`, `provider_scope`, `media` and `private`.
+The logical selection has `revision`, `provider_scope`, `media`, `private`
+and optional `writable_roots`.
 These fields must match the native adapter's frozen declaration. The native
 `provider.boundary` path is not a client field. Complete native expectations
 remain in each root record. The peer must verify them before issuing a lease.
@@ -236,6 +239,39 @@ opens and closes one selected root over authenticated TLS. It fails if the
 adapter is unavailable, the selection differs or the root ID is not selected.
 Neither command scans, registers a location, starts a worker or mutates media.
 These checks do not establish whole-image or external-folder lifecycle acceptance.
+
+### Explicit new-output permissions
+
+The user approved implementation of explicit per-root write permissions.
+This does not approve their activation on existing libraries or any host change.
+Publication, replacement, backup, restore and recovery deletion are still not
+routed through the adapter.
+
+Both selection declarations can include `writable_roots`, a list of exact
+selected media root IDs. Omission or an empty list keeps all roots read-only.
+Private roots, unknown IDs, duplicates and nonexact names fail validation.
+Nonempty grants change the logical selection digest and topology review.
+Update both stopped peers and review the exact topology declarations before
+activation. A changed grant does not change an immutable saved root binding.
+It is not a job, album, replacement, restore or deletion approval.
+
+The native protocol and typed client can create missing directories and files.
+They cannot overwrite an existing name or case-insensitive collision.
+On Windows, directory creation retains the original native creation handle.
+It never creates a directory, closes it and reopens its former name.
+Collision checks examine at most 64 names per request and retain their cursor.
+Changed parent evidence stops continuation before creation.
+Each new file binds a positive exact length and SHA-256 before its first byte.
+Only that original connection can append sequential chunks of at most 16 KiB.
+There is no write operation for an existing file.
+
+An incomplete output is not a readable file lease. Sealing syncs and independently
+hashes the complete retained file in steps of at most 16 KiB. Only an exact
+length, hash, unchanged identity and single hard link can yield a readable lease.
+A failed hash, native write failure, lost response or disconnected session does
+not permit a rewrite. Interrupted and different outputs remain unchanged.
+Reopening a session cannot resume their writes. Native evidence is not an
+application receipt; the existing local application journal remains authoritative.
 
 ### Select and register a paired library root
 

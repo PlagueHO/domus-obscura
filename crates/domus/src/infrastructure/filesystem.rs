@@ -330,6 +330,54 @@ impl std::ops::Deref for LibraryDirectory {
 }
 
 impl LibraryDirectory {
+    /// Retain the original Windows creation handle. On Unix, as with other
+    /// publication effects, external writers must respect the operation lock.
+    pub(crate) fn create_child_directory(&self, name: &str) -> Result<Self> {
+        let relative = LibraryPath::parse(name)?;
+        if relative.as_str().is_empty() || relative.as_str().contains('/') {
+            return Err(Error::InvalidInput(
+                "directory creation requires one component".into(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            self.directory.create_dir(name)?;
+            self.open_directory(&relative)
+        }
+        #[cfg(windows)]
+        {
+            let directory = Dir::from_std_file(native_file_delete::create_directory(
+                &self.directory_file()?,
+                OsStr::new(name),
+            )?);
+            Self::check_directory(&directory)?;
+            let mut parents = self
+                .parents
+                .iter()
+                .map(Dir::try_clone)
+                .collect::<std::io::Result<Vec<_>>>()?;
+            parents.push(self.directory.try_clone()?);
+            let mut selection = self.selection.clone();
+            if let Some(selected) = &mut selection {
+                selected.descend(name, &directory.try_clone()?.into_std_file())?;
+            }
+            parents.push(directory);
+            let native = NativeRoot::read(&parents)?;
+            let directory = parents
+                .pop()
+                .ok_or(Error::Internal("created directory is missing"))?;
+            let mut names = self.names.clone();
+            names.push(name.into());
+            Ok(Self {
+                directory,
+                native,
+                parents,
+                names,
+                selection,
+            })
+        }
+    }
+
     pub(crate) fn require_local(&self) -> Result<()> {
         require_local_file(&self.directory_file()?)
     }

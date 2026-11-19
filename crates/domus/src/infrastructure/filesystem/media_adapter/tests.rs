@@ -42,6 +42,7 @@ impl Fixture {
             },
             media: vec![inspect("library", StorageRole::Media, "parent/media")?],
             private: inspect("adapter-private", StorageRole::Application, "private")?,
+            writable_roots: Vec::new(),
         };
         Ok(Self {
             directory,
@@ -103,6 +104,91 @@ fn child(
             expected: entry.observed,
         },
     )?)
+}
+
+#[test]
+fn media_adapter_write_policy_is_explicit_media_only_and_bound_to_selection() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let original = fixture.selection.logical();
+    assert!(!original.permits_writes("library")?);
+    assert!(original.permits_writes("adapter-private").is_err());
+    assert!(original.permits_writes("unknown").is_err());
+    let legacy = serde_json::to_value(&fixture.selection)?;
+    assert!(legacy.get("writable_roots").is_none());
+    let restored: Selection = serde_json::from_value(legacy)?;
+    assert!(!restored.logical().permits_writes("library")?);
+    assert_eq!(restored.digest()?, original.digest()?);
+    for roots in [
+        vec!["adapter-private"],
+        vec!["unknown"],
+        vec!["library", "library"],
+        vec![" library"],
+    ] {
+        let mut selection = original.clone();
+        selection.writable_roots = roots.into_iter().map(str::to_owned).collect();
+        assert!(selection.validate().is_err());
+        assert!(selection.permits_writes("library").is_err());
+    }
+    let mut writable = fixture.selection.clone();
+    writable.writable_roots = vec!["library".into()];
+    assert!(writable.logical().permits_writes("library")?);
+    assert_ne!(writable.digest()?, original.digest()?);
+    let adapter = NativeAdapter::new(writable.clone(), Vec::new())?;
+    let mut session = Session::new()?;
+    assert!(session.dispatch(&adapter, fixture.request()?).is_err());
+    let root = writable.media[0].clone();
+    let response = session.dispatch(
+        &adapter,
+        Request::OpenRoot {
+            selection: writable.digest()?,
+            root: root.clone(),
+        },
+    )?;
+    let (_, observed) = opened(response)?;
+    assert_eq!(
+        observed.identity,
+        *root
+            .expected
+            .components
+            .last()
+            .ok_or(Error::Internal("missing selected identity"))?
+    );
+    let read_only_adapter = fixture.adapter()?;
+    assert!(
+        session
+            .dispatch(
+                &read_only_adapter,
+                Request::OpenRoot {
+                    selection: writable.digest()?,
+                    root,
+                }
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn media_adapter_write_policy_order_does_not_change_logical_review() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let second = fixture.selection.provider.boundary.join("second");
+    fs::create_dir(&second)?;
+    fixture.selection.media.push(StorageRoot::inspect(
+        "backup",
+        1,
+        StorageRole::Media,
+        "windows-media",
+        &fixture.selection.provider.boundary,
+        &LibraryPath::parse("second")?,
+    )?);
+    fixture.selection.writable_roots = vec!["library".into(), "backup".into()];
+    fixture.selection.validate()?;
+    let before = fixture.selection.digest()?;
+    fixture.selection.writable_roots.reverse();
+    assert_eq!(before, fixture.selection.digest()?);
+    fixture.selection.writable_roots.pop();
+    assert_ne!(before, fixture.selection.digest()?);
+    Ok(())
 }
 
 #[test]

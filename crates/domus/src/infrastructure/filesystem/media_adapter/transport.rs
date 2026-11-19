@@ -423,6 +423,40 @@ fn require_response(request: &Request, response: &Response) -> Result<()> {
         (Request::Read { count, .. }, Response::Read { bytes, complete }) => {
             bytes.len() <= *count && (*complete || !bytes.is_empty())
         }
+        (
+            Request::CreateDirectory { .. } | Request::CreateFile { .. },
+            Response::CheckingName { checked },
+        ) => *checked > 0 && *checked % super::MAX_PAGE as u64 == 0,
+        (
+            Request::CreateDirectory { parent, .. } | Request::CreateFile { parent, .. },
+            Response::Created {
+                reference,
+                observed,
+                parent: after,
+            },
+        ) => {
+            valid_reference(reference)
+                && reference.connection == parent.connection
+                && reference.id != parent.id
+                && after.kind == super::Kind::Directory
+                && match request {
+                    Request::CreateDirectory { .. } => observed.kind == super::Kind::Directory,
+                    _ => {
+                        observed.kind == super::Kind::File
+                            && observed.length == 0
+                            && observed.links == 1
+                    }
+                }
+        }
+        (Request::Write { offset, bytes, .. }, Response::Written { offset: end }) => {
+            offset.checked_add(bytes.len() as u64) == Some(*end)
+        }
+        (Request::Seal { .. }, Response::Sealing { verified }) => {
+            *verified > 0 && *verified % super::MAX_READ as u64 == 0
+        }
+        (Request::Seal { .. }, Response::Sealed { observed }) => {
+            observed.kind == super::Kind::File && observed.length > 0 && observed.links == 1
+        }
         (Request::Close { .. }, Response::Closed) => true,
         _ => false,
     };

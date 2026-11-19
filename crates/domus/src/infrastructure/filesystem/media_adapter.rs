@@ -1,5 +1,5 @@
-//! Read-only native media capabilities, selected-root availability and scanning.
-//! This is not remote private storage or permission to mutate media.
+//! Selected native media capabilities with explicit per-root new-output grants.
+//! This is not remote private storage or application operation approval.
 //!
 //! The transport owns one table per authenticated TLS connection. Frozen
 //! logical selections survive reconnection; live references never do.
@@ -19,11 +19,12 @@ use std::time::UNIX_EPOCH;
 mod transport;
 pub use transport::{Client, PreparedAdapter};
 mod client;
-pub use client::{MediaClient, MediaDirectory, MediaFile, MediaNode, MediaPage};
+pub use client::{MediaClient, MediaDirectory, MediaFile, MediaNode, MediaOutput, MediaPage};
 mod selected;
 pub(crate) use selected::{MediaBinding, MediaPairing, SelectedMedia};
 mod blocking;
 pub(crate) use blocking::{BlockingFile, BlockingMedia};
+mod mutation;
 #[cfg(test)]
 mod tests;
 
@@ -44,6 +45,8 @@ pub struct Selection {
     pub provider: ProviderMapping,
     pub media: Vec<StorageRoot>,
     pub private: StorageRoot,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_roots: Vec<String>,
 }
 
 impl Selection {
@@ -63,6 +66,7 @@ impl Selection {
             provider_scope: self.provider.scope.clone(),
             media: self.media.clone(),
             private: self.private.clone(),
+            writable_roots: self.writable_roots.clone(),
         }
     }
 
@@ -81,6 +85,10 @@ pub struct MediaSelection {
     pub provider_scope: String,
     pub media: Vec<StorageRoot>,
     pub private: StorageRoot,
+    /// Operator-declared write permission for exact selected media root IDs.
+    /// This does not grant job approval or activate a mutation operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_roots: Vec<String>,
 }
 
 impl MediaSelection {
@@ -123,6 +131,16 @@ impl MediaSelection {
                 "only media roots can be exported".into(),
             ));
         }
+        let mut writable = BTreeSet::new();
+        if self.writable_roots.len() > self.media.len()
+            || self.writable_roots.iter().any(|id| {
+                !self.media.iter().any(|root| root.root_id == *id) || !writable.insert(id)
+            })
+        {
+            return Err(Error::InvalidInput(
+                "write permission requires distinct selected media root IDs".into(),
+            ));
+        }
         let roots = self
             .media
             .iter()
@@ -157,7 +175,23 @@ impl MediaSelection {
             media,
             &self.private,
         ))?);
+        if !self.writable_roots.is_empty() {
+            let mut writable = self.writable_roots.clone();
+            writable.sort();
+            hash.update(b"\0domus-native-media-write-policy-v1\0");
+            hash.update(serde_json::to_vec(&writable)?);
+        }
         Ok(format!("{:x}", hash.finalize()))
+    }
+
+    /// Read the validated operator declaration without opening a native root.
+    /// An omitted root is read-only. Private and unselected roots are errors.
+    pub fn permits_writes(&self, root_id: &str) -> Result<bool> {
+        self.validate()?;
+        if !self.media.iter().any(|root| root.root_id == root_id) {
+            return Err(Error::InvalidInput("media root is not selected".into()));
+        }
+        Ok(self.writable_roots.iter().any(|id| id == root_id))
     }
 
     /// Exact logical topology review for one local selection and one paired
@@ -234,11 +268,46 @@ pub enum Request {
     Close {
         reference: Reference,
     },
+    CreateDirectory {
+        parent: Reference,
+        name: String,
+    },
+    CreateFile {
+        parent: Reference,
+        name: String,
+        length: u64,
+        sha256: String,
+    },
+    Write {
+        file: Reference,
+        offset: u64,
+        bytes: Vec<u8>,
+    },
+    Seal {
+        file: Reference,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    CheckingName {
+        checked: u64,
+    },
+    Created {
+        reference: Reference,
+        observed: Observation,
+        parent: Observation,
+    },
+    Written {
+        offset: u64,
+    },
+    Sealing {
+        verified: u64,
+    },
+    Sealed {
+        observed: Observation,
+    },
     Opened {
         reference: Reference,
         observed: Observation,
@@ -377,7 +446,9 @@ impl NativeAdapter {
                 "native media runtime ancestry changed".into(),
             ));
         }
-        self.directory_entry(current, None, 0)
+        let mut entry = self.directory_entry(current, None, 0)?;
+        entry.writable = self.selection.writable_roots.contains(&root.root_id);
+        Ok(entry)
     }
 
     fn directory_entry(
@@ -393,6 +464,7 @@ impl NativeAdapter {
         }
         let observed = self.observe(&directory.directory_file()?, Kind::Directory)?;
         Ok(Entry {
+            writable: false,
             parent,
             depth,
             observed,
@@ -400,6 +472,7 @@ impl NativeAdapter {
                 directory,
                 cursor: None,
                 failed: false,
+                name_check: None,
             },
         })
     }
@@ -416,7 +489,7 @@ impl NativeAdapter {
                 "media parent is not a directory".into(),
             ));
         };
-        match kind {
+        let mut entry = match kind {
             Kind::Directory => self.directory_entry(
                 directory.open_directory(&relative)?,
                 Some(parent_id),
@@ -426,6 +499,7 @@ impl NativeAdapter {
                 let file = directory.open_file(OsStr::new(name))?;
                 let observed = self.observe(&file, Kind::File)?;
                 Ok(Entry {
+                    writable: parent.writable,
                     parent: Some(parent_id),
                     depth: parent.depth + 1,
                     observed,
@@ -435,15 +509,28 @@ impl NativeAdapter {
                     },
                 })
             }
-        }
+        }?;
+        entry.writable = parent.writable;
+        Ok(entry)
     }
 }
 
 enum Object {
+    Writing {
+        file: File,
+        parent: LibraryDirectory,
+        length: u64,
+        sha256: String,
+        written: u64,
+        verified: u64,
+        hash: Sha256,
+        failed: bool,
+    },
     Directory {
         directory: LibraryDirectory,
         cursor: Option<Box<cap_std::fs::ReadDir>>,
         failed: bool,
+        name_check: Option<mutation::NameCheck>,
     },
     File {
         file: File,
@@ -452,6 +539,7 @@ enum Object {
 }
 
 struct Entry {
+    writable: bool,
     parent: Option<u64>,
     depth: usize,
     observed: Observation,
@@ -508,6 +596,10 @@ impl Session {
 
     fn dispatch(&mut self, adapter: &NativeAdapter, request: Request) -> Result<Response> {
         match request {
+            request @ (Request::CreateDirectory { .. }
+            | Request::CreateFile { .. }
+            | Request::Write { .. }
+            | Request::Seal { .. }) => self.mutate(adapter, request),
             Request::OpenRoot { selection, root } => {
                 if self.entries.len() >= MAX_LIVE {
                     return Err(Error::Busy("native media capability limit reached"));
@@ -609,6 +701,7 @@ impl Session {
             directory,
             cursor,
             failed,
+            ..
         } = &mut entry.object
         else {
             return Err(Error::InvalidInput(
@@ -658,6 +751,7 @@ impl Session {
             directory,
             cursor,
             failed,
+            ..
         } = &mut entry.object
         else {
             return Err(Error::Internal("media directory type changed"));
