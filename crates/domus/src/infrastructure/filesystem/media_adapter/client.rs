@@ -226,6 +226,43 @@ impl MediaClient {
         }
     }
 
+    /// Check the exact retained directory on this connection. This is not a
+    /// manifest check and cannot adopt changed namespace evidence.
+    pub async fn check_directory(&mut self, directory: &MediaDirectory) -> Result<()> {
+        self.directory_status(directory, false).await
+    }
+
+    /// Start another bounded listing on the same retained directory. A failed
+    /// or changed listing cannot be reset into successful absence.
+    pub async fn rewind_directory(&mut self, directory: &MediaDirectory) -> Result<()> {
+        self.directory_status(directory, true).await
+    }
+
+    async fn directory_status(&mut self, directory: &MediaDirectory, rewind: bool) -> Result<()> {
+        let expected = self
+            .require(&directory.owner, &directory.reference, Kind::Directory)?
+            .observed
+            .clone();
+        match self
+            .execute(Request::DirectoryStatus {
+                directory: directory.reference.clone(),
+                rewind,
+            })
+            .await?
+        {
+            Response::DirectoryStatus { observed } if observed == expected => {
+                if rewind {
+                    self.live
+                        .get_mut(&directory.reference.id)
+                        .ok_or(Error::Internal("media directory disappeared"))?
+                        .complete = false;
+                }
+                Ok(())
+            }
+            _ => self.protocol_error(),
+        }
+    }
+
     pub async fn close_directory(&mut self, directory: MediaDirectory) -> Result<()> {
         self.require(&directory.owner, &directory.reference, Kind::Directory)?;
         self.close(directory.reference).await

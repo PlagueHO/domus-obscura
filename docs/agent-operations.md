@@ -197,6 +197,14 @@ completion, including resume. Network I/O stays on blocking use-case threads and
 outside SQLite transactions. Both adapter ends require the hard-link observation
 field; do not add a compatibility default. Mutations still reject paired roots
 through native-only accessors. Do not bypass those refusals.
+Replacement previews use the common operation-owned media I/O boundary and one
+native/paired snapshot implementation. Keep the 1001-file flat-folder bound,
+exact full hashes, single links and unchanged observations. Paired children
+retain their actual parents on the same connection. Never reopen a reviewed
+move source through a second connection. Retained directory status checks and
+listing rewinds must reject changed evidence and failed enumeration. A new
+listing is not permission to clear incomplete coverage. Media I/O must remain
+outside SQLite transactions. These previews grant no write or restore approval.
 See [selected paired roots](docker.md#select-and-register-a-paired-library-root).
 
 `domus storage-root-inspect <absolute-provider-boundary> <provider-scope>

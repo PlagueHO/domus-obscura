@@ -300,6 +300,12 @@ pub(crate) struct ReadEvidence {
 }
 
 impl ReadFile {
+    pub(crate) fn from_native(file: File) -> Self {
+        Self {
+            inner: ReadFileInner::Native(file),
+        }
+    }
+
     pub fn try_clone(&self) -> Result<Self> {
         Ok(Self {
             inner: match &self.inner {

@@ -10,9 +10,9 @@ use std::io::{Read, Seek, SeekFrom};
 /// One operation-owned session for synchronous use cases on blocking threads.
 /// Live leases never enter SQLite. Drop retires the session after any failure.
 pub(crate) struct BlockingMedia {
-    runtime: tokio::runtime::Runtime,
-    client: MediaClient,
-    root_id: String,
+    pub(super) runtime: tokio::runtime::Runtime,
+    pub(super) client: MediaClient,
+    pub(super) root_id: String,
 }
 
 impl BlockingMedia {

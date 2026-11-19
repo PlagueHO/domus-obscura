@@ -418,6 +418,72 @@ async fn media_adapter_removal_native_and_tls_delete_only_verified_files_and_emp
 }
 
 #[tokio::test]
+async fn media_adapter_publication_snapshot_native_and_tls_share_exact_bounded_read_policy()
+-> TestResult {
+    use super::super::{BlockingMedia, io::MediaDirectoryIo};
+    use crate::domain::LibraryPath;
+    use crate::infrastructure::{
+        filesystem::{LibraryDirectory, native_file_identity},
+        publication::media_replacement_snapshot,
+    };
+    use sha2::Digest;
+    let fixture = Fixture::new()?;
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    let bytes = vec![47; MAX_READ + 19];
+    std::fs::write(media.join("album").join("track.flac"), &bytes)?;
+    std::fs::write(media.join("album").join("empty.bin"), [])?;
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let native = MediaDirectoryIo::native(LibraryDirectory::open(&media)?)?;
+    let local = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let remote = MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        let local = MediaDirectoryIo::paired(BlockingMedia::new(local, "library".into())?)?;
+        let remote = MediaDirectoryIo::paired(BlockingMedia::new(remote, "library".into())?)?;
+        let mut expected = None;
+        for root in [native, local, remote] {
+            assert!(
+                root.open_directory(&LibraryPath::parse("missing")?)?
+                    .is_none()
+            );
+            let album = root
+                .open_directory(&LibraryPath::parse("album")?)?
+                .ok_or(Error::Internal("generated album missing"))?;
+            let snapshot = media_replacement_snapshot(&album)?;
+            assert_eq!(
+                snapshot.0,
+                native_file_identity(
+                    &LibraryDirectory::open(&media.join("album"))?.directory_file()?
+                )?
+            );
+            assert_eq!(snapshot.1.len(), 2);
+            assert_eq!(snapshot.1[0].name, "empty.bin");
+            assert_eq!(snapshot.1[0].bytes, 0);
+            assert_eq!(snapshot.1[1].bytes, bytes.len() as u64);
+            assert_eq!(
+                snapshot.1[1].sha256,
+                format!("{:x}", sha2::Sha256::digest(&bytes))
+            );
+            assert_eq!(media_replacement_snapshot(&album)?, snapshot);
+            if let Some(expected) = &expected {
+                assert_eq!(&snapshot, expected);
+            } else {
+                expected = Some(snapshot);
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    result?;
+    running.stop().await
+}
+
+#[tokio::test]
 async fn media_adapter_verify_native_and_tls_recover_only_complete_exact_existing_files()
 -> TestResult {
     use sha2::{Digest, Sha256};
@@ -1623,6 +1689,16 @@ async fn media_adapter_selected_registration_is_frozen_and_survives_reopen_witho
         );
         assert!(store.open_registered_root(&record.root, "media").is_err());
         assert!(store.registered_root_path(&record.root, "media").is_err());
+        {
+            let root = store.media_directory_io(&record.root)?;
+            let album = root
+                .open_directory(&crate::domain::LibraryPath::parse("album")?)?
+                .ok_or(Error::Internal("generated album missing"))?;
+            let (_, files) =
+                crate::infrastructure::publication::media_replacement_snapshot(&album)?;
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].name, "track.flac");
+        }
         crate::application::check_location_availability(&store, location)?;
         let reopen = store.source();
         drop(store);
@@ -1635,6 +1711,7 @@ async fn media_adapter_selected_registration_is_frozen_and_survives_reopen_witho
         let reopened = fresh.open_store(StoreOpenMode::ReadCurrent)?;
         crate::application::check_location_availability(&reopened, location)?;
         let snapshot = fresh.open_store(StoreOpenMode::Snapshot)?;
+        assert!(snapshot.media_directory_io(&record.root).is_err());
         assert!(matches!(
             crate::application::check_location_availability(&snapshot, location),
             Err(Error::Conflict(_))
@@ -1647,6 +1724,10 @@ async fn media_adapter_selected_registration_is_frozen_and_survives_reopen_witho
         let source = ConfigurationService::open(&host)?;
         let mut store = source.open_store(StoreOpenMode::Current)?;
         let before = store.location(location)?;
+        assert!(matches!(
+            store.media_directory_io(&before.root),
+            Err(Error::Remote(_))
+        ));
         assert!(matches!(
             crate::application::check_location_availability(&store, location),
             Err(Error::Remote(_))

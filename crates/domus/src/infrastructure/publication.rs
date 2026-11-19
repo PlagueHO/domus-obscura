@@ -1,3 +1,4 @@
+use super::filesystem::media_adapter::MediaDirectoryIo;
 use super::filesystem::{
     LibraryDirectory, is_unsafe_cap_link, is_unsafe_link, sync_directory as sync,
 };
@@ -439,68 +440,11 @@ fn folder_version(
 }
 
 fn replacement_snapshot(
-    directory: &Dir,
+    directory: &LibraryDirectory,
     permissions: &FilePermissions,
 ) -> Result<(String, Vec<ReplacementFile>)> {
     checked(directory, permissions)?;
-    let identity =
-        super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
-    let mut files = Vec::new();
-    let mut names = HashSet::new();
-    for entry in directory.entries()? {
-        if files.len() == 1001 {
-            return Err(Error::Conflict(
-                "existing album exceeds the replacement file limit".into(),
-            ));
-        }
-        let entry = entry?;
-        let name = entry.file_name().into_string().map_err(|_| conflict())?;
-        LibraryPath::parse(&name)?;
-        let metadata = entry.metadata()?;
-        if name.is_empty()
-            || name.contains('/')
-            || !metadata.is_file()
-            || is_unsafe_cap_link(&metadata)
-            || !names.insert(name.to_uppercase())
-        {
-            return Err(conflict());
-        }
-        let mut file = directory.open_with(&name, &read_options())?.into_std();
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || is_unsafe_link(&metadata) || metadata.len() > i64::MAX as u64 {
-            return Err(conflict());
-        }
-        let bytes = metadata.len();
-        let mut hash = Sha256::new();
-        let mut buffer = [0; 65_536];
-        let mut total = 0u64;
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            total = total.checked_add(count as u64).ok_or_else(conflict)?;
-            if total > bytes {
-                return Err(conflict());
-            }
-            hash.update(&buffer[..count]);
-        }
-        if total != bytes || file.metadata()?.len() != bytes {
-            return Err(conflict());
-        }
-        files.push(ReplacementFile {
-            name,
-            bytes,
-            sha256: format!("{:x}", hash.finalize()),
-        });
-    }
-    files.sort_by(|left, right| {
-        left.name
-            .to_uppercase()
-            .cmp(&right.name.to_uppercase())
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    Ok((identity, files))
+    media_replacement_snapshot(&MediaDirectoryIo::native(directory.try_clone()?)?)
 }
 
 fn album_replacement_previews_for_location(
@@ -539,9 +483,9 @@ fn album_replacement_previews_for_location(
         .into_iter()
         .filter(|target| location_id.is_none_or(|location| target.location_id == location))
     {
-        let root = match store.open_registered_root(&target.root, "media") {
+        let root = match store.media_directory_io(&target.root) {
             Ok(root) => root,
-            Err(Error::Io(error)) => {
+            Err(error @ (Error::Io(_) | Error::Remote(_))) => {
                 let mut preview = AlbumReplacementPreview {
                     job_id: job,
                     plan_version: version,
@@ -565,13 +509,9 @@ fn album_replacement_previews_for_location(
             }
             Err(error) => return Err(error),
         };
-        let album = match root.open_directory(&relative) {
-            Ok(album) => Some(album),
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
+        let album = root.open_directory(&relative)?;
         let (album_identity, existing_files) = if let Some(album) = album {
-            let (identity, files) = replacement_snapshot(&album, &FilePermissions::current()?)?;
+            let (identity, files) = media_replacement_snapshot(&album)?;
             (Some(identity), files)
         } else {
             (None, Vec::new())
@@ -604,6 +544,61 @@ fn album_replacement_previews_for_location(
         previews.push(preview);
     }
     Ok(previews)
+}
+
+pub(crate) fn media_replacement_snapshot(
+    directory: &MediaDirectoryIo,
+) -> Result<(String, Vec<ReplacementFile>)> {
+    directory.check()?;
+    let identity = directory.identity().to_owned();
+    let mut files = Vec::new();
+    let mut names = HashSet::new();
+    for entry in directory.entries(1001)? {
+        let relative = LibraryPath::parse(&entry.name)?;
+        if entry.directory
+            || relative.as_str().is_empty()
+            || relative.as_str().contains('/')
+            || !names.insert(entry.name.to_uppercase())
+        {
+            return Err(conflict());
+        }
+        let mut file = directory.open_file(&entry)?;
+        let before = file.evidence()?;
+        if before.bytes > i64::MAX as u64 || before.links != 1 {
+            return Err(conflict());
+        }
+        let mut hash = Sha256::new();
+        let mut buffer = [0; 65_536];
+        let mut total = 0u64;
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            total = total.checked_add(count as u64).ok_or_else(conflict)?;
+            if total > before.bytes {
+                return Err(conflict());
+            }
+            hash.update(&buffer[..count]);
+        }
+        if total != before.bytes || file.evidence()? != before {
+            return Err(conflict());
+        }
+        file.close()?;
+        files.push(ReplacementFile {
+            name: entry.name,
+            bytes: total,
+            sha256: format!("{:x}", hash.finalize()),
+        });
+    }
+    directory.check()?;
+    files.sort_by(|left, right| {
+        left.name
+            .to_uppercase()
+            .cmp(&right.name.to_uppercase())
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok((identity, files))
 }
 
 pub(crate) struct PublicationDirectory {

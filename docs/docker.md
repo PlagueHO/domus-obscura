@@ -75,6 +75,13 @@ operator-managed configuration. Host-selected paired roots can now be registered
 explicitly and checked through the application's location availability operation.
 Full library scans and direct-folder refreshes use the retained read-only client.
 Indexed JPEG reads and read-only music sharing also use this client.
+Replacement previews now use a common native/paired snapshot rule. They inspect
+only the selected media root and require exact complete file hashes, one hard
+link, unchanged file evidence and at most 1001 flat files. Empty existing files
+are supported. Paired files and their parents remain on the same connection.
+A missing folder is reported only after complete successful enumeration.
+Directory checks and repeated listings use the retained reference; a failed
+enumeration cannot be reset into successful absence.
 Publication and recovery are not routed through the adapter.
 Do not treat this implementation as Windows Docker acceptance.
 

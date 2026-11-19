@@ -27,6 +27,8 @@ mod selected;
 pub(crate) use selected::{MediaBinding, MediaPairing, SelectedMedia};
 mod blocking;
 pub(crate) use blocking::{BlockingFile, BlockingMedia};
+mod io;
+pub(crate) use io::MediaDirectoryIo;
 mod moves;
 mod mutation;
 mod removal;
@@ -274,6 +276,10 @@ pub enum Request {
         directory: Reference,
         limit: usize,
     },
+    DirectoryStatus {
+        directory: Reference,
+        rewind: bool,
+    },
     Read {
         file: Reference,
         offset: u64,
@@ -325,6 +331,9 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    DirectoryStatus {
+        observed: Observation,
+    },
     Removed {
         parent: Observation,
     },
@@ -649,6 +658,35 @@ impl Session {
 
     fn dispatch(&mut self, adapter: &NativeAdapter, request: Request) -> Result<Response> {
         match request {
+            Request::DirectoryStatus { directory, rewind } => {
+                let id = self.require(&directory)?;
+                let entry = self
+                    .entries
+                    .get_mut(&id)
+                    .ok_or(Error::Internal("media directory disappeared"))?;
+                let Object::Directory {
+                    directory,
+                    cursor,
+                    failed,
+                    ..
+                } = &mut entry.object
+                else {
+                    return Err(Error::InvalidInput(
+                        "media reference is not a directory".into(),
+                    ));
+                };
+                let observed = adapter.observe(&directory.directory_file()?, Kind::Directory)?;
+                if *failed || observed != entry.observed {
+                    return Err(Error::Conflict(
+                        "media directory changed or enumeration failed; open a new reference"
+                            .into(),
+                    ));
+                }
+                if rewind {
+                    *cursor = None;
+                }
+                Ok(Response::DirectoryStatus { observed })
+            }
             request @ (Request::RemoveFile { .. } | Request::RemoveDirectory { .. }) => {
                 self.remove_object(adapter, request)
             }

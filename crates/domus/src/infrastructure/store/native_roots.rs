@@ -177,6 +177,22 @@ fn require_saved(
 }
 
 impl Store {
+    pub(crate) fn media_directory_io(
+        &self,
+        root: &str,
+    ) -> Result<crate::infrastructure::filesystem::media_adapter::MediaDirectoryIo> {
+        use crate::infrastructure::filesystem::media_adapter::MediaDirectoryIo;
+        if !self.connection.is_autocommit() {
+            return Err(Error::Conflict(
+                "media I/O cannot run inside a database transaction".into(),
+            ));
+        }
+        match self.paired_media_session(root)? {
+            Some(media) => MediaDirectoryIo::paired(media),
+            None => MediaDirectoryIo::native(self.open_registered_root(root, "media")?),
+        }
+    }
+
     pub(crate) fn read_registered_directory(
         &self,
         root: &str,
