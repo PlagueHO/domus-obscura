@@ -100,7 +100,8 @@ same durable scan lane, location target and fenced scan claims. Resume only the
 same scope. A direct-folder refresh lists child directories but never scans them,
 marks descendants absent, or renews whole-location coverage.
 
-Metadata inspection reads MP3 and FLAC through no-follow native handles. Keep the
+Metadata inspection reads MP3 and FLAC through no-follow native handles or exact
+paired retained-file leases. Both use the same bounded parser. Keep the
 8 MiB metadata envelope, 1024 frame/comment limit, 64 KiB MPEG probe, 64 KiB saved
 tag body and 128-entry persistence batches. Unsupported formats and failed tags
 remain indexed files with diagnostics. Do not reuse browsing header evidence as
@@ -164,9 +165,15 @@ native peer path or credential. `domus location-check --host <absolute-host-file
 <location-id>` uses that binding for availability without scanning or changing
 coverage. The API's existing availability operation uses the same path on its
 blocking executor. Do not put network I/O in a database transaction.
-Scanning, JPEG reads, sharing and mutations still reject paired roots through
-their native-only accessors. Do not report them as supported or bypass those
-refusals. See [selected paired roots](docker.md#select-and-register-a-paired-library-root).
+Paired scans and direct-folder refreshes use bounded parent-relative listing and
+observed child opens. Renew claims and check stop before network operations and
+metadata reads. Keep network I/O out of persistence transactions. Transport,
+authority and claim failures must not become file-only tag errors or successful
+coverage. Failed paired enumeration, including an unsafe entry, remains
+incomplete. Never replace it with an empty page or a native guest-path open.
+JPEG reads, sharing and mutations still reject paired roots through their
+native-only accessors. Do not report them as supported or bypass those refusals.
+See [selected paired roots](docker.md#select-and-register-a-paired-library-root).
 
 `domus storage-root-inspect <absolute-provider-boundary> <provider-scope>
 <root-id> <binding-revision> <role> <library-relative-path>` prints a complete

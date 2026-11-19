@@ -1,6 +1,5 @@
-//! Read-only native media capabilities and selected-root availability.
-//! Content consumers are not connected yet. This is not remote private storage
-//! or permission to mutate media.
+//! Read-only native media capabilities, selected-root availability and scanning.
+//! This is not remote private storage or permission to mutate media.
 //!
 //! The transport owns one table per authenticated TLS connection. Frozen
 //! logical selections survive reconnection; live references never do.
@@ -23,6 +22,8 @@ mod client;
 pub use client::{MediaClient, MediaDirectory, MediaFile, MediaNode, MediaPage};
 mod selected;
 pub(crate) use selected::{MediaBinding, MediaPairing, SelectedMedia};
+mod blocking;
+pub(crate) use blocking::BlockingMedia;
 #[cfg(test)]
 mod tests;
 

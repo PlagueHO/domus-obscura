@@ -188,6 +188,14 @@ impl SelectedMedia {
         Ok(())
     }
 
+    pub(crate) fn open(&self, binding: &MediaBinding) -> Result<super::BlockingMedia> {
+        self.require_binding(binding)?;
+        super::BlockingMedia::new(
+            self.pairing.client(&self.selection)?,
+            binding.root.root_id.clone(),
+        )
+    }
+
     /// Synchronous use cases already run on blocking threads. Network I/O is
     /// never performed while a SQL transaction is open.
     pub(crate) fn check(&self, binding: &MediaBinding) -> Result<()> {

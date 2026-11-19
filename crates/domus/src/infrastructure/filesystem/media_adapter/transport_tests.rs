@@ -411,6 +411,205 @@ fn select_paired_fixture(
     Ok(document)
 }
 
+fn generated_scan_audio() -> TestResult<(Vec<u8>, Vec<u8>)> {
+    use id3::TagLike;
+    use std::io::Write;
+    let mut tag = id3::Tag::new();
+    tag.set_title("Generated paired track");
+    tag.set_artist("Generated artist");
+    tag.set_album("Generated album");
+    tag.set_track(2);
+    tag.add_frame(id3::frame::ExtendedText {
+        description: "Generated padding".into(),
+        value: "x".repeat(40 * 1024),
+    });
+    let mut mp3 = std::io::Cursor::new(Vec::new());
+    tag.write_to(&mut mp3, id3::Version::Id3v24)?;
+    for _ in 0..3 {
+        let mut frame = vec![0; 144000 * 320 / 44100];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, 0xe0, 0]);
+        mp3.write_all(&frame)?;
+    }
+    let mut flac = b"fLaC".to_vec();
+    flac.extend_from_slice(&[0, 0, 0, 34]);
+    let mut info = [0; 34];
+    info[10..18]
+        .copy_from_slice(&((44100u64 << 44) | (1 << 41) | (15 << 36) | 44100).to_be_bytes());
+    flac.extend_from_slice(&info);
+    flac.extend_from_slice(&[1, 0, 128, 0]);
+    flac.extend_from_slice(&vec![0; 32 * 1024]);
+    let fields = [
+        "ARTIST=Generated artist",
+        "ALBUM=Generated album",
+        "TITLE=Generated FLAC",
+    ];
+    let mut comments = vec![0; 4];
+    comments.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+    for field in fields {
+        comments.extend_from_slice(&(field.len() as u32).to_le_bytes());
+        comments.extend_from_slice(field.as_bytes());
+    }
+    flac.extend_from_slice(&[0x84, 0, (comments.len() >> 8) as u8, comments.len() as u8]);
+    flac.extend_from_slice(&comments);
+    Ok((mp3.into_inner(), flac))
+}
+
+#[tokio::test]
+async fn media_adapter_paired_scans_page_metadata_refresh_and_preserve_read_only_media()
+-> TestResult {
+    use crate::application::{refresh_library_folder, scan_location};
+    use crate::domain::{LibraryPath, Page};
+    use crate::infrastructure::server::configuration::ConfigurationService;
+    use crate::infrastructure::store::StoreOpenMode;
+    let fixture = Fixture::new()?;
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    let album = media.join("album");
+    let (mp3, flac) = generated_scan_audio()?;
+    std::fs::write(album.join("track.mp3"), &mp3)?;
+    std::fs::write(album.join("track.flac"), &flac)?;
+    std::fs::write(album.join("invalid.mp3"), b"invalid generated MPEG")?;
+    std::fs::write(album.join("future.m4a"), b"unsupported generated audio")?;
+    std::fs::create_dir(album.join("nested"))?;
+    std::fs::write(album.join("nested").join("unchanged.txt"), b"original")?;
+    std::fs::create_dir(media.join(".DOMUS-retained-generated"))?;
+    std::fs::write(
+        media.join(".DOMUS-retained-generated").join("private.txt"),
+        b"excluded",
+    )?;
+    for index in 0..130 {
+        std::fs::write(
+            album.join(format!("asset-{index:03}.txt")),
+            b"generated asset",
+        )?;
+    }
+    let expected = ["track.mp3", "track.flac"].map(|name| -> Result<_> {
+        let mut file = std::fs::File::open(album.join(name))?;
+        Ok(crate::infrastructure::library_metadata::inspect(
+            &mut file, name,
+        ))
+    });
+    let [mp3_metadata, flac_metadata] = expected;
+    let mp3_metadata = mp3_metadata?;
+    let flac_metadata = flac_metadata?;
+    assert_eq!(mp3_metadata.status, "tagged");
+    assert_eq!(flac_metadata.status, "tagged");
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let (host, path, _) = configured_client_fixture(&fixture, &keys, running.address)?;
+    select_paired_fixture(&host, &path, &fixture.selection.logical())?;
+    let source = ConfigurationService::open(&host)?;
+    let album_again = album.clone();
+    let (location, database) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut store = source.open_store(StoreOpenMode::Current)?;
+        let location = store.add_paired_location("library", "main")?;
+        scan_location(&mut store, location)?;
+        assert_eq!(store.location(location)?.coverage, "complete");
+        let files = store.browse(location, &LibraryPath::parse("album")?, Page::new(0, 200)?)?;
+        assert_eq!(files.len(), 135);
+        for (name, expected) in [("track.mp3", mp3_metadata), ("track.flac", flac_metadata)] {
+            let entry = files
+                .iter()
+                .find(|entry| entry.relative_path.ends_with(name))
+                .ok_or(Error::Internal("missing audio"))?;
+            let actual = store.library_file(location, entry.id)?.metadata;
+            assert_eq!(actual.status, expected.status);
+            assert_eq!(
+                serde_json::to_value(actual.tags)?,
+                serde_json::to_value(expected.tags)?
+            );
+            assert_eq!(
+                serde_json::to_value(actual.audio)?,
+                serde_json::to_value(expected.audio)?
+            );
+            assert_eq!(actual.size, expected.size);
+            assert_eq!(actual.modified_ns, expected.modified_ns);
+            assert!(actual.native_identity.is_some());
+        }
+        for (name, status) in [("invalid.mp3", "invalid"), ("future.m4a", "unsupported")] {
+            let entry = files
+                .iter()
+                .find(|entry| entry.relative_path.ends_with(name))
+                .ok_or(Error::Internal("missing diagnostic"))?;
+            assert_eq!(
+                store.library_file(location, entry.id)?.metadata.status,
+                status
+            );
+        }
+        assert_eq!(
+            store
+                .browse(location, &LibraryPath::parse("")?, Page::new(0, 200)?)?
+                .len(),
+            1
+        );
+        let observed_at = store.location(location)?.observed_at;
+        std::fs::remove_file(album_again.join("asset-000.txt"))?;
+        std::fs::write(album_again.join("new.txt"), b"new direct child")?;
+        std::fs::write(
+            album_again.join("nested").join("not-refreshed.txt"),
+            b"new descendant",
+        )?;
+        refresh_library_folder(&mut store, location, &LibraryPath::parse("album")?)?;
+        assert_eq!(store.location(location)?.observed_at, observed_at);
+        assert_eq!(store.location(location)?.coverage, "complete");
+        let direct = store.browse(location, &LibraryPath::parse("album")?, Page::new(0, 200)?)?;
+        assert!(
+            !direct
+                .iter()
+                .find(|entry| entry.relative_path == "album/asset-000.txt")
+                .ok_or(Error::Internal("missing old entry"))?
+                .present
+        );
+        assert!(
+            direct
+                .iter()
+                .any(|entry| entry.relative_path == "album/new.txt" && entry.present)
+        );
+        let nested = store.browse(
+            location,
+            &LibraryPath::parse("album/nested")?,
+            Page::new(0, 200)?,
+        )?;
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].relative_path, "album/nested/unchanged.txt");
+        let database = store.source();
+        drop(store);
+        let mut reopened = database.open(StoreOpenMode::Current)?;
+        scan_location(&mut reopened, location)?;
+        assert_eq!(
+            reopened
+                .browse(
+                    location,
+                    &LibraryPath::parse("album/nested")?,
+                    Page::new(0, 200)?
+                )?
+                .len(),
+            2
+        );
+        Ok((location, database))
+    })
+    .await??;
+    assert_eq!(std::fs::read(album.join("track.mp3"))?, mp3);
+    assert_eq!(std::fs::read(album.join("track.flac"))?, flac);
+    running.stop().await?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut store = database.open(StoreOpenMode::Current)?;
+        let before = store.browse(location, &LibraryPath::parse("album")?, Page::new(0, 200)?)?;
+        assert!(scan_location(&mut store, location).is_err());
+        assert_eq!(store.location(location)?.coverage, "incomplete");
+        assert!(store.location(location)?.last_error.is_some());
+        let after = store.browse(location, &LibraryPath::parse("album")?, Page::new(0, 200)?)?;
+        assert_eq!(serde_json::to_value(before)?, serde_json::to_value(after)?);
+        Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn media_adapter_selected_registration_is_frozen_and_survives_reopen_without_native_paths()
 -> TestResult {
@@ -481,6 +680,77 @@ async fn media_adapter_selected_registration_is_frozen_and_survives_reopen_witho
     })
     .await??;
     Ok(())
+}
+
+#[tokio::test]
+async fn media_adapter_paired_scan_stop_resumes_and_unsafe_refresh_never_confirms_absence()
+-> TestResult {
+    use crate::application::{refresh_library_folder, scan_location};
+    use crate::domain::{LibraryPath, Page};
+    use crate::infrastructure::server::configuration::ConfigurationService;
+    use crate::infrastructure::store::StoreOpenMode;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let (host, path, _) = configured_client_fixture(&fixture, &keys, running.address)?;
+    select_paired_fixture(&host, &path, &fixture.selection.logical())?;
+    let source = ConfigurationService::open(&host)?;
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    let target = fixture.selection.provider.boundary.join("private");
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut store = source
+            .open_store(StoreOpenMode::Current)?
+            .with_worker_stop(stop.clone());
+        let location = store.add_paired_location("library", "main")?;
+        stop.store(true, Ordering::Release);
+        assert!(matches!(
+            scan_location(&mut store, location),
+            Err(Error::WorkerStopping)
+        ));
+        stop.store(false, Ordering::Release);
+        scan_location(&mut store, location)?;
+        assert_eq!(store.location(location)?.coverage, "complete");
+        let before = store.browse(location, &LibraryPath::parse("album")?, Page::new(0, 10)?)?;
+        assert_eq!(before.len(), 1);
+        std::fs::remove_file(media.join("album").join("track.flac"))?;
+        let alias = media.join("album").join("alias");
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(&alias)
+                .arg(&target)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "generated junction creation failed"
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &alias)?;
+        assert!(
+            refresh_library_folder(&mut store, location, &LibraryPath::parse("album")?).is_err()
+        );
+        assert_eq!(store.location(location)?.coverage, "complete");
+        let coverage = store.library_coverage(location, &LibraryPath::parse("album")?)?;
+        assert_eq!(coverage.folder_state.as_deref(), Some("incomplete"));
+        assert!(coverage.folder_error.is_some());
+        let after = store.browse(location, &LibraryPath::parse("album")?, Page::new(0, 10)?)?;
+        assert_eq!(serde_json::to_value(before)?, serde_json::to_value(after)?);
+        Ok(())
+    })
+    .await??;
+    running.stop().await
 }
 
 #[tokio::test]

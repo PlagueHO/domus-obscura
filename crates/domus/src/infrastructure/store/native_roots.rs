@@ -278,6 +278,28 @@ impl Store {
         }
     }
 
+    pub(crate) fn paired_media_session(
+        &self,
+        root: &str,
+    ) -> Result<Option<crate::infrastructure::filesystem::media_adapter::BlockingMedia>> {
+        match self.saved_root(root, "media")? {
+            SavedRoot::Paired(binding) => {
+                if !self.connection.is_autocommit() {
+                    return Err(Error::Conflict(
+                        "media network I/O cannot run inside a database transaction".into(),
+                    ));
+                }
+                Ok(Some(
+                    self.paired_media
+                        .as_ref()
+                        .ok_or_else(conflict)?
+                        .open(&binding)?,
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub(super) fn selected_media_binding(&self, root_id: &str) -> Result<SavedRoot> {
         if !self.connection.is_autocommit() {
             return Err(Error::Conflict(

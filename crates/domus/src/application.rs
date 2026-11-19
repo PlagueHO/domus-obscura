@@ -41,12 +41,7 @@ pub fn refresh_library_folder(
     location_id: i64,
     folder: &LibraryPath,
 ) -> Result<i64> {
-    if folder.as_str().split('/').any(|part| {
-        let part = part.to_ascii_lowercase();
-        part.starts_with(".domus-pending-")
-            || part.starts_with(".domus-retained-")
-            || part.starts_with(".domus-restore-")
-    }) {
+    if folder.as_str().split('/').any(recovery_folder) {
         return Err(Error::InvalidInput(
             "publication recovery folders cannot be scanned".into(),
         ));
@@ -176,6 +171,9 @@ fn flush(store: &mut Store, claim: &ScanClaim, batch: &mut Vec<OwnedObservation>
 /// short transactions; no transaction spans filesystem I/O.
 fn observe(store: &mut Store, claim: &ScanClaim) -> Result<()> {
     let location = store.location(claim.location)?;
+    if let Some(mut media) = store.paired_media_session(&location.root)? {
+        return observe_paired(store, claim, &mut media);
+    }
     let root = store.open_registered_root(&location.root, "media")?;
     let mut batch = Vec::with_capacity(128);
     while let Some(directory) = store.next_directory(claim)? {
@@ -195,6 +193,83 @@ fn observe(store: &mut Store, claim: &ScanClaim) -> Result<()> {
     Ok(())
 }
 
+fn observe_paired(
+    store: &mut Store,
+    claim: &ScanClaim,
+    media: &mut crate::infrastructure::filesystem::media_adapter::BlockingMedia,
+) -> Result<()> {
+    use crate::infrastructure::filesystem::media_adapter::Kind;
+    let mut batch = Vec::with_capacity(128);
+    while let Some(directory) = store.next_directory(claim)? {
+        let mut chain = media.open_directory(&directory, &mut || {
+            store.check_worker_stop()?;
+            store.renew_scan(claim)
+        })?;
+        let opened = chain
+            .last()
+            .ok_or(Error::Internal("media ancestry is empty"))?;
+        loop {
+            store.check_worker_stop()?;
+            store.renew_scan(claim)?;
+            let page = media.page(opened)?;
+            for entry in page.entries {
+                if recovery_folder(&entry.name) {
+                    continue;
+                }
+                let relative = if directory.as_str().is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{}/{}", directory.as_str(), entry.name)
+                };
+                let path = LibraryPath::parse(&relative)?;
+                let metadata = if entry.observed.kind == Kind::File {
+                    Some(media.inspect_file(opened, &entry, &mut || {
+                        store.check_worker_stop()?;
+                        store.renew_scan(claim)
+                    })?)
+                } else {
+                    None
+                };
+                batch.push(OwnedObservation {
+                    path,
+                    kind: if entry.observed.kind == Kind::File {
+                        "file"
+                    } else {
+                        "directory"
+                    },
+                    size: if entry.observed.kind == Kind::File {
+                        Some(i64::try_from(entry.observed.length).map_err(|_| {
+                            Error::InvalidInput("file size exceeds SQLite range".into())
+                        })?)
+                    } else {
+                        None
+                    },
+                    modified_at: Some(i64::try_from(entry.observed.modified_seconds).map_err(
+                        |_| Error::InvalidInput("file timestamp exceeds SQLite range".into()),
+                    )?),
+                    metadata,
+                });
+            }
+            flush(store, claim, &mut batch)?;
+            if page.complete {
+                break;
+            }
+        }
+        media.close_directory(chain.remove(0))?;
+        store.complete_directory(claim, &directory)?;
+        #[cfg(test)]
+        crate::scale_tests::directory_completed(claim)?;
+    }
+    Ok(())
+}
+
+fn recovery_folder(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with(".domus-pending-")
+        || name.starts_with(".domus-retained-")
+        || name.starts_with(".domus-restore-")
+}
+
 fn observe_directory(
     store: &mut Store,
     claim: &ScanClaim,
@@ -209,11 +284,7 @@ fn observe_directory(
         let name = name
             .to_str()
             .ok_or_else(|| Error::InvalidInput("file path is not valid Unicode".into()))?;
-        let folded_name = name.to_ascii_lowercase();
-        if folded_name.starts_with(".domus-pending-")
-            || folded_name.starts_with(".domus-retained-")
-            || folded_name.starts_with(".domus-restore-")
-        {
+        if recovery_folder(name) {
             continue;
         }
         let relative = if directory.as_str().is_empty() {

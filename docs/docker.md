@@ -73,8 +73,9 @@ The read-only implementation is `infrastructure::filesystem::media_adapter`.
 The explicit `media-adapter` foreground command can now start its listener from
 operator-managed configuration. Host-selected paired roots can now be registered
 explicitly and checked through the application's location availability operation.
-Scanning, JPEG reads, sharing, publication and recovery are not routed through
-the adapter. Do not treat this implementation as Windows Docker acceptance.
+Full library scans and direct-folder refreshes use the retained read-only client.
+JPEG reads, sharing, publication and recovery are not routed through the adapter.
+Do not treat this implementation as Windows Docker acceptance.
 
 The adapter verifies complete selected native chains and retains the opened
 directories and files. Only the Windows/native host maps root IDs to paths.
@@ -295,9 +296,26 @@ The existing API location-availability operation uses the same saved binding.
 It performs network I/O on a blocking thread without a SQL transaction.
 Peer loss does not change indexed entries, coverage or observation dates.
 Native filesystem and publication accessors reject paired roots explicitly.
-Scanning, JPEG reads, sharing, publication and recovery are not yet routed
-through this provider. A scan attempt records an incomplete result, not an empty
-successful library. These limits remain required work for issue #66.
+Full scans and direct-folder refreshes enumerate this provider in bounded pages.
+Each descent opens the exact listed object relative to its retained parent.
+MP3 and FLAC inspection uses the same bounded tag parser as native scans through
+retained-file Read/Seek. Reads are limited to 16 KiB per adapter request.
+The existing 8 MiB metadata envelope, frame/comment limits and 64 KiB MPEG probe
+remain. This inspects browsing metadata, not full audio validity.
+
+The existing persistent scan frontier, ownership checks and direct-folder scope
+remain active. Each page, open and read checks worker stop and renews the claim.
+Short persistence transactions contain at most 128 entries. They never span
+network I/O. Stop releases the claim for explicit continuation. Connection loss,
+changed objects, unsafe traversal and failed enumeration leave incomplete
+coverage. They do not mark unseen entries absent. An unsafe directory entry
+currently fails its paired enumeration rather than producing a native-style
+`unsafe_link` row. Invalid tags and unsupported audio remain indexed file
+diagnostics. Recovery folders stay excluded.
+
+JPEG reads, sharing, publication and recovery are not yet routed through this
+provider. Their native-only accessors still fail explicitly. These limits remain
+required work for issue #66.
 
 ## Build and verify
 
