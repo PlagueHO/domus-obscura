@@ -187,6 +187,55 @@ active read-only requests up to ten seconds to drain. Stop before editing the
 document or TLS files. Restart to activate changes; there is no live reload,
 automatic pairing, certificate generation or fallback provider.
 
+### Configure the paired read-only client
+
+`MediaClient` provides the same bounded read-only operations for native and
+paired TLS sessions. Directory and file leases are opaque and belong to one
+client. Closing a directory invalidates its descendants. Cancellation, transport
+loss or inconsistent peer evidence retires the session. Recreate it explicitly;
+never resume a lost cursor or reopen a Windows file through a guest mount.
+Foreign identity records are checked as peer declarations only. They are never
+admitted to local filesystem access.
+
+The client uses a separate operator-managed document beneath the main host's
+admitted private inputs. Load it through `ConfigurationService` with the main
+host configuration. It does not change `config.json` or register a media location.
+Unknown or duplicate fields fail.
+
+| Field                | Meaning                                                                         |
+| -------------------- | ------------------------------------------------------------------------------- |
+| `format_version`     | `1`.                                                                            |
+| `address`            | The adapter's fixed loopback socket address with a nonzero port.                |
+| `selection`          | The exact logical selection described below.                                    |
+| `server_ca_file`     | Trust anchors for server certificate verification.                              |
+| `paired_server_file` | The exact paired server certificate and any required intermediate certificates. |
+| `certificate_file`   | The client certificate chain.                                                   |
+| `private_key_file`   | The matching client private key.                                                |
+
+The logical selection has `revision`, `provider_scope`, `media` and `private`.
+These fields must match the native adapter's frozen declaration. The native
+`provider.boundary` path is not a client field. Complete native expectations
+remain in each root record. The peer must verify them before issuing a lease.
+Known duplicate or nested roots fail before a connection opens.
+
+All TLS references are nonempty `LibraryPath` identifiers beneath the client
+document's directory. Private local-only admission and file permissions remain
+required. The limits remain 256 KiB for the document, 64 KiB for certificates
+and CA bundles, and 16 KiB for the private key.
+
+```powershell
+domus media-client-check --host D:\DomusData\config.json D:\DomusData\media-client.json
+domus media-root-check --host D:\DomusData\config.json D:\DomusData\media-client.json library
+```
+
+The first command validates without contacting the peer. The second explicitly
+opens and closes one selected root over authenticated TLS. It fails if the
+adapter is unavailable, the selection differs or the root ID is not selected.
+Neither command scans, registers a location, starts a worker or mutates media.
+Production browsing, scanning, sharing, publication and recovery still use their
+existing local paths. Their routing through this client remains incomplete.
+These checks do not establish whole-image or external-folder lifecycle acceptance.
+
 ## Build and verify
 
 From a checkout on Windows:

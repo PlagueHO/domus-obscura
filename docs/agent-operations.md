@@ -135,6 +135,18 @@ Never create or rebind missing roots, generate pairing material automatically,
 install a service, or use these commands to activate production library routing.
 See [native adapter configuration](docker.md#configure-the-native-foreground-adapter).
 
+`domus media-client-check --host <absolute-host-file> <absolute-media-client-file>`
+loads the paired read-only client through `ConfigurationService` without
+contacting the peer. Keep the document and its relative TLS inputs in admitted
+private local storage. This command does not change the main host schema.
+`domus media-root-check --host <absolute-host-file> <absolute-media-client-file>
+<root-id>` explicitly opens and closes one selected root. Missing peers, changed
+selections and unselected root IDs fail. Neither command registers a location,
+scans or activates production library routing. Native and paired clients share
+opaque session leases; cancellation or connection loss requires explicit
+recreation. Never fall back to a guest-mounted path. See
+[paired client configuration](docker.md#configure-the-paired-read-only-client).
+
 `domus storage-root-inspect <absolute-provider-boundary> <provider-scope>
 <root-id> <binding-revision> <role> <library-relative-path>` prints a complete
 candidate root record without writing files or approving access. The directory

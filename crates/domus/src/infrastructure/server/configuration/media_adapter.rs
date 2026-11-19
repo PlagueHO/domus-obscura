@@ -1,6 +1,8 @@
 use super::{ConfigurationService, FilePermissions, LibraryDirectory, valid_reference};
 use crate::domain::LibraryPath;
-use crate::infrastructure::filesystem::media_adapter::{PreparedAdapter, Selection};
+use crate::infrastructure::filesystem::media_adapter::{
+    Client, MediaClient, MediaSelection, PreparedAdapter, Selection,
+};
 use crate::{Error, Result};
 use serde::Deserialize;
 use std::fs::File;
@@ -25,6 +27,18 @@ struct Configuration {
     paired_client_file: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientConfiguration {
+    format_version: u32,
+    address: SocketAddr,
+    selection: MediaSelection,
+    server_ca_file: String,
+    paired_server_file: String,
+    certificate_file: String,
+    private_key_file: String,
+}
+
 /// A frozen, read-only media export prepared through ConfigurationService.
 /// Preparation retains the selected native roots and private input handles.
 /// It does not open SQLite, bind a listener, register a service or save JSON.
@@ -34,6 +48,49 @@ pub struct PreparedMediaAdapter {
 }
 
 impl ConfigurationService {
+    /// Prepare a paired media-only client from an admitted local input.
+    /// This does not connect to its peer or admit foreign identities to local
+    /// storage. Production root registration and topology remain separate.
+    pub fn prepare_media_client(&self, path: &Path) -> Result<MediaClient> {
+        let bytes = self.read_input(path, MAX_CONFIGURATION, true)?;
+        let configuration: ClientConfiguration = serde_json::from_slice(&bytes).map_err(|_| {
+            Error::InvalidInput("saved media client configuration JSON is invalid".into())
+        })?;
+        if configuration.format_version != 1
+            || !configuration.address.ip().is_loopback()
+            || configuration.address.port() == 0
+        {
+            return Err(Error::InvalidInput(
+                "media client configuration requires version 1 and a fixed loopback port".into(),
+            ));
+        }
+        configuration.selection.validate()?;
+        let parent = path.parent().ok_or(Error::InvalidInput(
+            "media client configuration parent is missing".into(),
+        ))?;
+        let read = |reference: &str, maximum| {
+            let relative = LibraryPath::parse(reference)?;
+            if reference.is_empty() || reference.len() > 1024 {
+                return Err(Error::InvalidInput(
+                    "media client TLS reference is invalid".into(),
+                ));
+            }
+            let mut path = parent.to_path_buf();
+            for component in relative.as_str().split('/') {
+                path.push(component);
+            }
+            self.read_input(&path, maximum, true)
+        };
+        let ca = read(&configuration.server_ca_file, MAX_TLS_INPUT)?;
+        let peer = read(&configuration.paired_server_file, MAX_TLS_INPUT)?;
+        let certificate = read(&configuration.certificate_file, MAX_TLS_INPUT)?;
+        let key = read(&configuration.private_key_file, MAX_PRIVATE_KEY)?;
+        MediaClient::remote(
+            configuration.selection,
+            Client::new(configuration.address, &ca, &peer, &certificate, &key)?,
+        )
+    }
+
     /// Load the separate operator-managed native adapter document. It must
     /// reside directly in its selected private root. TLS references are
     /// library-relative identifiers beneath that root, not native paths.

@@ -18,6 +18,8 @@ use std::time::UNIX_EPOCH;
 
 mod transport;
 pub use transport::{Client, PreparedAdapter};
+mod client;
+pub use client::{MediaClient, MediaDirectory, MediaFile, MediaNode, MediaPage};
 #[cfg(test)]
 mod tests;
 
@@ -42,6 +44,43 @@ pub struct Selection {
 
 impl Selection {
     pub(crate) fn validate(&self) -> Result<()> {
+        self.logical().validate()?;
+        for root in self.media.iter().chain(std::iter::once(&self.private)) {
+            root.expected
+                .validate(&LibraryPath::parse(&root.relative)?)?;
+        }
+        Ok(())
+    }
+
+    /// Frozen peer-visible meaning. Native path locators never cross the wire.
+    pub fn logical(&self) -> MediaSelection {
+        MediaSelection {
+            revision: self.revision,
+            provider_scope: self.provider.scope.clone(),
+            media: self.media.clone(),
+            private: self.private.clone(),
+        }
+    }
+
+    /// Stable logical meaning excludes the host-specific boundary locator.
+    pub fn digest(&self) -> Result<String> {
+        self.logical().digest()
+    }
+}
+
+/// A remote media declaration is not authority for local filesystem access.
+/// The paired native peer must verify its full chain before issuing a lease.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaSelection {
+    pub revision: u64,
+    pub provider_scope: String,
+    pub media: Vec<StorageRoot>,
+    pub private: StorageRoot,
+}
+
+impl MediaSelection {
+    pub(crate) fn validate(&self) -> Result<()> {
         let name = |value: &str| {
             !value.is_empty()
                 && value.len() <= 128
@@ -49,29 +88,60 @@ impl Selection {
                 && !value.chars().any(char::is_control)
         };
         if self.revision == 0
-            || !name(&self.provider.scope)
+            || !name(&self.provider_scope)
             || self.media.is_empty()
             || self.media.len() > MAX_ROOTS
             || self.private.role != StorageRole::Application
-            || self.provider.boundary.components().count() > 64
         {
             return Err(Error::InvalidInput("invalid native media selection".into()));
         }
+        let mut ids = BTreeSet::new();
         for root in self.media.iter().chain(std::iter::once(&self.private)) {
             let relative = LibraryPath::parse(&root.relative)?;
             if !name(&root.root_id)
                 || root.binding_revision == 0
-                || root.provider_scope != self.provider.scope
+                || root.provider_scope != self.provider_scope
                 || root.expected.components.len() > MAX_DEPTH
+                || !ids.insert(&root.root_id)
+                || root.expected.profile != self.private.expected.profile
+                || root.expected.components.first() != self.private.expected.components.first()
             {
                 return Err(Error::InvalidInput("invalid native media root".into()));
             }
-            root.expected.validate(&relative)?;
+            root.expected.validate_record(&relative)?;
+        }
+        if self
+            .media
+            .iter()
+            .any(|root| root.role != StorageRole::Media)
+        {
+            return Err(Error::InvalidInput(
+                "only media roots can be exported".into(),
+            ));
+        }
+        let roots = self
+            .media
+            .iter()
+            .chain(std::iter::once(&self.private))
+            .collect::<Vec<_>>();
+        for (index, root) in roots.iter().enumerate() {
+            for other in roots.iter().skip(index + 1) {
+                let chain = &root.expected.components;
+                let other = &other.expected.components;
+                if chain.starts_with(other)
+                    || other.starts_with(chain)
+                    || chain.last() == other.last()
+                {
+                    return Err(Error::Conflict(
+                        "selected native media roots overlap".into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
 
-    /// Stable logical meaning excludes the host-specific boundary locator.
+    /// Uses the same digest as the native declaration, without its locator.
     pub fn digest(&self) -> Result<String> {
         let mut media = self.media.clone();
         media.sort_by(|left, right| left.root_id.cmp(&right.root_id));
@@ -79,7 +149,7 @@ impl Selection {
         hash.update(b"domus-native-media-selection-v1\0");
         hash.update(serde_json::to_vec(&(
             self.revision,
-            &self.provider.scope,
+            &self.provider_scope,
             media,
             &self.private,
         ))?);
@@ -178,7 +248,9 @@ struct NativeAdapter {
 impl NativeAdapter {
     fn new(selection: Selection, protected_files: Vec<File>) -> Result<Self> {
         selection.validate()?;
-        if protected_files.len() > MAX_ROOTS {
+        if protected_files.len() > MAX_ROOTS
+            || selection.provider.boundary.components().count() > 64
+        {
             return Err(Error::InvalidInput("invalid native media selection".into()));
         }
         let open = |root: &StorageRoot| -> Result<LibraryDirectory> {

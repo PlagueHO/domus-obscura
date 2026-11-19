@@ -1,5 +1,5 @@
 use super::super::tests::Fixture;
-use super::super::{MAX_READ, Reference};
+use super::super::{MAX_READ, MediaClient, MediaNode, Reference};
 use super::*;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -110,6 +110,307 @@ fn reference(response: Response) -> Result<Reference> {
         Response::Opened { reference, .. } => Ok(reference),
         _ => Err(Error::Internal("expected a TLS media reference")),
     }
+}
+
+async fn media_client_file(
+    client: &mut MediaClient,
+    root: &super::super::MediaDirectory,
+) -> TestResult<super::super::MediaFile> {
+    let page = client.page(root, 64).await?;
+    assert!(page.complete);
+    assert_eq!(page.entries.len(), 1);
+    let MediaNode::Directory(album) = client.open_child(root, &page.entries[0]).await? else {
+        return Err("expected media album directory".into());
+    };
+    let page = client.page(&album, 64).await?;
+    assert!(page.complete);
+    let MediaNode::File(file) = client.open_child(&album, &page.entries[0]).await? else {
+        return Err("expected media file".into());
+    };
+    Ok(file)
+}
+
+#[tokio::test]
+async fn media_adapter_typed_client_keeps_native_and_tls_read_semantics_equal() -> TestResult {
+    let fixture = Fixture::new()?;
+    let bytes = (0..MAX_READ + 3)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    std::fs::write(
+        fixture
+            .selection
+            .provider
+            .boundary
+            .join("parent")
+            .join("media")
+            .join("album")
+            .join("track.flac"),
+        &bytes,
+    )?;
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let native = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let remote = MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    for mut client in [native, remote] {
+        assert!(client.open_root("unselected").await.is_err());
+        let root = client.open_root("library").await?;
+        let file = media_client_file(&mut client, &root).await?;
+        assert_eq!(file.observation().length, bytes.len() as u64);
+        assert_eq!(client.read(&file, 0, MAX_READ).await?, bytes[..MAX_READ]);
+        assert_eq!(
+            client.read(&file, MAX_READ as u64, MAX_READ).await?,
+            bytes[MAX_READ..]
+        );
+        assert!(client.read(&file, bytes.len() as u64, 1).await?.is_empty());
+        assert!(client.read(&file, 0, MAX_READ + 1).await.is_err());
+        assert!(client.read(&file, bytes.len() as u64 + 1, 1).await.is_err());
+        assert!(client.page(&root, 64).await.is_err());
+        client.close_directory(root).await?;
+        assert!(matches!(
+            client.read(&file, 0, 1).await,
+            Err(Error::Conflict(_))
+        ));
+        let root = client.open_root("library").await?;
+        client.close_directory(root).await?;
+    }
+    running.stop().await
+}
+
+#[tokio::test]
+async fn media_adapter_typed_client_rejects_foreign_leases_and_bounds_open_roots() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut client = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let mut other = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let foreign = other.open_root("library").await?;
+    assert!(matches!(
+        client.page(&foreign, 1).await,
+        Err(Error::Conflict(_))
+    ));
+    other.close_directory(foreign).await?;
+    let mut roots = Vec::new();
+    for _ in 0..super::super::MAX_LIVE {
+        roots.push(client.open_root("library").await?);
+    }
+    assert!(matches!(
+        client.open_root("library").await,
+        Err(Error::Busy(_))
+    ));
+    for root in roots {
+        client.close_directory(root).await?;
+    }
+    let root = client.open_root("library").await?;
+    client.close_directory(root).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn media_adapter_typed_client_reports_loss_without_a_local_fallback() -> TestResult {
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let mut client =
+        MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    let root = client.open_root("library").await?;
+    running.stop().await?;
+    assert!(matches!(client.page(&root, 1).await, Err(Error::Remote(_))));
+    assert!(matches!(
+        client.open_root("library").await,
+        Err(Error::Remote(_))
+    ));
+    assert!(fixture.selection.provider.boundary.is_dir());
+    Ok(())
+}
+
+#[tokio::test]
+async fn media_adapter_typed_client_rejects_short_success_and_false_eof() -> TestResult {
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    for false_eof in [false, true] {
+        let adapter = PreparedAdapter::new(
+            fixture.selection.clone(),
+            Vec::new(),
+            keys.server.as_bytes(),
+            keys.server_key.as_bytes(),
+            keys.ca.as_bytes(),
+            keys.client.as_bytes(),
+        )?;
+        let root_identity = fixture.selection.media[0]
+            .expected
+            .components
+            .last()
+            .ok_or("missing fixture identity")?
+            .clone();
+        let router = Router::new().route(
+            "/v1/media",
+            post(move |Json(request): Json<Request>| {
+                let identity = root_identity.clone();
+                async move {
+                    let reference = |id| Reference {
+                        connection: "a".repeat(64),
+                        id,
+                    };
+                    let response = match request {
+                        Request::OpenRoot { .. } => Response::Opened {
+                            reference: reference(1),
+                            observed: super::super::Observation {
+                                identity: identity.clone(),
+                                kind: super::super::Kind::Directory,
+                                length: 0,
+                                modified_seconds: 1,
+                                modified_nanoseconds: 0,
+                            },
+                        },
+                        Request::Page { .. } => Response::Page {
+                            entries: vec![super::super::ListedEntry {
+                                name: "generated.flac".into(),
+                                observed: super::super::Observation {
+                                    identity,
+                                    kind: super::super::Kind::File,
+                                    length: 3,
+                                    modified_seconds: 1,
+                                    modified_nanoseconds: 0,
+                                },
+                            }],
+                            complete: true,
+                        },
+                        Request::OpenChild { expected, .. } => Response::Opened {
+                            reference: reference(2),
+                            observed: expected,
+                        },
+                        Request::Read { .. } => Response::Read {
+                            bytes: if false_eof { vec![1, 2, 3] } else { vec![1] },
+                            complete: !false_eof,
+                        },
+                        _ => Response::Closed,
+                    };
+                    Json(response)
+                }
+            }),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let handle = axum_server::Handle::new();
+        let serving_handle = handle.clone();
+        let task = tokio::spawn(server::serve_listener(
+            listener,
+            adapter.tls,
+            router,
+            serving_handle,
+        ));
+        let running = Running {
+            address,
+            handle,
+            task,
+        };
+        let mut client = MediaClient::remote(fixture.selection.logical(), keys.client(address)?)?;
+        let root = client.open_root("library").await?;
+        let page = client.page(&root, 1).await?;
+        let MediaNode::File(file) = client.open_child(&root, &page.entries[0]).await? else {
+            return Err("expected mock peer file".into());
+        };
+        assert!(matches!(
+            client.read(&file, 0, 3).await,
+            Err(Error::Remote(_))
+        ));
+        assert!(matches!(
+            client.open_root("library").await,
+            Err(Error::Remote(_))
+        ));
+        drop(client);
+        running.stop().await?;
+    }
+    Ok(())
+}
+
+fn configured_client_fixture(
+    fixture: &Fixture,
+    keys: &Certificates,
+    address: SocketAddr,
+) -> TestResult<(std::path::PathBuf, std::path::PathBuf, serde_json::Value)> {
+    use crate::infrastructure::server::PreparedServer;
+    let application = fixture.directory.path().join("client-application");
+    let host = PreparedServer::initialize_local_at(&application)?;
+    for (name, value) in [
+        ("ca.pem", &keys.ca),
+        ("server.pem", &keys.server),
+        ("client.pem", &keys.client),
+        ("key.pem", &keys.client_key),
+    ] {
+        std::fs::write(application.join(name), value)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                application.join(name),
+                std::fs::Permissions::from_mode(0o600),
+            )?;
+        }
+    }
+    let original = serde_json::json!({
+        "format_version": 1,
+        "address": address,
+        "selection": fixture.selection.logical(),
+        "server_ca_file": "ca.pem",
+        "paired_server_file": "server.pem",
+        "certificate_file": "client.pem",
+        "private_key_file": "key.pem",
+    });
+    let path = application.join("media-client.json");
+    std::fs::write(&path, serde_json::to_vec(&original)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok((host, path, original))
+}
+
+#[tokio::test]
+async fn media_adapter_client_configuration_is_private_passive_and_peer_bound() -> TestResult {
+    use crate::infrastructure::server::configuration::ConfigurationService;
+
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let reserved = TcpListener::bind(("127.0.0.1", 0))?;
+    let address = reserved.local_addr()?;
+    let (host, path, original) = configured_client_fixture(&fixture, &keys, address)?;
+    let source = ConfigurationService::open(&host)?;
+    let mut client = source.prepare_media_client(&path)?;
+    for (field, invalid) in [
+        ("address", serde_json::json!("192.0.2.1:8088")),
+        ("address", serde_json::json!("127.0.0.1:0")),
+        ("private_key_file", serde_json::json!("../key.pem")),
+        ("private_key_file", serde_json::json!("")),
+        ("unknown", serde_json::json!(true)),
+    ] {
+        let mut document = original.clone();
+        document[field] = invalid;
+        std::fs::write(&path, serde_json::to_vec(&document)?)?;
+        assert!(source.prepare_media_client(&path).is_err());
+    }
+    drop(reserved);
+    let adapter = PreparedAdapter::new(
+        fixture.selection.clone(),
+        Vec::new(),
+        keys.server.as_bytes(),
+        keys.server_key.as_bytes(),
+        keys.ca.as_bytes(),
+        keys.client.as_bytes(),
+    )?;
+    let listener = TcpListener::bind(address)?;
+    let handle = axum_server::Handle::new();
+    let task = tokio::spawn(adapter.serve(listener, handle.clone()));
+    let running = Running {
+        address,
+        handle,
+        task,
+    };
+    let root = client.open_root("library").await?;
+    let file = media_client_file(&mut client, &root).await?;
+    assert_eq!(client.read(&file, 0, 64).await?, b"generated media bytes");
+    client.close_directory(root).await?;
+    drop(client);
+    running.stop().await
 }
 
 fn configured_fixture(
@@ -681,11 +982,25 @@ async fn media_adapter_cli_foreground_probe() -> TestResult {
         .map_err(Into::into)
     }
 
+    async fn checked(command: &mut Command) -> TestResult<ExitStatus> {
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let result = wait(&mut child).await;
+        if result.is_err() {
+            child.kill()?;
+            child.wait()?;
+        }
+        result
+    }
+
     let fixture = Fixture::new()?;
     let keys = Certificates::new()?;
     let reserved = TcpListener::bind(("127.0.0.1", 0))?;
     let address = reserved.local_addr()?;
     let (path, _) = configured_fixture(&fixture, &keys, address)?;
+    let (host, client_path, _) = configured_client_fixture(&fixture, &keys, address)?;
     let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -693,22 +1008,26 @@ async fn media_adapter_cli_foreground_probe() -> TestResult {
         .join("target")
         .join("debug")
         .join(format!("domus{}", std::env::consts::EXE_SUFFIX));
-    let mut check = Command::new(&binary)
-        .arg("media-adapter-check")
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let checked = wait(&mut check).await;
-    if checked.is_err() {
-        check.kill()?;
-        check.wait()?;
-    }
-    if !checked?.success() {
+    if !checked(Command::new(&binary).arg("media-adapter-check").arg(&path))
+        .await?
+        .success()
+    {
         return Err("foreground CLI configuration check failed".into());
     }
+    if !checked(
+        Command::new(&binary)
+            .arg("media-client-check")
+            .arg("--host")
+            .arg(&host)
+            .arg(&client_path),
+    )
+    .await?
+    .success()
+    {
+        return Err("passive client CLI configuration check failed".into());
+    }
     drop(reserved);
-    let mut child = Command::new(binary)
+    let mut child = Command::new(&binary)
         .arg("media-adapter")
         .arg(path)
         .stdout(Stdio::null())
@@ -729,6 +1048,18 @@ async fn media_adapter_cli_foreground_probe() -> TestResult {
         .await??;
         let mut client = keys.client(address)?;
         reference(client.execute(&fixture.request()?).await?)?;
+        for (root_id, success) in [("library", true), ("unselected", false)] {
+            let status = checked(
+                Command::new(&binary)
+                    .arg("media-root-check")
+                    .arg("--host")
+                    .arg(&host)
+                    .arg(&client_path)
+                    .arg(root_id),
+            )
+            .await?;
+            assert_eq!(status.success(), success);
+        }
         Ok::<_, Box<dyn std::error::Error>>(())
     }
     .await;

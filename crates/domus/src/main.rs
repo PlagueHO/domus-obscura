@@ -19,6 +19,8 @@ const USAGE: &str = "Usage:
   domus configuration-check <absolute-configuration-file>
   domus media-adapter-check <absolute-adapter-configuration-file>
   domus media-adapter <absolute-adapter-configuration-file>
+  domus media-client-check --host <absolute-host-configuration-file> <absolute-media-client-file>
+  domus media-root-check --host <absolute-host-configuration-file> <absolute-media-client-file> <root-id>
   domus certificate-status <absolute-configuration-file>
   domus certificate-bootstrap <absolute-configuration-file>
   domus certificate-recover <absolute-configuration-file> <resume|pending|bindings|cleanup|cleanup-owned|archive|generation|restart>
@@ -94,6 +96,31 @@ fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     match args {
+        [command, flag, host, configuration]
+            if command == "media-client-check" && flag == "--host" =>
+        {
+            let source = domus::infrastructure::server::configuration::ConfigurationService::open(
+                Path::new(host),
+            )?;
+            source.prepare_media_client(Path::new(configuration))?;
+            println!("Media client configuration is valid; no peer connection opened.");
+        }
+        [command, flag, host, configuration, root]
+            if command == "media-root-check" && flag == "--host" =>
+        {
+            let source = domus::infrastructure::server::configuration::ConfigurationService::open(
+                Path::new(host),
+            )?;
+            let mut client = source.prepare_media_client(Path::new(configuration))?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(async {
+                    let directory = client.open_root(root).await?;
+                    client.close_directory(directory).await
+                })?;
+            println!("Selected media root is available; no scan or registration performed.");
+        }
         [command, configuration]
             if matches!(command.as_str(), "media-adapter" | "media-adapter-check") =>
         {
