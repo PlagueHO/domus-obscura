@@ -171,8 +171,16 @@ metadata reads. Keep network I/O out of persistence transactions. Transport,
 authority and claim failures must not become file-only tag errors or successful
 coverage. Failed paired enumeration, including an unsafe entry, remains
 incomplete. Never replace it with an empty page or a native guest-path open.
-JPEG reads, sharing and mutations still reject paired roots through their
-native-only accessors. Do not report them as supported or bypass those refusals.
+Indexed JPEG input and read-only sharing use retained native or paired objects.
+Keep the exact indexed JPEG evidence and compressed-input limit before strict
+image processing. Sharing persists the complete logical root and directory
+identity chain. Reopens must match that chain without adopting replacements.
+Require an exact single hard link and recheck retained file evidence. Keep
+publication receipts, content hashes and visibility guards active through upload
+completion, including resume. Network I/O stays on blocking use-case threads and
+outside SQLite transactions. Both adapter ends require the hard-link observation
+field; do not add a compatibility default. Mutations still reject paired roots
+through native-only accessors. Do not bypass those refusals.
 See [selected paired roots](docker.md#select-and-register-a-paired-library-root).
 
 `domus storage-root-inspect <absolute-provider-boundary> <provider-scope>

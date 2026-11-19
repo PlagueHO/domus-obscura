@@ -16,6 +16,54 @@ pub(crate) struct BlockingMedia {
 }
 
 impl BlockingMedia {
+    pub(crate) fn open_file(
+        mut self,
+        path: &LibraryPath,
+        expected_parent: &[String],
+    ) -> Result<super::BlockingFile> {
+        let chain = self.open_directory(&LibraryPath::parse(path.parent())?, &mut || Ok(()))?;
+        if Self::identities(&chain) != expected_parent {
+            return Err(Error::Conflict("paired media parent changed".into()));
+        }
+        let parent = chain
+            .last()
+            .ok_or(Error::Internal("media ancestry is empty"))?;
+        let name = path
+            .as_str()
+            .rsplit('/')
+            .next()
+            .ok_or(Error::Internal("media name is missing"))?;
+        let entry = loop {
+            let page = self.page(parent)?;
+            if let Some(entry) = page.entries.into_iter().find(|entry| entry.name == name) {
+                break entry;
+            }
+            if page.complete {
+                return Err(Error::Conflict("paired media file is missing".into()));
+            }
+        };
+        let file = match self
+            .runtime
+            .block_on(self.client.open_child(parent, &entry))?
+        {
+            MediaNode::File(file) => file,
+            _ => return Err(Error::Conflict("paired media file changed type".into())),
+        };
+        Ok(super::BlockingFile {
+            media: self,
+            file,
+            _chain: chain,
+            position: 0,
+        })
+    }
+
+    pub(crate) fn identities(chain: &[MediaDirectory]) -> Vec<String> {
+        chain
+            .iter()
+            .map(|directory| directory.observation().identity.clone())
+            .collect()
+    }
+
     pub(crate) fn new(client: MediaClient, root_id: String) -> Result<Self> {
         Ok(Self {
             runtime: tokio::runtime::Builder::new_current_thread()
@@ -25,7 +73,61 @@ impl BlockingMedia {
             root_id,
         })
     }
+}
 
+/// Owns the client and every parent through the last read. A new clone of the
+/// public reader shares this retained object, never a checked-path reopen.
+pub(crate) struct BlockingFile {
+    media: BlockingMedia,
+    file: MediaFile,
+    _chain: Vec<MediaDirectory>,
+    position: u64,
+}
+
+impl BlockingFile {
+    pub(crate) fn evidence(&mut self) -> Result<super::Observation> {
+        self.media
+            .runtime
+            .block_on(self.media.client.read(&self.file, 0, 1))?;
+        Ok(self.file.observation().clone())
+    }
+}
+
+impl Read for BlockingFile {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let bytes = self
+            .media
+            .runtime
+            .block_on(self.media.client.read(
+                &self.file,
+                self.position.min(self.file.observation().length),
+                output.len().min(MAX_READ),
+            ))
+            .map_err(std::io::Error::other)?;
+        output[..bytes.len()].copy_from_slice(&bytes);
+        self.position += bytes.len() as u64;
+        Ok(bytes.len())
+    }
+}
+
+impl Seek for BlockingFile {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.position = match position {
+            SeekFrom::Start(value) => Some(value),
+            SeekFrom::Current(value) => self.position.checked_add_signed(value),
+            SeekFrom::End(value) => self.file.observation().length.checked_add_signed(value),
+        }
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid media seek")
+        })?;
+        Ok(self.position)
+    }
+}
+
+impl BlockingMedia {
     /// Keep every ancestor lease until the caller closes the first directory.
     /// Each descent uses an exact current parent-relative listed observation.
     pub(crate) fn open_directory(

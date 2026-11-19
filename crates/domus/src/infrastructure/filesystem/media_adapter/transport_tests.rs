@@ -258,6 +258,7 @@ async fn media_adapter_typed_client_rejects_short_success_and_false_eof() -> Tes
                                 length: 0,
                                 modified_seconds: 1,
                                 modified_nanoseconds: 0,
+                                links: 1,
                             },
                         },
                         Request::Page { .. } => Response::Page {
@@ -269,6 +270,7 @@ async fn media_adapter_typed_client_rejects_short_success_and_false_eof() -> Tes
                                     length: 3,
                                     modified_seconds: 1,
                                     modified_nanoseconds: 0,
+                                    links: 1,
                                 },
                             }],
                             complete: true,
@@ -409,6 +411,415 @@ fn select_paired_fixture(
     document["system_settings_read_only"] = serde_json::json!(false);
     std::fs::write(host, serde_json::to_vec(&document)?)?;
     Ok(document)
+}
+
+#[tokio::test]
+async fn media_adapter_paired_jpeg_requires_exact_index_evidence_and_byte_limit() -> TestResult {
+    use crate::application::{library_jpeg_input, scan_location};
+    use crate::domain::{LibraryPath, Page};
+    use crate::infrastructure::server::configuration::ConfigurationService;
+    use crate::infrastructure::store::StoreOpenMode;
+    let fixture = Fixture::new()?;
+    let album = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media")
+        .join("album");
+    let jpeg = [
+        vec![0xff, 0xd8],
+        vec![73; MAX_READ * 2 + 11],
+        vec![0xff, 0xd9],
+    ]
+    .concat();
+    std::fs::write(album.join("cover.jpg"), &jpeg)?;
+    let oversized = std::fs::File::create(album.join("oversized.jpg"))?;
+    oversized.set_len(8 * 1024 * 1024 + 1)?;
+    drop(oversized);
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let (host, path, _) = configured_client_fixture(&fixture, &keys, running.address)?;
+    select_paired_fixture(&host, &path, &fixture.selection.logical())?;
+    let source = ConfigurationService::open(&host)?;
+    let album_again = album.clone();
+    let (database, location, entry) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut store = source.open_store(StoreOpenMode::Current)?;
+        let location = store.add_paired_location("library", "main")?;
+        scan_location(&mut store, location)?;
+        let entries = store.browse(location, &LibraryPath::parse("album")?, Page::new(0, 20)?)?;
+        let id = |name| {
+            entries
+                .iter()
+                .find(|entry| entry.relative_path == name)
+                .map(|entry| entry.id)
+                .ok_or(Error::Internal("missing JPEG fixture"))
+        };
+        let entry = id("album/cover.jpg")?;
+        assert_eq!(library_jpeg_input(&store, location, entry)?, jpeg);
+        assert!(library_jpeg_input(&store, location, id("album/track.flac")?).is_err());
+        assert!(matches!(
+            library_jpeg_input(&store, location, id("album/oversized.jpg")?),
+            Err(Error::InvalidInput(_))
+        ));
+        std::fs::write(album_again.join("cover.jpg"), b"changed generated JPEG")?;
+        assert!(library_jpeg_input(&store, location, entry).is_err());
+        scan_location(&mut store, location)?;
+        assert!(library_jpeg_input(&store, location, entry).is_err());
+        Ok((store.source(), location, entry))
+    })
+    .await??;
+    running.stop().await?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let store = database.open(StoreOpenMode::ReadCurrent)?;
+        assert!(library_jpeg_input(&store, location, entry).is_err());
+        Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn media_adapter_paired_sharing_binds_pages_uploads_and_fences_changed_evidence() -> TestResult
+{
+    use crate::application::sharing::{
+        BindShareFolder, InspectShareFolder, bind_share_folder, inspect_share_folder,
+    };
+    use crate::domain::sharing::{ShareAccess, SharePolicy, ShareRoot};
+    use crate::infrastructure::{
+        server::configuration::ConfigurationService,
+        shares::{ShareCatalog, publication_visibility_write},
+        store::StoreOpenMode,
+    };
+    use std::io::{Read, Write};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let fixture = Fixture::new()?;
+    let album = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media")
+        .join("album");
+    let bytes = (0..200_000)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    std::fs::write(album.join("track.flac"), &bytes)?;
+    for index in 0..65 {
+        std::fs::write(
+            album.join(format!("track-{index:03}.mp3")),
+            b"generated encoded audio",
+        )?;
+    }
+    std::fs::write(album.join("secret.json"), b"excluded")?;
+    std::fs::create_dir(album.join(".domus-retained-generated"))?;
+    std::fs::write(
+        album.join(".domus-retained-generated").join("secret.mp3"),
+        b"excluded",
+    )?;
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let (host, path, _) = configured_client_fixture(&fixture, &keys, running.address)?;
+    select_paired_fixture(&host, &path, &fixture.selection.logical())?;
+    let source = ConfigurationService::open(&host)?;
+    let (database, catalog, read) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let store = source.open_store(StoreOpenMode::Current)?;
+        let location = store.add_paired_location("library", "main")?;
+        let inspected = inspect_share_folder(
+            &store,
+            &InspectShareFolder {
+                location_id: location,
+                relative_path: "album".into(),
+            },
+        )?;
+        assert!(!inspected.bound);
+        assert!(
+            bind_share_folder(
+                &store,
+                &BindShareFolder {
+                    location_id: location,
+                    relative_path: "album".into(),
+                    expected_identity: "stale".into()
+                }
+            )
+            .is_err()
+        );
+        let bound = bind_share_folder(
+            &store,
+            &BindShareFolder {
+                location_id: location,
+                relative_path: "album".into(),
+                expected_identity: inspected.native_identity,
+            },
+        )?;
+        assert!(bound.bound);
+        let policy = SharePolicy {
+            access: ShareAccess::All,
+            roots: vec![ShareRoot {
+                binding_id: bound
+                    .binding_id
+                    .ok_or(Error::Internal("missing share binding"))?,
+                alias: "Music".into(),
+            }],
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let catalog = ShareCatalog::build(&store.source(), &policy, stop.clone())?;
+        assert_eq!(catalog.counts()?, (1, 66));
+        let first = catalog.page(0, 64, None, None)?;
+        let rest = catalog.page(
+            first.last().ok_or(Error::Internal("missing page"))?.id,
+            64,
+            None,
+            None,
+        )?;
+        assert_eq!(first.len() + rest.len(), 66);
+        assert_eq!(catalog.directory_page("", 20, None)?[0].wire_path, "Music");
+        assert_eq!(catalog.directory_files("Music", 0, 200)?.len(), 66);
+        let shared = catalog.file("Music\\track.flac")?;
+        let read = catalog.open(&shared)?;
+        assert!(publication_visibility_write(&store).is_err());
+        for offset in [0u64, 17, 200_000] {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+            let mut socket = std::net::TcpStream::connect(listener.local_addr()?)?;
+            let (mut receiver, _) = listener.accept()?;
+            receiver.set_read_timeout(Some(Duration::from_secs(30)))?;
+            let expected = bytes.clone();
+            let received = std::thread::spawn(move || -> std::io::Result<()> {
+                let mut token = [0; 4];
+                receiver.read_exact(&mut token)?;
+                assert_eq!(u32::from_le_bytes(token), 71);
+                receiver.write_all(&offset.to_le_bytes())?;
+                let mut actual = vec![0; expected.len() - offset as usize];
+                receiver.read_exact(&mut actual)?;
+                assert_eq!(actual, expected[offset as usize..]);
+                Ok(())
+            });
+            let mut handle = read.file.try_clone()?;
+            crate::infrastructure::soulseek::sharing::transmit(
+                &mut handle,
+                &mut socket,
+                71,
+                shared.bytes,
+                &policy.limits,
+                || read.check(),
+            )?;
+            received
+                .join()
+                .map_err(|_| Error::Internal("generated receiver failed"))??;
+        }
+        read.check()?;
+        assert_eq!(std::fs::read(album.join("track.flac"))?, bytes);
+        stop.store(true, Ordering::Release);
+        assert!(matches!(read.check(), Err(Error::WorkerStopping)));
+        stop.store(false, Ordering::Release);
+        std::fs::write(album.join("track.flac"), b"changed generated media")?;
+        assert!(read.check().is_err());
+        assert!(catalog.page(0, 200, None, None).is_err());
+        assert!(catalog.open(&shared).is_err());
+        Ok((store.source(), catalog, read))
+    })
+    .await??;
+    running.stop().await?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        assert!(read.check().is_err());
+        assert!(catalog.check().is_err());
+        drop(read);
+        drop(catalog);
+        let store = database.open(StoreOpenMode::ReadCurrent)?;
+        publication_visibility_write(&store)?;
+        Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn media_adapter_paired_sharing_keeps_publication_receipts_and_hash_checks() -> TestResult {
+    use crate::application::sharing::{
+        BindShareFolder, InspectShareFolder, bind_share_folder, inspect_share_folder,
+    };
+    use crate::domain::{
+        LibraryPath,
+        sharing::{SharePolicy, ShareRoot},
+    };
+    use crate::infrastructure::{
+        server::configuration::ConfigurationService,
+        shares::{ShareCatalog, publication_visibility_write},
+        store::StoreOpenMode,
+    };
+    use sha2::{Digest, Sha256};
+    use std::sync::{Arc, atomic::AtomicBool};
+    let fixture = Fixture::new()?;
+    let file = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media")
+        .join("album")
+        .join("track.flac");
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let (host, path, _) = configured_client_fixture(&fixture, &keys, running.address)?;
+    select_paired_fixture(&host, &path, &fixture.selection.logical())?;
+    let source = ConfigurationService::open(&host)?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let store = source.open_store(StoreOpenMode::Current)?;
+        let location = store.add_paired_location("library", "main")?;
+        let inspected = inspect_share_folder(&store, &InspectShareFolder { location_id: location, relative_path: "album".into() })?;
+        let bound = bind_share_folder(&store, &BindShareFolder { location_id: location, relative_path: "album".into(), expected_identity: inspected.native_identity })?;
+        let policy = SharePolicy { roots: vec![ShareRoot { binding_id: bound.binding_id.ok_or(Error::Internal("missing binding"))?, alias: "Music".into() }], ..Default::default() };
+        let record = store.location(location)?;
+        let directory = store.read_registered_directory(&record.root, &LibraryPath::parse("album")?)?;
+        for _ in 0..2 {
+            assert_eq!(directory.entries()?.collect::<Result<Vec<_>>>()?.len(), 1);
+        }
+        let album_identity = directory.native_identity()?;
+        let root_identity = store.root_binding_identity(&record.root, "media")?;
+        drop(directory);
+        let bytes = std::fs::read(&file)?;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let visibility = publication_visibility_write(&store)?;
+        // Isolate read-side receipt enforcement. Paired publication is not enabled.
+        let connection = store.sharing_connection();
+        connection.pragma_update(None, "foreign_keys", false)?;
+        connection.execute(
+            "INSERT INTO publication_destinations(job_id,plan_version,run_id,location_id,root,root_identity,kind,relative_folder,folder_key,manifest_sha256)
+             VALUES(1,1,1,?1,?2,?3,'main','album','ALBUM',?4)",
+            rusqlite::params![location, record.root, root_identity, digest],
+        )?;
+        let destination = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO publication_files(destination_id,ordinal,name,bytes,sha256) VALUES(?1,0,'track.flac',?2,?3)",
+            rusqlite::params![destination, bytes.len() as i64, digest],
+        )?;
+        connection.pragma_update(None, "foreign_keys", true)?;
+        drop(visibility);
+        let catalog = || ShareCatalog::build(&store.source(), &policy, Arc::new(AtomicBool::new(false)));
+        assert_eq!(catalog()?.counts()?, (0, 0));
+        let visibility = publication_visibility_write(&store)?;
+        connection.execute("UPDATE publication_destinations SET album_identity=?2,verified_at=1 WHERE id=?1", rusqlite::params![destination, album_identity])?;
+        drop(visibility);
+        assert!(catalog().is_err());
+        let visibility = publication_visibility_write(&store)?;
+        connection.execute("UPDATE publication_files SET verified_at=1 WHERE destination_id=?1", [destination])?;
+        drop(visibility);
+        let current = catalog()?;
+        assert_eq!(current.counts()?, (1, 1));
+        let shared = current.file("Music\\track.flac")?;
+        let read = current.open(&shared)?;
+        read.check()?;
+        drop(read);
+        let modified = std::fs::metadata(&file)?.modified()?;
+        std::fs::write(&file, vec![b'X'; bytes.len()])?;
+        std::fs::OpenOptions::new().write(true).open(&file)?.set_modified(modified)?;
+        assert!(current.open(&shared).is_err());
+        assert!(catalog().is_err());
+        Ok(())
+    }).await??;
+    running.stop().await
+}
+
+#[tokio::test]
+async fn media_adapter_paired_sharing_rejects_hardlinks_and_immutable_folder_replacement()
+-> TestResult {
+    use crate::application::sharing::{
+        BindShareFolder, InspectShareFolder, bind_share_folder, inspect_share_folder,
+    };
+    use crate::domain::sharing::{SharePolicy, ShareRoot};
+    use crate::infrastructure::{
+        server::configuration::ConfigurationService, shares::ShareCatalog, store::StoreOpenMode,
+    };
+    use std::sync::{Arc, atomic::AtomicBool};
+    let fixture = Fixture::new()?;
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let (host, path, _) = configured_client_fixture(&fixture, &keys, running.address)?;
+    select_paired_fixture(&host, &path, &fixture.selection.logical())?;
+    let source = ConfigurationService::open(&host)?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let store = source.open_store(StoreOpenMode::Current)?;
+        let location = store.add_paired_location("library", "main")?;
+        let inspected = inspect_share_folder(
+            &store,
+            &InspectShareFolder {
+                location_id: location,
+                relative_path: "album".into(),
+            },
+        )?;
+        let request = BindShareFolder {
+            location_id: location,
+            relative_path: "album".into(),
+            expected_identity: inspected.native_identity,
+        };
+        let bound = bind_share_folder(&store, &request)?;
+        let policy = SharePolicy {
+            roots: vec![ShareRoot {
+                binding_id: bound.binding_id.ok_or(Error::Internal("missing binding"))?,
+                alias: "Music".into(),
+            }],
+            ..Default::default()
+        };
+        std::fs::hard_link(
+            media.join("album").join("track.flac"),
+            media.join("album").join("alias.flac"),
+        )?;
+        assert!(
+            ShareCatalog::build(&store.source(), &policy, Arc::new(AtomicBool::new(false)))
+                .is_err()
+        );
+        std::fs::remove_file(media.join("album").join("alias.flac"))?;
+        let catalog =
+            ShareCatalog::build(&store.source(), &policy, Arc::new(AtomicBool::new(false)))?;
+        std::fs::rename(media.join("album"), media.join("old-album"))?;
+        std::fs::create_dir(media.join("album"))?;
+        std::fs::write(
+            media.join("album").join("track.flac"),
+            b"generated media bytes",
+        )?;
+        assert!(
+            !inspect_share_folder(
+                &store,
+                &InspectShareFolder {
+                    location_id: location,
+                    relative_path: "album".into()
+                }
+            )?
+            .bound
+        );
+        assert!(bind_share_folder(&store, &request).is_err());
+        let current = inspect_share_folder(
+            &store,
+            &InspectShareFolder {
+                location_id: location,
+                relative_path: "album".into(),
+            },
+        )?;
+        assert!(
+            bind_share_folder(
+                &store,
+                &BindShareFolder {
+                    expected_identity: current.native_identity,
+                    ..request
+                }
+            )
+            .is_err()
+        );
+        assert!(catalog.check().is_err());
+        Ok(())
+    })
+    .await??;
+    running.stop().await
 }
 
 fn generated_scan_audio() -> TestResult<(Vec<u8>, Vec<u8>)> {

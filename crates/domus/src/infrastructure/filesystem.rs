@@ -10,11 +10,14 @@ use std::path::{Component, Path, PathBuf};
 mod binding;
 mod identity;
 pub mod media_adapter;
+mod read_only;
 mod selection;
 mod state;
 pub use binding::{DirectoryExpectation, DirectoryIdentityProfile, RetainedDirectory};
 pub(crate) use identity::NativeRoot;
 pub(crate) use identity::file_id as native_file_identity;
+pub use read_only::ReadFile;
+pub(crate) use read_only::{ReadDirectory, ReadSnapshot};
 pub(crate) use selection::DirectorySnapshot;
 #[cfg(test)]
 pub(crate) use selection::fixture_storage;

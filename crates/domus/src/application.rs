@@ -79,7 +79,6 @@ pub fn check_location_availability(store: &Store, location_id: i64) -> Result<()
 /// Read a saved JPEG asset by entry identity. No raw bytes are served until the
 /// caller passes them through the bounded image service.
 pub fn library_jpeg_input(store: &Store, location: i64, entry: i64) -> Result<Vec<u8>> {
-    use crate::infrastructure::{filesystem::native_file_identity, library_metadata::modified_ns};
     use std::io::Read;
     let saved = store.library_file(location, entry)?;
     let path = LibraryPath::parse(&saved.relative_path)?;
@@ -98,20 +97,19 @@ pub fn library_jpeg_input(store: &Store, location: i64, entry: i64) -> Result<Ve
         ));
     }
     let location = store.location(location)?;
-    let root = store.open_registered_root(&location.root, "media")?;
-    let parent = root.open_directory(&LibraryPath::parse(path.parent())?)?;
+    let parent =
+        store.read_registered_directory(&location.root, &LibraryPath::parse(path.parent())?)?;
     let name = path
         .as_str()
         .rsplit('/')
         .next()
         .ok_or_else(|| Error::InvalidInput("missing asset name".into()))?;
     let mut file = parent.open_file(std::ffi::OsStr::new(name))?;
-    let matches = |file: &std::fs::File| -> Result<bool> {
-        Ok(
-            Some(native_file_identity(file)?) == saved.metadata.native_identity
-                && modified_ns(file)? == saved.metadata.modified_ns
-                && i64::try_from(file.metadata()?.len()).ok() == saved.metadata.size,
-        )
+    let matches = |file: &crate::infrastructure::filesystem::ReadFile| -> Result<bool> {
+        let evidence = file.evidence()?;
+        Ok(Some(evidence.identity) == saved.metadata.native_identity
+            && Some(evidence.modified) == saved.metadata.modified_ns
+            && i64::try_from(evidence.bytes).ok() == saved.metadata.size)
     };
     if !matches(&file)? {
         return Err(Error::Conflict(

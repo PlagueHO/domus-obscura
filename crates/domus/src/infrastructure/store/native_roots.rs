@@ -177,6 +177,32 @@ fn require_saved(
 }
 
 impl Store {
+    pub(crate) fn read_registered_directory(
+        &self,
+        root: &str,
+        relative: &crate::domain::LibraryPath,
+    ) -> Result<crate::infrastructure::filesystem::ReadDirectory> {
+        use crate::infrastructure::filesystem::ReadDirectory;
+        match self.saved_root(root, "media")? {
+            SavedRoot::Paired(binding) => {
+                if !self.connection.is_autocommit() {
+                    return Err(Error::Conflict(
+                        "media network I/O cannot run inside a database transaction".into(),
+                    ));
+                }
+                ReadDirectory::paired(
+                    self.paired_media.clone().ok_or_else(conflict)?,
+                    binding,
+                    relative,
+                )
+            }
+            _ => Ok(ReadDirectory::Native(Box::new(
+                self.open_registered_root(root, "media")?
+                    .open_directory(relative)?,
+            ))),
+        }
+    }
+
     pub(super) fn require_paired_media_bindings(&self) -> Result<()> {
         // Attaching a provider must not turn passive legacy metadata reads into
         // native-root admission. Native effects retain their existing checks.

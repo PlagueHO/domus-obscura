@@ -2,7 +2,7 @@
 //! A catalog is evidence, not open authority. Every read resolves from its binding
 //! again and retains the cross-process publication lock for the protected work.
 use super::filesystem::{
-    DirectorySnapshot, LibraryDirectory, is_unsafe_cap_link, native_file_identity,
+    ReadDirectory as LibraryDirectory, ReadFile, ReadSnapshot as DirectorySnapshot,
 };
 use super::local_file::ProcessLock;
 use super::store::{Store, StoreOpenMode, StoreSource};
@@ -15,13 +15,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::UNIX_EPOCH;
 
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DEPTH: usize = 128;
@@ -134,19 +132,8 @@ struct Evidence {
     directory: String,
 }
 
-fn single_link(file: &File) -> Result<()> {
-    #[cfg(unix)]
-    let links = {
-        use std::os::unix::fs::MetadataExt;
-        file.metadata()?.nlink()
-    };
-    #[cfg(windows)]
-    let links = {
-        use cap_fs_ext::MetadataExt;
-        let borrowed = cap_std::fs::File::from_std(file.try_clone()?);
-        borrowed.metadata()?.nlink()
-    };
-    if links != 1 {
+fn single_link(file: &ReadFile) -> Result<()> {
+    if file.evidence()?.links != 1 {
         return Err(Error::InvalidInput(
             "shared files must have exactly one native hard link".into(),
         ));
@@ -154,20 +141,18 @@ fn single_link(file: &File) -> Result<()> {
     Ok(())
 }
 
-fn evidence(file: &File, directory: &LibraryDirectory) -> Result<Evidence> {
+fn evidence(file: &ReadFile, directory: &LibraryDirectory) -> Result<Evidence> {
     single_link(file)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || super::filesystem::is_unsafe_link(&metadata) {
-        return Err(stale());
+    let observed = file.evidence()?;
+    if observed.modified.starts_with('-') {
+        return Err(Error::InvalidInput(
+            "shared file timestamp predates Unix epoch".into(),
+        ));
     }
-    let modified = metadata
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error::InvalidInput("shared file timestamp predates Unix epoch".into()))?;
     Ok(Evidence {
-        identity: native_file_identity(file)?,
-        bytes: metadata.len(),
-        modified: modified.as_nanos().to_string(),
+        identity: observed.identity,
+        bytes: observed.bytes,
+        modified: observed.modified,
         directory: format!(
             "{:x}",
             Sha256::digest(serde_json::to_vec(&directory.snapshot())?)
@@ -203,7 +188,7 @@ struct CatalogEntry {
 /// The file handle is read-only. Keep the guard alive through the final byte.
 /// Call `check` before each bounded socket write and once at completion.
 pub struct SharedRead {
-    pub file: File,
+    pub file: ReadFile,
     pub guard: ShareVisibilityGuard,
     evidence: Evidence,
 }
@@ -212,16 +197,10 @@ impl SharedRead {
     pub fn check(&self) -> Result<()> {
         self.guard.check()?;
         single_link(&self.file)?;
-        let metadata = self.file.metadata()?;
-        let modified = metadata
-            .modified()?
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| stale())?
-            .as_nanos()
-            .to_string();
-        if native_file_identity(&self.file)? != self.evidence.identity
-            || metadata.len() != self.evidence.bytes
-            || modified != self.evidence.modified
+        let observed = self.file.evidence()?;
+        if observed.identity != self.evidence.identity
+            || observed.bytes != self.evidence.bytes
+            || observed.modified != self.evidence.modified
         {
             return Err(stale());
         }
@@ -232,6 +211,8 @@ impl SharedRead {
 fn joined(parent: &str, name: &str) -> String {
     if parent.is_empty() {
         name.to_owned()
+    } else if name.is_empty() {
+        parent.to_owned()
     } else {
         format!("{parent}/{name}")
     }
@@ -263,7 +244,10 @@ fn excluded(name: &str) -> bool {
 }
 
 fn check_private_ancestry(store: &Store, directory: &LibraryDirectory) -> Result<()> {
-    store.check_private_ancestry(directory)
+    if let LibraryDirectory::Native(directory) = directory {
+        store.check_private_ancestry(directory)?;
+    }
+    Ok(())
 }
 
 /// One rule for browse and open. Retained destination intents hide incomplete
@@ -273,7 +257,7 @@ fn publication_eligible(
     binding: &Binding,
     relative: &str,
     directory: bool,
-    file: Option<&mut File>,
+    file: Option<&mut ReadFile>,
     stop: &AtomicBool,
 ) -> Result<bool> {
     let path = joined(&binding.relative, relative);
@@ -321,10 +305,9 @@ fn publication_eligible(
         return Ok(false);
     }
     let location = store.location(binding.location)?;
-    let root = store.open_registered_root(&location.root, "media")?;
-    let album = root.open_directory(&LibraryPath::parse(folder)?)?;
+    let album = store.read_registered_directory(&location.root, &LibraryPath::parse(folder)?)?;
     if &store.root_binding_identity(&location.root, "media")? != root_identity
-        || album.native_root().identity != *album_identity.as_ref().ok_or_else(stale)?
+        || album.native_identity()? != *album_identity.as_ref().ok_or_else(stale)?
     {
         return Err(stale());
     }
@@ -352,14 +335,14 @@ fn publication_eligible(
             }
             let opened = album.open_file(OsStr::new(&name))?;
             single_link(&opened)?;
-            if opened.metadata()?.len() != u64::try_from(bytes).map_err(|_| stale())? {
+            if opened.evidence()?.bytes != u64::try_from(bytes).map_err(|_| stale())? {
                 return Err(stale());
             }
             names.insert(name);
         }
         for entry in album.entries()? {
             let entry = entry?;
-            let name = entry.file_name().into_string().map_err(|_| stale())?;
+            let name = entry.name;
             if !names.remove(&name) {
                 return Err(stale());
             }
@@ -385,7 +368,7 @@ fn publication_eligible(
     let Some(file) = file else {
         return Err(stale());
     };
-    if file.metadata()?.len() != u64::try_from(bytes).map_err(|_| stale())? {
+    if file.evidence()?.bytes != u64::try_from(bytes).map_err(|_| stale())? {
         return Ok(false);
     }
     let mut hash = Sha256::new();
@@ -447,9 +430,10 @@ impl ShareCatalog {
         let mut retained = Vec::with_capacity(bindings.len());
         for selected in &bindings {
             let directory = bound_directory(&store, selected)?;
-            if retained.iter().any(|other: &LibraryDirectory| {
-                other.native_root().overlaps(directory.native_root())
-            }) {
+            if retained
+                .iter()
+                .any(|other: &LibraryDirectory| other.overlaps(&directory))
+            {
                 return Err(Error::InvalidInput(
                     "selected share folders overlap through native ancestry".into(),
                 ));
@@ -544,27 +528,23 @@ impl ShareCatalog {
                     return Err(Error::WorkerStopping);
                 }
                 let entry = entry?;
-                let name = entry
-                    .file_name()
-                    .into_string()
-                    .map_err(|_| Error::InvalidInput("shared name is not Unicode".into()))?;
+                let name = entry.name;
                 if excluded(&name) {
                     continue;
                 }
-                let metadata = entry.metadata()?;
-                if is_unsafe_cap_link(&metadata) {
+                if entry.unsafe_link {
                     return Err(Error::InvalidInput(
                         "share folder contains a symlink or reparse point".into(),
                     ));
                 }
-                if !metadata.is_dir() && (!metadata.is_file() || !eligible_extension(&name)) {
+                if !entry.directory && (!entry.file || !eligible_extension(&name)) {
                     continue;
                 }
                 let child = portable(&joined(&relative, &name))?;
                 let child_wire = joined(&wire, &name);
                 portable(&child_wire)?;
                 let mut directory_body = None;
-                let proof = if metadata.is_file() {
+                let proof = if entry.file {
                     let mut file = directory.open_file(OsStr::new(&name))?;
                     let before = evidence(&file, &directory)?;
                     if !publication_eligible(
@@ -635,8 +615,7 @@ impl ShareCatalog {
                 }
             }
             self.flush(store, binding_id, &mut batch)?;
-            if directory.native_root() != root.open_directory(&portable(&relative)?)?.native_root()
-            {
+            if directory.snapshot() != root.open_directory(&portable(&relative)?)?.snapshot() {
                 return Err(stale());
             }
             store

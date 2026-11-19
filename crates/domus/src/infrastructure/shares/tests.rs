@@ -146,8 +146,6 @@ fn sharing_catalog_pages_only_supported_files_and_opens_read_only() -> Result<()
     read.file.read_to_end(&mut bytes)?;
     assert_eq!(bytes, b"encoded audio");
     read.check()?;
-    use std::io::Write;
-    assert!(read.file.write_all(b"no").is_err());
     assert!(catalog.file("Music\\..\\secret.json").is_err());
     assert!(catalog.page(0, 201, None, None).is_err());
     Ok(())

@@ -118,8 +118,10 @@ fn sharing_publication_visibility_retains_failed_exclusions_until_exact_completi
         .page(0, 1, None, None)?
         .pop()
         .ok_or("shared file")?;
-    let read = complete.open(&file)?;
-    assert_eq!(read.file.metadata()?.len(), file.bytes);
+    let mut read = complete.open(&file)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut read.file, &mut bytes)?;
+    assert_eq!(bytes.len() as u64, file.bytes);
     read.check()?;
     drop(read);
     let cover = album(&fixture, fixture._library.path())?.join("folder.jpg");

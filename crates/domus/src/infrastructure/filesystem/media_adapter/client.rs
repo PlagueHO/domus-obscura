@@ -269,7 +269,9 @@ impl MediaClient {
             components: vec![observed.identity.clone()],
         }
         .validate_record(&crate::domain::LibraryPath::parse("")?)?;
-        if observed.modified_nanoseconds >= 1_000_000_000 {
+        if observed.modified_nanoseconds >= 1_000_000_000
+            || (observed.kind == Kind::File && observed.links == 0)
+        {
             return Err(Error::InvalidInput(
                 "invalid media modification time".into(),
             ));

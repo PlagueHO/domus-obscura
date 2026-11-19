@@ -74,7 +74,8 @@ The explicit `media-adapter` foreground command can now start its listener from
 operator-managed configuration. Host-selected paired roots can now be registered
 explicitly and checked through the application's location availability operation.
 Full library scans and direct-folder refreshes use the retained read-only client.
-JPEG reads, sharing, publication and recovery are not routed through the adapter.
+Indexed JPEG reads and read-only music sharing also use this client.
+Publication and recovery are not routed through the adapter.
 Do not treat this implementation as Windows Docker acceptance.
 
 The adapter verifies complete selected native chains and retains the opened
@@ -313,9 +314,25 @@ currently fails its paired enumeration rather than producing a native-style
 `unsafe_link` row. Invalid tags and unsupported audio remain indexed file
 diagnostics. Recovery folders stay excluded.
 
-JPEG reads, sharing, publication and recovery are not yet routed through this
-provider. Their native-only accessors still fail explicitly. These limits remain
-required work for issue #66.
+Indexed JPEG previews use retained reads with the same exact indexed identity,
+size, high-resolution modification evidence and 8 MiB compressed-input limit.
+The API still applies strict bounded JPEG processing. It never serves original
+bytes or treats a preview as artwork approval.
+
+Read-only music sharing uses explicit folder inspection and binding, the existing
+bounded catalog and exact retained file reads. Saved native bindings keep their
+existing format. Paired bindings save logical root authority and the directory
+identity chain, never paths, credentials or live leases. Each directory reopen
+must match that chain. Files require exactly one hard link. File changes, folder
+replacement, peer loss and stale catalog generations fail rather than adopting
+new evidence. Uploads retain the visibility guard through the last byte and
+support the existing exact resume offsets. Publication intent, membership and
+hash checks remain active. The adapter observation now requires a hard-link
+count; update both ends together. Old peers without this field fail explicitly.
+
+Publication and recovery are not yet routed through this provider. Their
+native-only accessors still fail explicitly. These limits remain required work
+for issue #66.
 
 ## Build and verify
 

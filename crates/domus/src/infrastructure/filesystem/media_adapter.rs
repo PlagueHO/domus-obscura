@@ -23,7 +23,7 @@ pub use client::{MediaClient, MediaDirectory, MediaFile, MediaNode, MediaPage};
 mod selected;
 pub(crate) use selected::{MediaBinding, MediaPairing, SelectedMedia};
 mod blocking;
-pub(crate) use blocking::BlockingMedia;
+pub(crate) use blocking::{BlockingFile, BlockingMedia};
 #[cfg(test)]
 mod tests;
 
@@ -200,6 +200,7 @@ pub struct Observation {
     pub length: u64,
     pub modified_seconds: u64,
     pub modified_nanoseconds: u32,
+    pub links: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -333,6 +334,7 @@ impl NativeAdapter {
             return Err(Error::Conflict("native media object type changed".into()));
         }
         let identity = super::binding::persistent_file_identity(file)?;
+        let links = super::read_only::link_count(file)?;
         if self.protected_files.contains(&identity) {
             return Err(Error::Conflict(
                 "media aliases a protected adapter input".into(),
@@ -348,6 +350,7 @@ impl NativeAdapter {
             length: metadata.len(),
             modified_seconds: modified.as_secs(),
             modified_nanoseconds: modified.subsec_nanos(),
+            links,
         })
     }
 
