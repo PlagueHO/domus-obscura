@@ -19,6 +19,9 @@ use std::sync::{Arc, Mutex};
 
 pub(crate) const MAXIMUM: u64 = 16384;
 
+mod media_adapter;
+pub use media_adapter::PreparedMediaAdapter;
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Environment {

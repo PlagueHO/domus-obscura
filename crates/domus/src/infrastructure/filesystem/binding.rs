@@ -34,6 +34,10 @@ pub struct RetainedDirectory {
 }
 
 impl RetainedDirectory {
+    pub(crate) fn directory(&self) -> &LibraryDirectory {
+        &self.directory
+    }
+
     /// Read the opened object's metadata without resolving its former path.
     pub fn metadata(&self) -> Result<std::fs::Metadata> {
         Ok(self.directory.directory_file()?.metadata()?)

@@ -25,14 +25,14 @@ and the [Windows WSL backend](https://docs.docker.com/desktop/features/wsl/).
 
 ## Acceptance status
 
-The Docker branch includes the completed storage dependency at
-`5172b83e0dd755a8caa0c1c9f5ab812ed2654820` from open PR #70. This does not merge
-that PR. The PR's rebased head is `cd33a3c880b71ac776b88f845e9071adbcb39700`;
-both revisions have the same source tree.
+The Docker branch is rebased onto main at
+`4f8eafcabc668dc5c4869c0b499a31b87694e975`, which includes merged PR #70
+and its final native setup fixes. The earlier exact-dependency integration
+remains historical evidence, not proof for the current rebased source.
 The current image and Docker workflows need their own checks.
 Native storage checks are not whole-image Docker acceptance.
 
-The current generated-volume engine workflow passes browser-byte and API-guard
+The previously built `f497e7e` image passes generated-volume browser-byte and API-guard
 checks, worker scanning, selected bindings, overlap refusal, recreation, graceful
 stop, forced exit, invalid configuration, and replacement refusal.
 The image build also passes the full native archive lifecycle check on a fresh
@@ -69,10 +69,11 @@ Linux image. External Windows folders remain in scope. This changes their
 planned access from guest 9p mounts to authenticated native provider roots.
 It does not approve host changes, installation, or service registration.
 
-The isolated read-only implementation is
-`infrastructure::filesystem::media_adapter`. It is not connected to production
-API, worker, scanning, sharing, or publication operations. No production command
-starts its listener. Do not treat this proof as Windows Docker acceptance.
+The read-only implementation is `infrastructure::filesystem::media_adapter`.
+The explicit `media-adapter` foreground command can now start its listener from
+operator-managed configuration. It is not connected to production API, worker,
+scanning, sharing, or publication operations. Do not treat this implementation
+as Windows Docker acceptance.
 
 The adapter verifies complete selected native chains and retains the opened
 directories and files. Only the Windows/native host maps root IDs to paths.
@@ -115,7 +116,9 @@ material enters the container's temporary filesystem. Its report is
 authenticated root-open channel, not production provider integration or complete
 Windows Docker acceptance. The ordinary test suite skips this diagnostic.
 
-The current Windows run passed all 16 adapter regressions. The first
+The configured adapter adds generated checks for passive preparation, frozen
+activation, private-input alias refusal and a latched stop before startup.
+The first
 Linux-container diagnostic failed with curl exit 7: connection refused.
 The user then explicitly approved enabling Docker Desktop host networking and
 restarting its engine. The saved setting is now on and the engine is running.
@@ -132,6 +135,57 @@ and whole-image supported-host checks remain required. The successful channel
 diagnostic does not place the adapter in the cached Linux image or route
 production operations through it. SQLite and other private application storage
 retain their existing local-only rules.
+
+### Configure the native foreground adapter
+
+The adapter uses a separate operator-managed JSON document. It does not open
+SQLite or use the Linux application's `config.json` as a Windows host file.
+No command creates, adopts, rewrites or rebinds an adapter selection.
+Review the native roots with `storage-root-inspect` before writing the document.
+See the [storage contract](storage.md) for complete native expectations.
+
+The document has these required fields. Unknown or duplicate fields fail.
+
+| Field                | Meaning                                                                            |
+| -------------------- | ---------------------------------------------------------------------------------- |
+| `format_version`     | `1`.                                                                               |
+| `listen`             | A loopback socket address with an explicit nonzero port, such as `127.0.0.1:8088`. |
+| `selection`          | The frozen adapter selection described below.                                      |
+| `certificate_file`   | The server certificate chain, including its issuing CA.                            |
+| `private_key_file`   | The matching server private key.                                                   |
+| `client_ca_file`     | Trust anchors for client certificate verification.                                 |
+| `paired_client_file` | The exact paired client certificate and any required intermediate certificates.    |
+
+`selection` contains a positive `revision`, one `provider` mapping, a nonempty
+`media` root array and one `private` root. The provider has a scope and an
+absolute native boundary. Each root uses its full inspected `StorageRoot`
+record. Media roots must have role `media`; the private root must have role
+`application`. The scope, roles, revisions and complete expected chains must
+match. Known overlaps and changed identities fail.
+
+The document must be directly inside its selected private root. All four TLS
+file references are nonempty `LibraryPath` identifiers beneath that root.
+Use slash-separated relative identifiers, not absolute Windows paths.
+Links, reparse traversal, alternate streams and root escapes fail. The opened
+private directories and files must have owner-only access on supported local
+storage. The document is limited to 256 KiB. Certificates and CA bundles are
+limited to 64 KiB each. The private key retains the existing 16 KiB TLS limit.
+The adapter retains all five input handles and rejects their hard-link aliases
+through media exports. Private keys never enter the database or protocol.
+
+Validate without opening a listener, then run explicitly in the foreground:
+
+```powershell
+domus media-adapter-check D:\DomusAdapter\private\adapter.json
+domus media-adapter D:\DomusAdapter\private\adapter.json
+```
+
+These are operator examples, not permission to change an existing host.
+The commands do not install or register a service. Stop with Ctrl+C.
+On Unix, SIGTERM also requests a stop. Shutdown stops new admission and gives
+active read-only requests up to ten seconds to drain. Stop before editing the
+document or TLS files. Restart to activate changes; there is no live reload,
+automatic pairing, certificate generation or fallback provider.
 
 ## Build and verify
 

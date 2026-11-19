@@ -1,5 +1,5 @@
-//! Isolated read-only native media capabilities. This is not a production
-//! provider, a remote private-storage client, or permission to mutate media.
+//! Read-only native media capabilities. Production library consumers are not
+//! connected yet. This is not remote private storage or permission to mutate media.
 //!
 //! The transport owns one table per authenticated TLS connection. Frozen
 //! logical selections survive reconnection; live references never do.
@@ -41,6 +41,36 @@ pub struct Selection {
 }
 
 impl Selection {
+    pub(crate) fn validate(&self) -> Result<()> {
+        let name = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value.trim() == value
+                && !value.chars().any(char::is_control)
+        };
+        if self.revision == 0
+            || !name(&self.provider.scope)
+            || self.media.is_empty()
+            || self.media.len() > MAX_ROOTS
+            || self.private.role != StorageRole::Application
+            || self.provider.boundary.components().count() > 64
+        {
+            return Err(Error::InvalidInput("invalid native media selection".into()));
+        }
+        for root in self.media.iter().chain(std::iter::once(&self.private)) {
+            let relative = LibraryPath::parse(&root.relative)?;
+            if !name(&root.root_id)
+                || root.binding_revision == 0
+                || root.provider_scope != self.provider.scope
+                || root.expected.components.len() > MAX_DEPTH
+            {
+                return Err(Error::InvalidInput("invalid native media root".into()));
+            }
+            root.expected.validate(&relative)?;
+        }
+        Ok(())
+    }
+
     /// Stable logical meaning excludes the host-specific boundary locator.
     pub fn digest(&self) -> Result<String> {
         let mut media = self.media.clone();
@@ -147,31 +177,12 @@ struct NativeAdapter {
 
 impl NativeAdapter {
     fn new(selection: Selection, protected_files: Vec<File>) -> Result<Self> {
-        let name = |value: &str| {
-            !value.is_empty()
-                && value.len() <= 128
-                && value.trim() == value
-                && !value.chars().any(char::is_control)
-        };
-        if selection.revision == 0
-            || !name(&selection.provider.scope)
-            || selection.media.is_empty()
-            || selection.media.len() > MAX_ROOTS
-            || selection.private.role != StorageRole::Application
-            || protected_files.len() > MAX_ROOTS
-            || selection.provider.boundary.components().count() > 64
-        {
+        selection.validate()?;
+        if protected_files.len() > MAX_ROOTS {
             return Err(Error::InvalidInput("invalid native media selection".into()));
         }
         let open = |root: &StorageRoot| -> Result<LibraryDirectory> {
             let relative = LibraryPath::parse(&root.relative)?;
-            if !name(&root.root_id)
-                || root.binding_revision == 0
-                || root.provider_scope != selection.provider.scope
-                || root.expected.components.len() > MAX_DEPTH
-            {
-                return Err(Error::InvalidInput("invalid native media root".into()));
-            }
             Ok(root
                 .expected
                 .open(&selection.provider.boundary, &relative)?

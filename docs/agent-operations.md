@@ -125,6 +125,16 @@ Do not extract embedded covers or infer artwork approval from a preview.
 
 ## Commands
 
+`domus media-adapter-check <absolute-adapter-configuration-file>` validates and
+retains the separate native media configuration without opening SQLite or a
+listener. `domus media-adapter <absolute-adapter-configuration-file>` explicitly
+starts its read-only, mutually authenticated loopback listener in the foreground.
+Both use `ConfigurationService`. Keep the document directly in its selected
+private application-role root. All TLS references stay beneath that root.
+Never create or rebind missing roots, generate pairing material automatically,
+install a service, or use these commands to activate production library routing.
+See [native adapter configuration](docker.md#configure-the-native-foreground-adapter).
+
 `domus storage-root-inspect <absolute-provider-boundary> <provider-scope>
 <root-id> <binding-revision> <role> <library-relative-path>` prints a complete
 candidate root record without writing files or approving access. The directory

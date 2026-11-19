@@ -112,6 +112,223 @@ fn reference(response: Response) -> Result<Reference> {
     }
 }
 
+fn configured_fixture(
+    fixture: &Fixture,
+    keys: &Certificates,
+    address: SocketAddr,
+) -> TestResult<(std::path::PathBuf, serde_json::Value)> {
+    let private = fixture.selection.provider.boundary.join("private");
+    for (name, bytes) in [
+        ("server.pem", &keys.server),
+        ("server-key.pem", &keys.server_key),
+        ("client-ca.pem", &keys.ca),
+        ("paired-client.pem", &keys.client),
+    ] {
+        std::fs::write(private.join(name), bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(private.join(name), std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    let document = serde_json::json!({
+        "format_version": 1,
+        "listen": address,
+        "selection": fixture.selection,
+        "certificate_file": "server.pem",
+        "private_key_file": "server-key.pem",
+        "client_ca_file": "client-ca.pem",
+        "paired_client_file": "paired-client.pem",
+    });
+    let path = private.join("adapter.json");
+    std::fs::write(&path, serde_json::to_vec(&document)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok((path, document))
+}
+
+struct ConfiguredRunning {
+    lifecycle: crate::infrastructure::lifecycle::Lifecycle,
+    task: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl Drop for ConfiguredRunning {
+    fn drop(&mut self) {
+        self.lifecycle.request_stop();
+        self.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn media_adapter_configuration_is_passive_and_activation_is_frozen() -> TestResult {
+    use crate::infrastructure::server::configuration::ConfigurationService;
+
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let reserved = TcpListener::bind(("127.0.0.1", 0))?;
+    let address = reserved.local_addr()?;
+    let (path, mut document) = configured_fixture(&fixture, &keys, address)?;
+    let prepared = ConfigurationService::prepare_media_adapter(&path)?;
+    // Preparation must succeed while the selected listen port is occupied.
+    document["selection"]["revision"] = 2.into();
+    std::fs::write(&path, serde_json::to_vec(&document)?)?;
+    drop(reserved);
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let notify = ready.clone();
+    let lifecycle = crate::infrastructure::lifecycle::Lifecycle::controlled(move || {
+        notify.notify_one();
+        Ok(())
+    });
+    let task = tokio::spawn(prepared.run_with_lifecycle(lifecycle.clone()));
+    let mut running = ConfiguredRunning { lifecycle, task };
+    tokio::time::timeout(Duration::from_secs(3), ready.notified()).await?;
+    let mut client = keys.client(address)?;
+    let root = reference(client.execute(&fixture.request()?).await?)?;
+    let Response::Page { entries, complete } = client
+        .execute(&Request::Page {
+            directory: root,
+            limit: 64,
+        })
+        .await?
+    else {
+        return Err("expected configured adapter page".into());
+    };
+    assert!(complete);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "album");
+    running.lifecycle.request_stop();
+    tokio::time::timeout(Duration::from_secs(12), &mut running.task).await???;
+    Ok(())
+}
+
+#[test]
+fn media_adapter_configuration_rejects_unsafe_inputs_without_binding() -> TestResult {
+    use crate::infrastructure::server::configuration::ConfigurationService;
+
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let reserved = TcpListener::bind(("127.0.0.1", 0))?;
+    let (path, original) = configured_fixture(&fixture, &keys, reserved.local_addr()?)?;
+    for (field, invalid) in [
+        ("format_version", serde_json::json!(2)),
+        ("listen", serde_json::json!("0.0.0.0:8088")),
+        ("listen", serde_json::json!("127.0.0.1:0")),
+        ("private_key_file", serde_json::json!("../server-key.pem")),
+        ("private_key_file", serde_json::json!("/server-key.pem")),
+        (
+            "private_key_file",
+            serde_json::json!("server-key.pem:stream"),
+        ),
+        ("private_key_file", serde_json::json!("missing.pem")),
+        ("unknown", serde_json::json!(true)),
+    ] {
+        let mut document = original.clone();
+        document[field] = invalid;
+        std::fs::write(&path, serde_json::to_vec(&document)?)?;
+        assert!(
+            ConfigurationService::prepare_media_adapter(&path).is_err(),
+            "accepted invalid adapter field {field}"
+        );
+    }
+    let mut document = original.clone();
+    document["selection"]["media"][0]["binding_revision"] = 0.into();
+    std::fs::write(&path, serde_json::to_vec(&document)?)?;
+    assert!(ConfigurationService::prepare_media_adapter(&path).is_err());
+    let mut document = original.clone();
+    document["selection"]["private"] = original["selection"]["media"][0].clone();
+    std::fs::write(&path, serde_json::to_vec(&document)?)?;
+    assert!(ConfigurationService::prepare_media_adapter(&path).is_err());
+    let mut bounded_document = serde_json::to_vec(&original)?;
+    bounded_document.resize(262144, b' ');
+    let mut bounded_key = keys.server_key.as_bytes().to_vec();
+    bounded_key.resize(16384, b' ');
+    let mut bounded_certificate = keys.server.as_bytes().to_vec();
+    bounded_certificate.resize(65536, b' ');
+    std::fs::write(path.with_file_name("server.pem"), &bounded_certificate)?;
+    std::fs::write(path.with_file_name("server-key.pem"), &bounded_key)?;
+    std::fs::write(&path, &bounded_document)?;
+    drop(ConfigurationService::prepare_media_adapter(&path)?);
+    bounded_certificate.push(b' ');
+    std::fs::write(path.with_file_name("server.pem"), &bounded_certificate)?;
+    assert!(ConfigurationService::prepare_media_adapter(&path).is_err());
+    bounded_certificate.pop();
+    std::fs::write(path.with_file_name("server.pem"), bounded_certificate)?;
+    bounded_document.push(b' ');
+    std::fs::write(&path, &bounded_document)?;
+    assert!(ConfigurationService::prepare_media_adapter(&path).is_err());
+    std::fs::write(&path, serde_json::to_vec(&original)?)?;
+    bounded_key.push(b' ');
+    std::fs::write(path.with_file_name("server-key.pem"), bounded_key)?;
+    assert!(ConfigurationService::prepare_media_adapter(&path).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn media_adapter_configured_inputs_cannot_be_exported_through_media_aliases() -> TestResult {
+    use crate::infrastructure::server::configuration::ConfigurationService;
+
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let reserved = TcpListener::bind(("127.0.0.1", 0))?;
+    let address = reserved.local_addr()?;
+    let (path, _) = configured_fixture(&fixture, &keys, address)?;
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    std::fs::hard_link(
+        path.with_file_name("server-key.pem"),
+        media.join("key-alias"),
+    )?;
+    let prepared = ConfigurationService::prepare_media_adapter(&path)?;
+    drop(reserved);
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let notify = ready.clone();
+    let lifecycle = crate::infrastructure::lifecycle::Lifecycle::controlled(move || {
+        notify.notify_one();
+        Ok(())
+    });
+    let task = tokio::spawn(prepared.run_with_lifecycle(lifecycle.clone()));
+    let mut running = ConfiguredRunning { lifecycle, task };
+    tokio::time::timeout(Duration::from_secs(3), ready.notified()).await?;
+    let mut client = keys.client(address)?;
+    let root = reference(client.execute(&fixture.request()?).await?)?;
+    assert!(matches!(
+        client
+            .execute(&Request::Page {
+                directory: root,
+                limit: 64
+            })
+            .await,
+        Err(Error::Conflict(_))
+    ));
+    running.lifecycle.request_stop();
+    tokio::time::timeout(Duration::from_secs(12), &mut running.task).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn media_adapter_configured_stop_before_start_never_opens_a_listener() -> TestResult {
+    use crate::infrastructure::server::configuration::ConfigurationService;
+
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let reserved = TcpListener::bind(("127.0.0.1", 0))?;
+    let (path, _) = configured_fixture(&fixture, &keys, reserved.local_addr()?)?;
+    let prepared = ConfigurationService::prepare_media_adapter(&path)?;
+    let lifecycle = crate::infrastructure::lifecycle::Lifecycle::controlled(|| {
+        Err(Error::Internal("stopped adapter must not report readiness"))
+    });
+    lifecycle.request_stop();
+    prepared.run_with_lifecycle(lifecycle).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn media_adapter_tls_reads_exact_handles_and_rejects_other_connections() -> TestResult {
     let fixture = Fixture::new()?;
@@ -444,6 +661,82 @@ fn media_adapter_rejects_untrusted_pairing_before_activation() -> TestResult {
         .is_err()
     );
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the current debug domus binary; explicit generated foreground diagnostic"]
+async fn media_adapter_cli_foreground_probe() -> TestResult {
+    use std::process::{Child, Command, ExitStatus, Stdio};
+
+    async fn wait(child: &mut Child) -> TestResult<ExitStatus> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(status) = child.try_wait()? {
+                    return Ok::<_, std::io::Error>(status);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?
+        .map_err(Into::into)
+    }
+
+    let fixture = Fixture::new()?;
+    let keys = Certificates::new()?;
+    let reserved = TcpListener::bind(("127.0.0.1", 0))?;
+    let address = reserved.local_addr()?;
+    let (path, _) = configured_fixture(&fixture, &keys, address)?;
+    let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .ok_or("workspace root is unavailable")?
+        .join("target")
+        .join("debug")
+        .join(format!("domus{}", std::env::consts::EXE_SUFFIX));
+    let mut check = Command::new(&binary)
+        .arg("media-adapter-check")
+        .arg(&path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let checked = wait(&mut check).await;
+    if checked.is_err() {
+        check.kill()?;
+        check.wait()?;
+    }
+    if !checked?.success() {
+        return Err("foreground CLI configuration check failed".into());
+    }
+    drop(reserved);
+    let mut child = Command::new(binary)
+        .arg("media-adapter")
+        .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let result = async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if child.try_wait()?.is_some() {
+                    return Err("foreground adapter exited before readiness".into());
+                }
+                if tokio::net::TcpStream::connect(address).await.is_ok() {
+                    return Ok::<_, Box<dyn std::error::Error>>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await??;
+        let mut client = keys.client(address)?;
+        reference(client.execute(&fixture.request()?).await?)?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    if child.try_wait()?.is_none() {
+        child.kill()?;
+    }
+    child.wait()?;
+    result
 }
 
 /// This diagnostic uses only an already-built image and generated material.

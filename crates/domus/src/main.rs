@@ -17,6 +17,8 @@ const USAGE: &str = "Usage:
   domus windows-service <api|worker> <absolute-configuration-file>
   domus windows-service-policy <api|worker> <enable|disable>
   domus configuration-check <absolute-configuration-file>
+  domus media-adapter-check <absolute-adapter-configuration-file>
+  domus media-adapter <absolute-adapter-configuration-file>
   domus certificate-status <absolute-configuration-file>
   domus certificate-bootstrap <absolute-configuration-file>
   domus certificate-recover <absolute-configuration-file> <resume|pending|bindings|cleanup|cleanup-owned|archive|generation|restart>
@@ -83,7 +85,8 @@ service-call runs catalog discovery, metadata, artwork listing or image caching 
 It cannot approve plans, download audio or publish media.
 publish-new-once explicitly copies verified staging into new primary/backup album folders.
 It never replaces existing albums. Partial folders remain visible after failure.
-No command enables media sharing or media serving.
+media-adapter explicitly serves read-only selected media to its paired native client.
+It does not enable public media sharing or connect production library operations.
 The database must be outside every configured media root.";
 
 fn run(args: &[String]) -> Result<()> {
@@ -91,6 +94,23 @@ fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     match args {
+        [command, configuration]
+            if matches!(command.as_str(), "media-adapter" | "media-adapter-check") =>
+        {
+            let prepared = domus::infrastructure::server::configuration::ConfigurationService::prepare_media_adapter(
+                Path::new(configuration),
+            )?;
+            if command == "media-adapter-check" {
+                println!("Native media adapter configuration is valid; no listener started.");
+            } else {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .max_blocking_threads(8)
+                    .enable_all()
+                    .build()?
+                    .block_on(prepared.run())?;
+            }
+        }
         [command, configuration] if command == "configuration-check" => {
             let source = domus::infrastructure::server::configuration::ConfigurationService::open(
                 Path::new(configuration),
