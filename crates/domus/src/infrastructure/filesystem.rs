@@ -350,31 +350,92 @@ impl LibraryDirectory {
                 &self.directory_file()?,
                 OsStr::new(name),
             )?);
-            Self::check_directory(&directory)?;
-            let mut parents = self
-                .parents
-                .iter()
-                .map(Dir::try_clone)
-                .collect::<std::io::Result<Vec<_>>>()?;
-            parents.push(self.directory.try_clone()?);
-            let mut selection = self.selection.clone();
-            if let Some(selected) = &mut selection {
-                selected.descend(name, &directory.try_clone()?.into_std_file())?;
-            }
-            parents.push(directory);
-            let native = NativeRoot::read(&parents)?;
-            let directory = parents
-                .pop()
-                .ok_or(Error::Internal("created directory is missing"))?;
-            let mut names = self.names.clone();
-            names.push(name.into());
-            Ok(Self {
-                directory,
-                native,
-                parents,
-                names,
-                selection,
-            })
+            self.retain_child_directory(name, directory)
+        }
+    }
+
+    #[cfg(windows)]
+    fn retain_child_directory(&self, name: &str, directory: Dir) -> Result<Self> {
+        Self::check_directory(&directory)?;
+        let mut parents = self
+            .parents
+            .iter()
+            .map(Dir::try_clone)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        parents.push(self.directory.try_clone()?);
+        let mut selection = self.selection.clone();
+        if let Some(selected) = &mut selection {
+            selected.descend(name, &directory.try_clone()?.into_std_file())?;
+        }
+        parents.push(directory);
+        let native = NativeRoot::read(&parents)?;
+        let directory = parents
+            .pop()
+            .ok_or(Error::Internal("retained child is missing"))?;
+        let mut names = self.names.clone();
+        names.push(name.into());
+        Ok(Self {
+            directory,
+            native,
+            parents,
+            names,
+            selection,
+        })
+    }
+
+    /// Windows retains the original no-follow DELETE-capable source. No checked
+    /// source pathname is reopened when the subsequent rename is performed.
+    pub(crate) fn open_child_for_move(&self, name: &str) -> Result<Self> {
+        let relative = LibraryPath::parse(name)?;
+        if relative.as_str().is_empty() || relative.as_str().contains('/') {
+            return Err(Error::InvalidInput(
+                "directory move requires one component".into(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            self.open_directory(&relative)
+        }
+        #[cfg(windows)]
+        {
+            self.retain_child_directory(
+                name,
+                Dir::from_std_file(native_file_delete::open_directory_for_move(
+                    &self.directory_file()?,
+                    OsStr::new(name),
+                )?),
+            )
+        }
+    }
+
+    /// The caller must own the operation lock, saved intent and exact source
+    /// approval. Unix requires cooperative writers, as other renameat effects do.
+    pub(crate) fn rename_retained_child(&self, source: &Self, name: &str) -> Result<()> {
+        let relative = LibraryPath::parse(name)?;
+        if relative.as_str().is_empty()
+            || relative.as_str().contains('/')
+            || NativeRoot::read(&source.parents)? != self.native
+        {
+            return Err(Error::Conflict(
+                "move source is not a direct retained child".into(),
+            ));
+        }
+        #[cfg(windows)]
+        {
+            drop(
+                native_file_delete::ValidatedHandle::directory(source.directory_file()?)?
+                    .rename_directory_noreplace(&self.directory_file()?, OsStr::new(name))?,
+            );
+            Ok(())
+        }
+        #[cfg(unix)]
+        {
+            let from = source
+                .names
+                .last()
+                .and_then(|name| name.to_str())
+                .ok_or(Error::Internal("move source name is missing"))?;
+            rename_no_replace(&self.directory, from, name)
         }
     }
 

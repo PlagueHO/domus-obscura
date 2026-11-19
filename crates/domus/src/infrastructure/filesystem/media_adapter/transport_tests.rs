@@ -131,6 +131,182 @@ async fn media_client_file(
 }
 
 #[tokio::test]
+async fn media_adapter_move_typed_native_and_tls_keep_the_exact_source() -> TestResult {
+    let mut fixture = Fixture::new()?;
+    fixture.selection.writable_roots.push("library".into());
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    for index in 0..MAX_PAGE + 3 {
+        std::fs::write(media.join(format!("existing-{index}")), [3])?;
+    }
+    for index in 0..2 {
+        std::fs::create_dir(media.join(format!("source-{index}")))?;
+        std::fs::write(
+            media.join(format!("source-{index}")).join("keep.flac"),
+            b"verified",
+        )?;
+    }
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let native = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let remote = MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    for (index, mut client) in [native, remote].into_iter().enumerate() {
+        let mut root = client.open_root("library").await?;
+        let name = format!("source-{index}");
+        let mut listed = None;
+        loop {
+            let page = client.page(&root, MAX_PAGE).await?;
+            listed = listed.or_else(|| page.entries.into_iter().find(|entry| entry.name == name));
+            if page.complete {
+                break;
+            }
+        }
+        let listed = listed.ok_or("generated move source was not listed")?;
+        let ordinary = client.open_child(&root, &listed).await?;
+        assert!(client.prepare_move(&root, &listed).await.is_err());
+        let MediaNode::Directory(ordinary) = ordinary else {
+            return Err("expected directory".into());
+        };
+        client.close_directory(ordinary).await?;
+        let mut stale = listed.clone();
+        stale.observed.modified_nanoseconds =
+            (stale.observed.modified_nanoseconds + 1) % 1_000_000_000;
+        assert!(client.prepare_move(&root, &stale).await.is_err());
+        let source = client.prepare_move(&root, &listed).await?;
+        #[cfg(windows)]
+        assert!(std::fs::rename(media.join(&name), media.join("swapped")).is_err());
+        let page = client.page(source.directory(), MAX_PAGE).await?;
+        assert!(page.complete);
+        assert_eq!(page.entries.len(), 1);
+        let MediaNode::File(file) = client
+            .open_child(source.directory(), &page.entries[0])
+            .await?
+        else {
+            return Err("expected retained source file".into());
+        };
+        assert_eq!(client.read(&file, 0, MAX_READ).await?, b"verified");
+        client.close_file(file).await?;
+        let mut checks = 0;
+        let target = format!("final-{index}");
+        let moved = client
+            .rename_directory_checked(&mut root, source, &target, &mut || {
+                checks += 1;
+                Ok(())
+            })
+            .await?;
+        assert!(checks >= 2);
+        assert_eq!(moved.identity, listed.observed.identity);
+        assert!(!media.join(name).exists());
+        assert_eq!(
+            std::fs::read(media.join(&target).join("keep.flac"))?,
+            b"verified"
+        );
+        let mut found = false;
+        loop {
+            let page = client.page(&root, MAX_PAGE).await?;
+            found |= page
+                .entries
+                .iter()
+                .any(|entry| entry.name == target && entry.observed == moved);
+            if page.complete {
+                break;
+            }
+        }
+        assert!(found);
+        client.close_directory(root).await?;
+    }
+    running.stop().await
+}
+
+#[tokio::test]
+async fn media_adapter_write_checkpoints_stop_before_effect_and_between_hash_steps() -> TestResult {
+    use sha2::{Digest, Sha256};
+    let mut fixture = Fixture::new()?;
+    fixture.selection.writable_roots.push("library".into());
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    for index in 0..MAX_PAGE + 3 {
+        std::fs::write(media.join(format!("entry-{index}")), [1])?;
+    }
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let native = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let remote = MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    for (index, mut client) in [native, remote].into_iter().enumerate() {
+        let mut root = client.open_root("library").await?;
+        let name = format!("denied-{index}");
+        let mut checks = 0;
+        assert!(
+            client
+                .create_directory_checked(&mut root, &name, &mut || {
+                    checks += 1;
+                    if checks == 2 {
+                        Err(Error::Conflict("generated claim expired".into()))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(checks, 2);
+        assert!(!media.join(&name).exists());
+        let bytes = vec![37; MAX_READ + 1];
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let name = format!("denied-file-{index}");
+        checks = 0;
+        assert!(
+            client
+                .create_file_checked(&mut root, &name, bytes.len() as u64, &hash, &mut || {
+                    checks += 1;
+                    if checks == 2 {
+                        Err(Error::Conflict("generated claim expired".into()))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(checks, 2);
+        assert!(!media.join(&name).exists());
+        let name = format!("complete-unsealed-{index}");
+        let mut output = client
+            .create_file(&mut root, &name, bytes.len() as u64, &hash)
+            .await?;
+        for chunk in bytes.chunks(MAX_READ) {
+            client.write(&mut output, chunk).await?;
+        }
+        checks = 0;
+        assert!(
+            client
+                .seal_checked(output, &mut || {
+                    checks += 1;
+                    if checks == 2 {
+                        Err(Error::Conflict("generated claim expired".into()))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(checks, 2);
+        client.close_directory(root).await?;
+        assert_eq!(std::fs::read(media.join(name))?, bytes);
+    }
+    running.stop().await
+}
+
+#[tokio::test]
 async fn media_adapter_write_typed_native_and_tls_streams_preserve_exact_outputs() -> TestResult {
     use sha2::{Digest, Sha256};
     let mut fixture = Fixture::new()?;

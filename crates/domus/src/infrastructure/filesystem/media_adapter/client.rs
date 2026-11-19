@@ -10,6 +10,8 @@ use tokio::sync::Semaphore;
 
 mod mutation;
 pub use mutation::MediaOutput;
+mod moves;
+pub use moves::MediaMove;
 
 /// One bounded media session, either native or explicitly paired. Neither
 /// variant exposes a native path or private-storage lease. New output requires
@@ -434,6 +436,61 @@ mod tests {
         ));
         let permit = tokio::time::timeout(Duration::from_secs(3), slot.acquire()).await??;
         drop(permit);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn media_adapter_move_cancelled_reply_never_replays_an_uncertain_effect()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        fixture.selection.writable_roots.push("library".into());
+        let media = fixture
+            .selection
+            .provider
+            .boundary
+            .join("parent")
+            .join("media");
+        let mut client = MediaClient::local(fixture.selection, Vec::new())?;
+        let mut root = client.open_root("library").await?;
+        let page = client.page(&root, MAX_PAGE).await?;
+        let listed = page.entries.first().ok_or("generated source missing")?;
+        let source = client.prepare_move(&root, listed).await?;
+        let Transport::Local { session, slot, .. } = &client.transport else {
+            return Err("expected native transport".into());
+        };
+        let session = session.clone();
+        let slot = slot.clone();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let owner = std::thread::spawn(move || -> std::result::Result<(), &'static str> {
+            let _locked = session.lock().map_err(|_| "fixture session lock failed")?;
+            ready
+                .send(())
+                .map_err(|_| "fixture ready receiver disappeared")?;
+            released
+                .recv()
+                .map_err(|_| "fixture release sender disappeared")?;
+            Ok(())
+        });
+        waiting.recv_timeout(Duration::from_secs(3))?;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                client.rename_directory(&mut root, source, "final")
+            )
+            .await
+            .is_err()
+        );
+        release.send(())?;
+        owner.join().map_err(|_| "fixture session owner failed")??;
+        let permit = tokio::time::timeout(Duration::from_secs(3), slot.acquire()).await??;
+        drop(permit);
+        assert!(!media.join("album").exists());
+        assert!(media.join("final").join("track.flac").is_file());
+        assert!(matches!(
+            client.open_root("library").await,
+            Err(Error::Remote(_))
+        ));
         Ok(())
     }
 

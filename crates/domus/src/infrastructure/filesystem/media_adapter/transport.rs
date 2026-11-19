@@ -400,6 +400,9 @@ fn require_response(request: &Request, response: &Response) -> Result<()> {
         (
             Request::OpenChild {
                 parent, expected, ..
+            }
+            | Request::PrepareMove {
+                parent, expected, ..
             },
             Response::Opened {
                 reference,
@@ -424,9 +427,12 @@ fn require_response(request: &Request, response: &Response) -> Result<()> {
             bytes.len() <= *count && (*complete || !bytes.is_empty())
         }
         (
-            Request::CreateDirectory { .. } | Request::CreateFile { .. },
+            Request::CreateDirectory { .. } | Request::CreateFile { .. } | Request::Rename { .. },
             Response::CheckingName { checked },
         ) => *checked > 0 && *checked % super::MAX_PAGE as u64 == 0,
+        (Request::Rename { .. }, Response::Renamed { observed, parent }) => {
+            observed.kind == super::Kind::Directory && parent.kind == super::Kind::Directory
+        }
         (
             Request::CreateDirectory { parent, .. } | Request::CreateFile { parent, .. },
             Response::Created {

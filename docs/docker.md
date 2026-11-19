@@ -273,6 +273,28 @@ not permit a rewrite. Interrupted and different outputs remain unchanged.
 Reopening a session cannot resume their writes. Native evidence is not an
 application receipt; the existing local application journal remains authoritative.
 
+The protocol also supports a separate retained-source directory move lease.
+It requires the exact listed source, its original parent and an explicit root
+write grant. An ordinary browsing lease cannot move a directory. On Windows,
+the adapter opens the source once with DELETE access, verifies that handle and
+renames that same handle. It does not reopen a reviewed source name.
+Selected roots cannot be sources. The lease permits content inspection, not
+content writes. Close all child leases before the move.
+
+Moves use the same bounded case-insensitive name checks and native no-replace
+effect. They cannot replace an existing target. Successful moves consume the
+source lease, refresh parent evidence and reset its listing cursor.
+Cancellation or a lost response does not prove that the move had no effect.
+Never replay it automatically. Reconcile against the existing application
+journal and exact source/destination evidence. Unix namespace effects retain
+the existing cooperative-writer requirement. These primitives do not approve
+an album or verify its full manifest.
+
+The typed client's checked creation, move and seal methods accept an application
+checkpoint before each bounded native request. Use it to renew the current
+claim and recheck approval and stop, including between name pages and hash steps.
+The production publication/recovery callers are not connected yet.
+
 ### Select and register a paired library root
 
 The main host document can select one paired provider with `paired_media`.

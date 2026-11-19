@@ -15,7 +15,7 @@ fn conflict() -> Error {
     Error::Conflict("native media output is changed, incomplete or no longer writable".into())
 }
 
-fn component(name: &str) -> Result<()> {
+pub(super) fn component(name: &str) -> Result<()> {
     let path = LibraryPath::parse(name)?;
     if path.as_str().is_empty() || path.as_str().contains('/') || name.len() > 1024 {
         return Err(Error::InvalidInput(
@@ -26,9 +26,18 @@ fn component(name: &str) -> Result<()> {
 }
 
 impl Session {
-    fn mutation_parent(&self, adapter: &NativeAdapter, id: u64) -> Result<LibraryDirectory> {
+    pub(super) fn mutation_parent(
+        &self,
+        adapter: &NativeAdapter,
+        id: u64,
+    ) -> Result<LibraryDirectory> {
         let entry = self.entries.get(&id).ok_or_else(conflict)?;
-        let Object::Directory { directory, .. } = &entry.object else {
+        let Object::Directory {
+            directory,
+            movable: false,
+            ..
+        } = &entry.object
+        else {
             return Err(conflict());
         };
         if !entry.writable || entry.depth >= MAX_DEPTH {
@@ -40,18 +49,18 @@ impl Session {
         Ok(directory.try_clone()?)
     }
 
-    fn created(
+    pub(super) fn changed_parent(
         &mut self,
         adapter: &NativeAdapter,
         parent_id: u64,
-        mut child: Entry,
-    ) -> Result<Response> {
+    ) -> Result<Observation> {
         let parent = self.entries.get_mut(&parent_id).ok_or_else(conflict)?;
         let Object::Directory {
             directory,
             cursor,
             failed,
             name_check,
+            ..
         } = &mut parent.object
         else {
             return Err(conflict());
@@ -64,7 +73,17 @@ impl Session {
         *cursor = None;
         *failed = false;
         *name_check = None;
-        child.writable = parent.writable;
+        Ok(current)
+    }
+
+    fn created(
+        &mut self,
+        adapter: &NativeAdapter,
+        parent_id: u64,
+        mut child: Entry,
+    ) -> Result<Response> {
+        let current = self.changed_parent(adapter, parent_id)?;
+        child.writable = self.entries.get(&parent_id).ok_or_else(conflict)?.writable;
         let Response::Opened {
             reference,
             observed,
@@ -276,7 +295,7 @@ impl Session {
         Ok(())
     }
 
-    fn check_new_name(
+    pub(super) fn check_new_name(
         &mut self,
         id: u64,
         directory: &LibraryDirectory,

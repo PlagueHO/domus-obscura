@@ -11,22 +11,29 @@ pub struct MediaOutput {
 }
 
 impl MediaClient {
-    async fn create(&mut self, request: Request) -> Result<Response> {
+    pub(super) async fn named_mutation(
+        &mut self,
+        request: Request,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Response> {
         let mut checked = 0u64;
         loop {
+            checkpoint()?;
             match self.execute(request.clone()).await? {
                 Response::CheckingName { checked: progress }
                     if checked.checked_add(super::MAX_PAGE as u64) == Some(progress) =>
                 {
                     checked = progress;
                 }
-                response @ Response::Created { .. } => return Ok(response),
+                response @ (Response::Created { .. } | Response::Renamed { .. }) => {
+                    return Ok(response);
+                }
                 _ => return self.protocol_error(),
             }
         }
     }
 
-    fn writable_parent(&self, parent: &MediaDirectory, name: &str) -> Result<()> {
+    pub(super) fn writable_parent(&self, parent: &MediaDirectory, name: &str) -> Result<()> {
         self.capacity()?;
         let live = self.require(&parent.owner, &parent.reference, Kind::Directory)?;
         let path = LibraryPath::parse(name)?;
@@ -74,6 +81,21 @@ impl MediaClient {
             },
             Some(parent.reference.id),
         )?;
+        self.update_parent(parent, after)?;
+        Ok(node)
+    }
+
+    pub(super) fn update_parent(
+        &mut self,
+        parent: &mut MediaDirectory,
+        after: Observation,
+    ) -> Result<()> {
+        if self.check_observation(&after).is_err()
+            || after.kind != Kind::Directory
+            || after.identity != parent.observed.identity
+        {
+            return self.protocol_error();
+        }
         parent.observed = after.clone();
         let live = self
             .live
@@ -81,7 +103,7 @@ impl MediaClient {
             .ok_or(Error::Internal("media parent lease disappeared"))?;
         live.observed = after;
         live.complete = false;
-        Ok(node)
+        Ok(())
     }
 
     /// Create only a missing child in an explicitly writable selected root.
@@ -91,12 +113,27 @@ impl MediaClient {
         parent: &mut MediaDirectory,
         name: &str,
     ) -> Result<MediaDirectory> {
+        self.create_directory_checked(parent, name, &mut || Ok(()))
+            .await
+    }
+
+    /// Check the caller's application claim before every bounded name page and
+    /// before creation. A denied checkpoint does not create the child.
+    pub async fn create_directory_checked(
+        &mut self,
+        parent: &mut MediaDirectory,
+        name: &str,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<MediaDirectory> {
         self.writable_parent(parent, name)?;
         let response = self
-            .create(Request::CreateDirectory {
-                parent: parent.reference.clone(),
-                name: name.into(),
-            })
+            .named_mutation(
+                Request::CreateDirectory {
+                    parent: parent.reference.clone(),
+                    name: name.into(),
+                },
+                checkpoint,
+            )
             .await?;
         match self.created_node(parent, response, Kind::Directory)? {
             MediaNode::Directory(directory) => Ok(directory),
@@ -113,6 +150,20 @@ impl MediaClient {
         length: u64,
         sha256: &str,
     ) -> Result<MediaOutput> {
+        self.create_file_checked(parent, name, length, sha256, &mut || Ok(()))
+            .await
+    }
+
+    /// The checkpoint also runs between name-check pages, not only before the
+    /// first request. Existing journal and approval checks belong there.
+    pub async fn create_file_checked(
+        &mut self,
+        parent: &mut MediaDirectory,
+        name: &str,
+        length: u64,
+        sha256: &str,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<MediaOutput> {
         self.writable_parent(parent, name)?;
         if length == 0
             || length > i64::MAX as u64
@@ -126,12 +177,15 @@ impl MediaClient {
             ));
         }
         let response = self
-            .create(Request::CreateFile {
-                parent: parent.reference.clone(),
-                name: name.into(),
-                length,
-                sha256: sha256.into(),
-            })
+            .named_mutation(
+                Request::CreateFile {
+                    parent: parent.reference.clone(),
+                    name: name.into(),
+                    length,
+                    sha256: sha256.into(),
+                },
+                checkpoint,
+            )
             .await?;
         match self.created_node(parent, response, Kind::File)? {
             MediaNode::File(file) => Ok(MediaOutput {
@@ -176,6 +230,16 @@ impl MediaClient {
     /// Sync and independently hash the complete output before obtaining a read
     /// lease. This is I/O evidence, not an application publication receipt.
     pub async fn seal(&mut self, output: MediaOutput) -> Result<MediaFile> {
+        self.seal_checked(output, &mut || Ok(())).await
+    }
+
+    /// Renew the application claim and check stop between bounded hash steps.
+    /// A denied checkpoint leaves the incomplete or verified bytes unchanged.
+    pub async fn seal_checked(
+        &mut self,
+        output: MediaOutput,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<MediaFile> {
         let live = self.require(&output.owner, &output.reference, Kind::File)?;
         let identity = live.observed.identity.clone();
         if output.written != output.length {
@@ -183,6 +247,7 @@ impl MediaClient {
         }
         let mut verified = 0;
         let observed = loop {
+            checkpoint()?;
             let end = verified + (output.length - verified).min(MAX_READ as u64);
             match self
                 .execute(Request::Seal {

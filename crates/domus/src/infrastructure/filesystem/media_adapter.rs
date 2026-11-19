@@ -19,11 +19,14 @@ use std::time::UNIX_EPOCH;
 mod transport;
 pub use transport::{Client, PreparedAdapter};
 mod client;
-pub use client::{MediaClient, MediaDirectory, MediaFile, MediaNode, MediaOutput, MediaPage};
+pub use client::{
+    MediaClient, MediaDirectory, MediaFile, MediaMove, MediaNode, MediaOutput, MediaPage,
+};
 mod selected;
 pub(crate) use selected::{MediaBinding, MediaPairing, SelectedMedia};
 mod blocking;
 pub(crate) use blocking::{BlockingFile, BlockingMedia};
+mod moves;
 mod mutation;
 #[cfg(test)]
 mod tests;
@@ -256,6 +259,15 @@ pub enum Request {
         name: String,
         expected: Observation,
     },
+    PrepareMove {
+        parent: Reference,
+        name: String,
+        expected: Observation,
+    },
+    Rename {
+        directory: Reference,
+        name: String,
+    },
     Page {
         directory: Reference,
         limit: usize,
@@ -291,6 +303,10 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    Renamed {
+        observed: Observation,
+        parent: Observation,
+    },
     CheckingName {
         checked: u64,
     },
@@ -469,6 +485,7 @@ impl NativeAdapter {
             depth,
             observed,
             object: Object::Directory {
+                movable: false,
                 directory,
                 cursor: None,
                 failed: false,
@@ -510,7 +527,8 @@ impl NativeAdapter {
                 })
             }
         }?;
-        entry.writable = parent.writable;
+        entry.writable =
+            parent.writable && !matches!(&parent.object, Object::Directory { movable: true, .. });
         Ok(entry)
     }
 }
@@ -527,6 +545,7 @@ enum Object {
         failed: bool,
     },
     Directory {
+        movable: bool,
         directory: LibraryDirectory,
         cursor: Option<Box<cap_std::fs::ReadDir>>,
         failed: bool,
@@ -596,6 +615,9 @@ impl Session {
 
     fn dispatch(&mut self, adapter: &NativeAdapter, request: Request) -> Result<Response> {
         match request {
+            request @ (Request::PrepareMove { .. } | Request::Rename { .. }) => {
+                self.move_directory(adapter, request)
+            }
             request @ (Request::CreateDirectory { .. }
             | Request::CreateFile { .. }
             | Request::Write { .. }
