@@ -115,14 +115,14 @@ fn local_setup_script_selects_generated_media_and_staging_before_registration()
         .iter()
         .find(|root| root.role == StorageRole::Media)
         .ok_or("media root was not selected")?;
+    let media_provider = storage
+        .providers
+        .iter()
+        .find(|provider| provider.scope == media.provider_scope)
+        .ok_or("media provider was not selected")?;
     assert_eq!(
-        storage
-            .providers
-            .iter()
-            .find(|provider| provider.scope == media.provider_scope)
-            .ok_or("media provider was not selected")?
-            .boundary,
-        root.join("library")
+        std::fs::canonicalize(&media_provider.boundary)?,
+        std::fs::canonicalize(root.join("library"))?
     );
     assert!(
         storage
