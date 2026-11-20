@@ -8,6 +8,9 @@ use rcgen::{
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[path = "transport_tests/production.rs"]
+mod production;
+
 struct Certificates {
     ca: String,
     server: String,
@@ -677,10 +680,8 @@ async fn media_adapter_recovery_removal_native_and_tls_preserves_changed_and_non
 -> TestResult {
     use super::super::{BlockingMedia, io::MediaDirectoryIo};
     use crate::domain::LibraryPath;
-    use crate::infrastructure::filesystem::{
-        LibraryDirectory, binding::persistent_file_identity, native_file_identity,
-    };
-    use crate::infrastructure::store::RecoveryFile;
+    use crate::infrastructure::filesystem::LibraryDirectory;
+    use crate::infrastructure::store::ReplacementFile;
     use sha2::{Digest, Sha256};
     use std::cell::Cell;
 
@@ -729,19 +730,32 @@ async fn media_adapter_recovery_removal_native_and_tls_preserves_changed_and_non
                 .ok_or(Error::Internal("generated recovery source missing"))?;
             let identity = directory.identity().to_owned();
             if case < 4 {
-                let file = std::fs::File::open(folder.join("track.flac"))?;
-                let file_identity = if profile == 0 {
-                    native_file_identity(&file)?
-                } else {
-                    persistent_file_identity(&file)?
-                };
-                drop(file);
-                let mut expected = RecoveryFile {
+                let manifest = vec![ReplacementFile {
                     name: "track.flac".into(),
                     bytes: bytes.len() as u64,
                     sha256: format!("{:x}", Sha256::digest(&bytes)),
-                    identity: file_identity,
-                };
+                }];
+                let (inspected_identity, inspected) = directory.inspect_recovery(&manifest)?;
+                assert_eq!(inspected_identity, identity);
+                let mut expected = directory.recovery_file("track.flac")?;
+                assert_eq!(inspected, vec![expected.clone()]);
+                assert_eq!(expected.bytes, bytes.len() as u64);
+                assert_eq!(expected.sha256, manifest[0].sha256);
+                assert!(directory.recovery_entry("missing.flac")?.is_none());
+                assert!(directory.inspect_recovery(&[]).is_err());
+                assert!(
+                    directory
+                        .inspect_recovery(&vec![manifest[0].clone(); 1003])
+                        .is_err()
+                );
+                let mut wrong = manifest.clone();
+                wrong[0].sha256 = "0".repeat(64);
+                assert!(directory.inspect_recovery(&wrong).is_err());
+                assert!(
+                    directory
+                        .inspect_recovery(&[manifest[0].clone(), manifest[0].clone()])
+                        .is_err()
+                );
                 if case == 1 {
                     expected.identity = "changed-identity".into();
                 } else if case == 2 {

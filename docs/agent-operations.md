@@ -216,8 +216,15 @@ or restore approval.
 Publication owns its parent and album through this same I/O boundary. Keep
 the selected connection through creation, copying, manifest verification and
 publication. Namespace checks must not create another paired connection.
-Native admission remains explicit until restore and recovery ownership are
-converted. Native publication folder creation, copy and verification use this same I/O
+Restore inspection and journalled folder moves also retain a common I/O parent.
+Check its named ancestry before each restore step. Preserve the exact old/new
+identities, complete manifests and sync-before-record boundaries.
+Publication, restore and media recovery enter through selected media admission.
+Private scratch recovery still uses local native admission and its staging lock.
+Media recovery keeps one connection through layout checks and journalled removal.
+Only successful exact lookups can confirm absence. Sync the parent before
+recording removal, including reconciliation after an interrupted effect.
+Publication folder creation, copy and verification use this same I/O
 boundary. Folder creation retains its original Windows handle instead of
 creating and reopening a pathname. Existing names are never adopted by creation.
 Publication and restore moves also use the shared boundary. Close ordinary source

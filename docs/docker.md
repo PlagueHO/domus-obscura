@@ -82,13 +82,13 @@ are supported. Paired files and their parents remain on the same connection.
 A missing folder is reported only after complete successful enumeration.
 Directory checks and repeated listings use the retained reference; a failed
 enumeration cannot be reset into successful absence.
-Native publication folder creation, copying and verification use the common
+Publication folder creation, copying and verification use the common
 I/O boundary. New folders retain their original Windows creation handle.
 Creation refuses existing names and case collisions instead of adopting them.
 Publication and restore moves verify the exact identity and approved complete
 manifest through the actual move-capable source. They rename that same handle
 without replacement. A failed operation cannot retry an uncertain move by path.
-Native journalled recovery removal uses the same boundary. Exact file removal
+Journalled media recovery removal uses the same boundary. Exact file removal
 verifies the actual removal-capable source and checks the current recovery
 version between bounded reads. Directory removal requires an exact empty source.
 Final absence is required before the existing journal records completion.
@@ -97,8 +97,16 @@ existing files against their approved length and SHA-256. It does not repair
 partial files. Receipted missing files, case collisions and extra album entries
 fail. It checks claims between bounded requests and requires an explicit write
 grant even when verifying existing output.
-Production folder selection and recovery inspection are not routed
-through the adapter. Paired production publication remains disabled.
+Production publication, restore and media recovery now use selected native or
+paired admission. Recovery retains one selected connection for layout checks
+and removal. Exact full-stream inspection keeps paired identities opaque.
+Private staging recovery remains native and keeps its OS lock.
+Restore and removal sync the actual parent before durable completion, including
+reconciliation after an interrupted effect. Windows sync remains the deliberate
+native no-op; this is not power-loss proof.
+Generated Windows TLS checks cover main and backup replacement, restore and
+retained-file deletion. This is native test evidence, not Linux-container
+client evidence or whole-image acceptance.
 Do not treat this implementation as Windows Docker acceptance.
 
 The adapter verifies complete selected native chains and retains the opened

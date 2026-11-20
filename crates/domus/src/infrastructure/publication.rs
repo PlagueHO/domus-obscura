@@ -1,6 +1,6 @@
+#[cfg(test)]
+use super::filesystem::LibraryDirectory;
 use super::filesystem::media_adapter::MediaDirectoryIo;
-use super::filesystem::{LibraryDirectory, is_unsafe_cap_link};
-use super::permissions::FilePermissions;
 use super::store::{
     AlbumReplacementPreview, AlbumReplacementRestore, AlbumReplacementRestoreDecision,
     AlbumRestorePreview, PublicationDestination, PublicationFile, PublicationPreparation,
@@ -8,23 +8,10 @@ use super::store::{
 };
 use crate::domain::LibraryPath;
 use crate::{Error, Result};
-use cap_std::fs::Dir;
 use std::fs::File;
 
 fn conflict() -> Error {
     Error::Conflict("publication destination changed, is incomplete or contains existing content; nothing was overwritten".into())
-}
-
-fn checked(directory: &Dir, permissions: &FilePermissions) -> Result<()> {
-    if is_unsafe_cap_link(&directory.dir_metadata()?) {
-        return Err(conflict());
-    }
-    permissions.check(&directory.try_clone()?.into_std_file(), false)?;
-    Ok(())
-}
-
-fn sync(directory: &LibraryDirectory) -> Result<()> {
-    MediaDirectoryIo::native(directory.try_clone()?)?.sync_checked(&|| Ok(()))
 }
 
 fn publication_checkpoint(
@@ -41,17 +28,6 @@ fn publication_checkpoint(
         .map_err(std::io::Error::other)
 }
 
-fn rename_reviewed_directory(
-    parent: &LibraryDirectory,
-    from: &str,
-    to: &str,
-    expected: (&str, &[ReplacementFile]),
-    checkpoint: &dyn Fn() -> std::io::Result<()>,
-) -> Result<()> {
-    MediaDirectoryIo::native(parent.try_clone()?)?
-        .rename_directory(from, to, expected.0, expected.1, checkpoint)
-}
-
 fn publication_manifest(files: &[PublicationFile]) -> Vec<ReplacementFile> {
     files
         .iter()
@@ -61,17 +37,6 @@ fn publication_manifest(files: &[PublicationFile]) -> Vec<ReplacementFile> {
             sha256: file.sha256.clone(),
         })
         .collect()
-}
-
-fn check_case(directory: &Dir, name: &str) -> Result<()> {
-    let key = name.to_uppercase();
-    for entry in directory.entries()? {
-        let candidate = entry?.file_name().into_string().map_err(|_| conflict())?;
-        if candidate != name && candidate.to_uppercase() == key {
-            return Err(conflict());
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn album_replacement_previews(
@@ -207,21 +172,20 @@ fn inspect_album_restore(
         );
         if restore.state == "published" && restore.approved_preview.is_none() {
             let current =
-                open_child_directory(&folders.parent, &folders.final_name)?.ok_or_else(conflict)?;
-            let (identity, files) = replacement_snapshot(&current, &folders.permissions)?;
+                open_media_child(&folders.parent, &folders.final_name)?.ok_or_else(conflict)?;
+            let (identity, files) = current.replacement_snapshot(&|| Ok(()))?;
             if identity == restore.original_album_identity
                 || folder_version(
                     &folders.parent,
                     &folders.retained_name,
                     old,
                     (&identity, &files),
-                    &folders.permissions,
                 )? != Some(FolderVersion::Old)
-                || open_child_directory(&folders.parent, &folders.temporary_name)?.is_some()
+                || open_media_child(&folders.parent, &folders.temporary_name)?.is_some()
             {
                 return Err(conflict());
             }
-            verify_replacement(&current, &files)?;
+            current.verify_replacement(&files, &|| Ok(()))?;
             preview.current_album_identity = identity;
             preview.current_files = files;
         } else {
@@ -230,27 +194,9 @@ fn inspect_album_restore(
                 restore.replacement_files.as_slice(),
             );
             let layout = (
-                folder_version(
-                    &folders.parent,
-                    &folders.final_name,
-                    old,
-                    new,
-                    &folders.permissions,
-                )?,
-                folder_version(
-                    &folders.parent,
-                    &folders.retained_name,
-                    old,
-                    new,
-                    &folders.permissions,
-                )?,
-                folder_version(
-                    &folders.parent,
-                    &folders.temporary_name,
-                    old,
-                    new,
-                    &folders.permissions,
-                )?,
+                folder_version(&folders.parent, &folders.final_name, old, new)?,
+                folder_version(&folders.parent, &folders.retained_name, old, new)?,
+                folder_version(&folders.parent, &folders.temporary_name, old, new)?,
             );
             restore_step(&restore.state, layout.0, layout.1, layout.2)?;
         }
@@ -267,8 +213,7 @@ fn inspect_album_restore(
 }
 
 struct RestoreFolders {
-    parent: LibraryDirectory,
-    permissions: FilePermissions,
+    parent: MediaDirectoryIo,
     final_name: String,
     retained_name: String,
     temporary_name: String,
@@ -276,7 +221,7 @@ struct RestoreFolders {
 
 impl RestoreFolders {
     fn open(store: &Store, restore: &AlbumReplacementRestore) -> Result<Self> {
-        let root = store.open_registered_root(&restore.root, "media")?;
+        let root = store.media_directory_io(&restore.root)?;
         if store.root_binding_identity(&restore.root, "media")? != restore.root_identity {
             return Err(conflict());
         }
@@ -298,20 +243,18 @@ impl RestoreFolders {
             return Err(conflict());
         }
 
-        let permissions = FilePermissions::current()?;
         let mut parent = root;
-        checked(&parent, &permissions)?;
+        parent.check_named_directory(&|| Ok(()))?;
         for name in parent_path.split('/').filter(|part| !part.is_empty()) {
-            check_case(&parent, name)?;
-            parent = parent.open_dir_nofollow(name)?;
-            checked(&parent, &permissions)?;
+            parent.check_case(name, &|| Ok(()))?;
+            parent = open_media_child(&parent, name)?.ok_or_else(conflict)?;
+            parent.check_named_directory(&|| Ok(()))?;
         }
         for name in [final_name, retained_name, temporary_name] {
-            check_case(&parent, name)?;
+            parent.check_case(name, &|| Ok(()))?;
         }
         Ok(Self {
             parent,
-            permissions,
             final_name: final_name.into(),
             retained_name: retained_name.into(),
             temporary_name: temporary_name.into(),
@@ -322,7 +265,6 @@ impl RestoreFolders {
 fn run_album_restore(store: &mut Store, restore: &AlbumReplacementRestore) -> Result<()> {
     let RestoreFolders {
         parent,
-        permissions,
         final_name,
         retained_name,
         temporary_name,
@@ -341,16 +283,17 @@ fn run_album_restore(store: &mut Store, restore: &AlbumReplacementRestore) -> Re
 
     let mut state = restore.state.as_str();
     loop {
-        let final_version = folder_version(&parent, final_name, old, new, &permissions)?;
-        let retained_version = folder_version(&parent, retained_name, old, new, &permissions)?;
-        let temporary_version = folder_version(&parent, temporary_name, old, new, &permissions)?;
+        parent.check_named_directory(&|| Ok(()))?;
+        let final_version = folder_version(&parent, final_name, old, new)?;
+        let retained_version = folder_version(&parent, retained_name, old, new)?;
+        let temporary_version = folder_version(&parent, temporary_name, old, new)?;
         let rename = match restore_step(state, final_version, retained_version, temporary_version)?
         {
             RestoreStep::MoveCurrent => (final_name, temporary_name, new),
             RestoreStep::MoveOriginal => (retained_name, final_name, old),
             RestoreStep::RetainCurrent => (temporary_name, retained_name, new),
             RestoreStep::Record(next) => {
-                sync(&parent)?;
+                parent.sync_checked(&|| Ok(()))?;
                 store.record_album_replacement_restore_state(
                     restore.destination_id,
                     state,
@@ -363,8 +306,8 @@ fn run_album_restore(store: &mut Store, restore: &AlbumReplacementRestore) -> Re
             }
             RestoreStep::Complete => return Ok(()),
         };
-        rename_reviewed_directory(&parent, rename.0, rename.1, rename.2, &|| Ok(()))?;
-        sync(&parent)?;
+        parent.rename_directory(rename.0, rename.1, rename.2.0, rename.2.1, &|| Ok(()))?;
+        parent.sync_checked(&|| Ok(()))?;
         #[cfg(test)]
         crate::crash_tests::checkpoint(match state {
             "restore_prepared" => "restore_current_renamed",
@@ -415,17 +358,16 @@ enum FolderVersion {
 }
 
 fn folder_version(
-    parent: &LibraryDirectory,
+    parent: &MediaDirectoryIo,
     name: &str,
     old: (&str, &[ReplacementFile]),
     new: (&str, &[ReplacementFile]),
-    permissions: &FilePermissions,
 ) -> Result<Option<FolderVersion>> {
-    let Some(directory) = open_child_directory(parent, name)? else {
+    let Some(directory) = open_media_child(parent, name)? else {
         return Ok(None);
     };
-    checked(&directory, permissions)?;
-    let identity = super::filesystem::native_file_identity(&directory.directory_file()?)?;
+    directory.check_named_directory(&|| Ok(()))?;
+    let identity = directory.identity();
     let (version, files) = if identity == old.0 {
         (FolderVersion::Old, old.1)
     } else if identity == new.0 {
@@ -433,16 +375,8 @@ fn folder_version(
     } else {
         return Err(conflict());
     };
-    verify_replacement(&directory, files)?;
+    directory.verify_replacement(files, &|| Ok(()))?;
     Ok(Some(version))
-}
-
-fn replacement_snapshot(
-    directory: &LibraryDirectory,
-    permissions: &FilePermissions,
-) -> Result<(String, Vec<ReplacementFile>)> {
-    checked(directory, permissions)?;
-    media_replacement_snapshot(&MediaDirectoryIo::native(directory.try_clone()?)?)
 }
 
 fn album_replacement_previews_for_location(
@@ -570,7 +504,7 @@ impl PublicationDirectory {
         preparation: &PublicationPreparation,
     ) -> Result<Option<Self>> {
         // Keep native admission until restore and recovery own this same I/O.
-        let root = MediaDirectoryIo::native(store.open_registered_root(&target.root, "media")?)?;
+        let root = store.media_directory_io(&target.root)?;
         if store.root_binding_identity(&target.root, "media")? != target.root_identity {
             return Err(conflict());
         }
@@ -939,18 +873,6 @@ fn open_media_child(parent: &MediaDirectoryIo, name: &str) -> Result<Option<Medi
     parent.open_directory(&LibraryPath::parse(name)?)
 }
 
-fn open_child_directory(parent: &LibraryDirectory, name: &str) -> Result<Option<LibraryDirectory>> {
-    match parent.open_dir_nofollow(name) {
-        Ok(directory) => Ok(Some(directory)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn verify_replacement(directory: &LibraryDirectory, files: &[ReplacementFile]) -> Result<()> {
-    MediaDirectoryIo::native(directory.try_clone()?)?.verify_replacement(files, &|| Ok(()))
-}
-
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
@@ -985,7 +907,7 @@ mod ownership_tests {
 }
 
 #[cfg(all(test, windows))]
-fn rename_no_replace(directory: &Dir, from: &str, to: &str) -> Result<()> {
+fn rename_no_replace(directory: &cap_std::fs::Dir, from: &str, to: &str) -> Result<()> {
     super::filesystem::rename_no_replace(directory, from, to)
 }
 
