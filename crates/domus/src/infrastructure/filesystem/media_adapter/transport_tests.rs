@@ -487,6 +487,85 @@ async fn media_adapter_publication_snapshot_native_and_tls_share_exact_bounded_r
 }
 
 #[tokio::test]
+async fn media_adapter_named_ancestry_native_and_tls_keeps_one_bounded_chain() -> TestResult {
+    use super::super::{BlockingMedia, io::MediaDirectoryIo};
+    use crate::domain::LibraryPath;
+    use crate::infrastructure::filesystem::LibraryDirectory;
+    use std::cell::Cell;
+
+    let fixture = Fixture::new()?;
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    let nested = vec!["n"; super::super::MAX_LIVE - 3].join("/");
+    for profile in 0..3 {
+        std::fs::create_dir_all(
+            media
+                .join(format!("scope-{profile}"))
+                .join(nested.replace('/', std::path::MAIN_SEPARATOR_STR)),
+        )?;
+    }
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let local = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let remote = MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        for (profile, client) in [None, Some(local), Some(remote)].into_iter().enumerate() {
+            let root = match client {
+                None => MediaDirectoryIo::native(LibraryDirectory::open(&media)?)?,
+                Some(client) => {
+                    MediaDirectoryIo::paired(BlockingMedia::new(client, "library".into())?)?
+                }
+            };
+            let path = LibraryPath::parse(&format!("scope-{profile}/{nested}"))?;
+            let directory = root
+                .open_directory(&path)?
+                .ok_or(Error::Internal("generated named directory missing"))?;
+            directory.check_named_directory(&|| Ok(()))?;
+            let checks = Cell::new(0);
+            assert!(matches!(
+                directory.check_named_directory(&|| {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == 2 {
+                        Err(Error::WorkerStopping)
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(Error::WorkerStopping)
+            ));
+            directory.check_named_directory(&|| Ok(()))?;
+
+            let moved_media = media.with_file_name(format!("moved-media-{profile}"));
+            match std::fs::rename(&media, &moved_media) {
+                Ok(()) => {
+                    root.check()?;
+                    assert!(root.check_named_directory(&|| Ok(())).is_err());
+                    std::fs::rename(&moved_media, &media)?;
+                }
+                #[cfg(windows)]
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        || error.raw_os_error() == Some(32) =>
+                {
+                    assert!(media.is_dir());
+                    assert!(!moved_media.exists());
+                    root.check_named_directory(&|| Ok(()))?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    result?;
+    running.stop().await
+}
+
+#[tokio::test]
 async fn media_adapter_publication_sync_native_and_tls_rejects_changed_or_failed_sources()
 -> TestResult {
     use super::super::{BlockingMedia, io::MediaDirectoryIo};
@@ -537,6 +616,7 @@ async fn media_adapter_publication_sync_native_and_tls_rejects_changed_or_failed
         };
         let mut client = connect()?;
         let root = client.open_root("library").await?;
+        client.check_named_directory(&root).await?;
         let album = client
             .page(&root, MAX_PAGE)
             .await?
@@ -547,6 +627,10 @@ async fn media_adapter_publication_sync_native_and_tls_rejects_changed_or_failed
         let source = client.prepare_move(&root, &album).await.map_err(|error| {
             std::io::Error::other(format!("generated move profile {index}: {error}"))
         })?;
+        assert!(matches!(
+            client.check_named_directory(source.directory()).await,
+            Err(Error::Conflict(_))
+        ));
         let Err(error) = client
             .sync_directory_checked(source.directory(), &mut || Ok(()))
             .await
@@ -572,6 +656,7 @@ async fn media_adapter_publication_sync_native_and_tls_rejects_changed_or_failed
         let mut client = connect()?;
         let root = client.open_root("library").await?;
         assert!(client.page(&root, MAX_PAGE).await.is_err());
+        assert!(client.check_named_directory(&root).await.is_err());
         assert!(
             client
                 .sync_directory_checked(&root, &mut || Ok(()))

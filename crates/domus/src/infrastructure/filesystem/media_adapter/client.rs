@@ -232,6 +232,22 @@ impl MediaClient {
         self.directory_status(directory, false).await
     }
 
+    /// Check original named ancestry on this connection without another lease.
+    /// Reviewed move sources and their descendants cannot use ordinary reopens.
+    pub async fn check_named_directory(&mut self, directory: &MediaDirectory) -> Result<()> {
+        let live = self.require(&directory.owner, &directory.reference, Kind::Directory)?;
+        let expected = live.observed.clone();
+        match self
+            .execute(Request::CheckNamedDirectory {
+                directory: directory.reference.clone(),
+            })
+            .await?
+        {
+            Response::DirectoryStatus { observed } if observed == expected => Ok(()),
+            _ => self.protocol_error(),
+        }
+    }
+
     /// Start another bounded listing on the same retained directory. A failed
     /// or changed listing cannot be reset into successful absence.
     pub async fn rewind_directory(&mut self, directory: &MediaDirectory) -> Result<()> {

@@ -574,6 +574,34 @@ impl LibraryDirectory {
         })
     }
 
+    /// Check an ordinary directory's names against its retained ancestors.
+    /// Reviewed DELETE-capable move sources must not use this ordinary reopen.
+    pub(crate) fn check_named_directory(&self, checkpoint: &dyn Fn() -> Result<()>) -> Result<()> {
+        checkpoint()?;
+        if let Some(selection) = &self.selection {
+            selection.reopen()?;
+            checkpoint()?;
+        }
+        if self.names.len() != self.parents.len() {
+            return Err(Error::Internal("retained directory chain is incomplete"));
+        }
+        for ((parent, name), expected) in self.parents.iter().zip(&self.names).zip(
+            self.parents
+                .iter()
+                .skip(1)
+                .chain((!self.names.is_empty()).then_some(&self.directory)),
+        ) {
+            checkpoint()?;
+            let current = Self::open_child(parent, Path::new(name))?;
+            if native_file_identity(&current.into_std_file())?
+                != native_file_identity(&expected.try_clone()?.into_std_file())?
+            {
+                return Err(Error::Conflict("retained directory name changed".into()));
+            }
+        }
+        checkpoint()
+    }
+
     /// Keep the complete retained chain when existing capability-based
     /// consumers descend into application-controlled child directories.
     pub(crate) fn open_dir_nofollow(&self, path: impl AsRef<Path>) -> std::io::Result<Self> {

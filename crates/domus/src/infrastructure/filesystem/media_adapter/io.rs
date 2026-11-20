@@ -183,6 +183,23 @@ impl MediaDirectoryIo {
         }
     }
 
+    /// Validate ordinary named ancestry without opening another paired chain.
+    /// Checkpoints keep typed local claim/stop errors around the bounded request.
+    /// Reviewed move sources instead use their actual source and parent checks.
+    pub(crate) fn check_named_directory(&self, checkpoint: &dyn Fn() -> Result<()>) -> Result<()> {
+        checkpoint()?;
+        self.check()?;
+        match self {
+            Self::Native(directory) => directory.check_named_directory(checkpoint)?,
+            Self::Paired(directory) => {
+                directory.with(|runtime, client, directory| {
+                    runtime.block_on(client.check_named_directory(directory))
+                })?;
+            }
+        }
+        checkpoint()
+    }
+
     /// Preserve the actual parent's sync boundary before journal completion.
     /// Callbacks use only local state. Windows directory sync remains the
     /// native no-op; this does not establish power-loss safety.
@@ -279,6 +296,40 @@ impl MediaDirectoryIo {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn check_case(
+        &self,
+        name: &str,
+        checkpoint: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<()> {
+        super::mutation::component(name)?;
+        match self {
+            Self::Native(directory) => Self::check_native_case(directory, name, checkpoint),
+            Self::Paired(directory) => {
+                checkpoint()?;
+                directory.with(|runtime, client, parent| {
+                    runtime.block_on(client.rewind_directory(parent))
+                })?;
+                let key = name.to_uppercase();
+                loop {
+                    checkpoint()?;
+                    let page = directory.with(|runtime, client, parent| {
+                        runtime.block_on(client.page(parent, MAX_PAGE))
+                    })?;
+                    if page
+                        .entries
+                        .iter()
+                        .any(|entry| entry.name != name && entry.name.to_uppercase() == key)
+                    {
+                        return Err(Error::Conflict("media directory name collides".into()));
+                    }
+                    if page.complete {
+                        return Ok(());
+                    }
+                }
+            }
+        }
     }
 
     fn find(directory: &PairedDirectoryIo, name: &str) -> Result<Option<ListedEntry>> {

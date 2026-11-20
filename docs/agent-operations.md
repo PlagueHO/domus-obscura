@@ -203,9 +203,21 @@ exact full hashes, single links and unchanged observations. Paired children
 retain their actual parents on the same connection. Never reopen a reviewed
 move source through a second connection. Retained directory status checks and
 listing rewinds must reject changed evidence and failed enumeration. A new
-listing is not permission to clear incomplete coverage. Media I/O must remain
-outside SQLite transactions. These previews grant no write or restore approval.
-Native publication folder creation, copy and verification use this same I/O
+listing is not permission to clear incomplete coverage. Ordinary named-ancestor
+checks use that same connection and its original native parent handles. Compare
+each exact component and directory identity through no-follow parent-relative
+opens, including the selected root's ancestry. This check allocates no additional
+paired lease and does not enumerate unrelated siblings. Keep typed local claim
+and stop checkpoints before and after the bounded request. Reviewed move sources
+and their descendants cannot use
+ordinary named-ancestor reopens; verify them through the actual source instead.
+Media I/O must remain outside SQLite transactions. These previews grant no write
+or restore approval.
+Publication owns its parent and album through this same I/O boundary. Keep
+the selected connection through creation, copying, manifest verification and
+publication. Namespace checks must not create another paired connection.
+Native admission remains explicit until restore and recovery ownership are
+converted. Native publication folder creation, copy and verification use this same I/O
 boundary. Folder creation retains its original Windows handle instead of
 creating and reopening a pathname. Existing names are never adopted by creation.
 Publication and restore moves also use the shared boundary. Close ordinary source
@@ -357,7 +369,10 @@ the long-lived scheduler and its bounded operation lanes use dedicated threads.
 
 Use the pinned tools from rust-toolchain.toml, .node-version, and package.json.
 
-On Windows, use the launcher. It finds a complete installed MSVC environment. It accepts the installed stable Rust alias only when its exact version matches the pin.
+On Windows, use the launcher. It finds a complete installed MSVC environment.
+It selects the installed exact release from `rust-toolchain.toml`. It accepts
+the stable alias only when its exact version matches that pin. `rustup run`
+selects the compiler without installing a missing toolchain.
 
 The launcher runs frontend scripts directly in `frontend`. This avoids workspace
 task-state paths that exceed Windows path limits in long worktree paths.

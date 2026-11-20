@@ -155,6 +155,23 @@ impl MediaDirectoryIo {
         Ok((identity, files))
     }
 
+    pub(crate) fn verify_replacement(
+        &self,
+        expected: &[ReplacementFile],
+        checkpoint: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<()> {
+        if expected.len() > 1001 {
+            return Err(folder_conflict());
+        }
+        let (_, actual) = self.replacement_snapshot(checkpoint)?;
+        let mut expected = expected.to_vec();
+        sort_manifest(&mut expected);
+        if actual != expected {
+            return Err(folder_conflict());
+        }
+        Ok(())
+    }
+
     /// Verify through the actual move-capable source, then rename that same
     /// handle without replacement. Any failure retires this operation; a lost
     /// reply never authorizes a pathname retry. The caller owns durable intent.
@@ -197,12 +214,7 @@ impl MediaDirectoryIo {
         if source.identity() != identity {
             return Err(folder_conflict());
         }
-        let (_, actual) = source.replacement_snapshot(checkpoint)?;
-        let mut expected = expected.to_vec();
-        sort_manifest(&mut expected);
-        if actual != expected {
-            return Err(folder_conflict());
-        }
+        source.verify_replacement(expected, checkpoint)?;
         checkpoint()?;
         match (self, source) {
             (Self::Native(parent), Self::Native(source)) => {

@@ -280,6 +280,9 @@ pub enum Request {
         directory: Reference,
         rewind: bool,
     },
+    CheckNamedDirectory {
+        directory: Reference,
+    },
     SyncDirectory {
         directory: Reference,
     },
@@ -697,6 +700,37 @@ impl Session {
             Request::DirectoryStatus { directory, rewind } => {
                 let id = self.require(&directory)?;
                 self.directory_status(adapter, id, rewind)
+            }
+            Request::CheckNamedDirectory { directory } => {
+                let id = self.require(&directory)?;
+                self.directory_status(adapter, id, false)?;
+                let mut ancestor = Some(id);
+                while let Some(parent) = ancestor {
+                    let entry = self
+                        .entries
+                        .get(&parent)
+                        .ok_or(Error::Internal("media ancestor disappeared"))?;
+                    if !matches!(&entry.object, Object::Directory { movable: false, .. }) {
+                        return Err(Error::Conflict(
+                            "reviewed move source cannot reopen named ancestry".into(),
+                        ));
+                    }
+                    ancestor = entry.parent;
+                }
+                let entry = self
+                    .entries
+                    .get(&id)
+                    .ok_or(Error::Internal("media directory disappeared"))?;
+                let Object::Directory {
+                    directory,
+                    movable: false,
+                    ..
+                } = &entry.object
+                else {
+                    return Err(Error::Internal("media directory changed type"));
+                };
+                directory.check_named_directory(&|| Ok(()))?;
+                self.directory_status(adapter, id, false)
             }
             Request::SyncDirectory { directory } => {
                 let id = self.require(&directory)?;
