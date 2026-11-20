@@ -302,10 +302,10 @@ fn verify_windows(parent: &Path, restored: bool, evidence: &serde_json::Value) -
         .as_array()
         .ok_or("missing manifests")?;
     assert_eq!(manifests.len(), 2);
-    for (root, directory) in [("library", "media"), ("backup", "backup")] {
+    for (kind, directory) in [("main", "media"), ("backup", "backup")] {
         let manifest = manifests
             .iter()
-            .find(|item| item["root"] == root)
+            .find(|item| item["kind"] == kind)
             .ok_or("missing root manifest")?;
         let folder = parent
             .join(directory)
@@ -345,8 +345,8 @@ fn verify_windows(parent: &Path, restored: bool, evidence: &serde_json::Value) -
         .ok_or("missing removal evidence")?;
     assert_eq!(removed.len(), 2);
     for entry in removed {
-        let root = match entry["root"].as_str() {
-            Some("library") => "media",
+        let root = match entry["kind"].as_str() {
+            Some("main") => "media",
             Some("backup") => "backup",
             _ => return Err("unknown generated removal root".into()),
         };

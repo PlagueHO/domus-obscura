@@ -327,7 +327,7 @@ fn run_workflow(
             .iter()
             .find(|destination| Some(destination.location_id) == entry.location_id)
             .ok_or(Error::Internal("generated retained destination"))?;
-        removed.push(json!({"root": destination.root, "folder": entry.folder}));
+        removed.push(json!({"kind": destination.kind, "folder": entry.folder}));
     }
     assert_eq!(removed.len(), 2);
     let mut manifests = Vec::new();
@@ -348,7 +348,7 @@ fn run_workflow(
         };
         folder.verify_replacement(&expected, &|| Ok(()))?;
         manifests.push(json!({
-            "root": destination.root,
+            "kind": destination.kind,
             "files": expected.iter().map(|file| json!({
                 "name": file.name, "bytes": file.bytes, "sha256": file.sha256,
             })).collect::<Vec<_>>(),
