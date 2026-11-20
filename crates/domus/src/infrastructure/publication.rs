@@ -15,30 +15,10 @@ use cap_std::fs::{Dir, OpenOptions};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Read;
 
 fn conflict() -> Error {
     Error::Conflict("publication destination changed, is incomplete or contains existing content; nothing was overwritten".into())
-}
-
-fn options(create: bool) -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .create_new(create)
-        .follow(FollowSymlinks::No);
-    #[cfg(windows)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.share_mode(0);
-    }
-    #[cfg(unix)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.mode(0o644);
-    }
-    options
 }
 
 fn read_options() -> OpenOptions {
@@ -947,15 +927,6 @@ impl PublicationDirectory {
         Ok(true)
     }
 
-    fn regular(&self, file: File) -> Result<File> {
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || is_unsafe_link(&metadata) {
-            return Err(conflict());
-        }
-        self.permissions.check(&file, false)?;
-        Ok(file)
-    }
-
     /// Existing exact files can close a sync-before-receipt crash gap. Partial,
     /// different and receipted-but-missing files cannot be rewritten or truncated.
     pub(crate) fn copy(
@@ -964,62 +935,8 @@ impl PublicationDirectory {
         source: &mut File,
         check: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<()> {
-        check()?;
-        LibraryPath::parse(&entry.name)?;
-        if entry.name.is_empty() || entry.name.contains('/') || entry.bytes == 0 {
-            return Err(conflict());
-        }
-        check_case(&self.directory, &entry.name)?;
-        let (mut file, created) = if entry.verified_at.is_some() {
-            (
-                self.regular(
-                    self.directory
-                        .open_with(&entry.name, &options(false))?
-                        .into_std(),
-                )?,
-                false,
-            )
-        } else {
-            match self.directory.open_with(&entry.name, &options(true)) {
-                Ok(file) => (self.regular(file.into_std())?, true),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
-                    self.regular(
-                        self.directory
-                            .open_with(&entry.name, &options(false))?
-                            .into_std(),
-                    )?,
-                    false,
-                ),
-                Err(error) => return Err(error.into()),
-            }
-        };
-        if created {
-            let mut remaining = entry.bytes;
-            let mut buffer = [0; 65_536];
-            while remaining > 0 {
-                check()?;
-                let count = remaining.min(buffer.len() as u64) as usize;
-                source.read_exact(&mut buffer[..count])?;
-                check()?;
-                file.write_all(&buffer[..count])?;
-                #[cfg(test)]
-                if entry.ordinal > 0 {
-                    crate::crash_tests::checkpoint("publication_writing")?;
-                }
-                remaining -= count as u64;
-            }
-            if source.read(&mut [0; 1])? != 0 {
-                return Err(conflict());
-            }
-        }
-        check()?;
-        file.sync_all()?;
-        verify(&mut file, entry, check)?;
-        sync(&self.directory)?;
-        check()?;
-        #[cfg(test)]
-        crate::crash_tests::checkpoint("publication_synced")?;
-        Ok(())
+        MediaDirectoryIo::native(self.directory.try_clone()?)?
+            .copy_publication_file(entry, source, check)
     }
 
     pub(crate) fn verify(
@@ -1027,36 +944,8 @@ impl PublicationDirectory {
         files: &[PublicationFile],
         check: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<()> {
-        let mut names = files
-            .iter()
-            .map(|file| file.name.as_str())
-            .collect::<HashSet<_>>();
-        for entry in self.directory.entries()? {
-            check()?;
-            let entry = entry?;
-            let name = entry.file_name().into_string().map_err(|_| conflict())?;
-            if !names.remove(name.as_str()) {
-                return Err(conflict());
-            }
-            if is_unsafe_cap_link(&entry.metadata()?) {
-                return Err(conflict());
-            }
-        }
-        if !names.is_empty() {
-            return Err(conflict());
-        }
-        for entry in files {
-            check()?;
-            let mut file = self.regular(
-                self.directory
-                    .open_with(&entry.name, &options(false))?
-                    .into_std(),
-            )?;
-            verify(&mut file, entry, check)?;
-        }
-        sync(&self.directory)?;
-        check()?;
-        Ok(())
+        MediaDirectoryIo::native(self.directory.try_clone()?)?
+            .verify_publication_files(files, check)
     }
 }
 
@@ -1121,34 +1010,6 @@ fn verify_replacement(directory: &Dir, files: &[ReplacementFile]) -> Result<()> 
 
 fn rename_no_replace(directory: &Dir, from: &str, to: &str) -> Result<()> {
     super::filesystem::rename_no_replace(directory, from, to)
-}
-
-fn verify(
-    file: &mut File,
-    entry: &PublicationFile,
-    check: &dyn Fn() -> std::io::Result<()>,
-) -> Result<()> {
-    if file.metadata()?.len() != entry.bytes {
-        return Err(conflict());
-    }
-    file.seek(SeekFrom::Start(0))?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0; 65_536];
-    let mut remaining = entry.bytes;
-    while remaining > 0 {
-        check()?;
-        let count = remaining.min(buffer.len() as u64) as usize;
-        file.read_exact(&mut buffer[..count])?;
-        hash.update(&buffer[..count]);
-        remaining -= count as u64;
-    }
-    if file.read(&mut [0; 1])? != 0
-        || file.metadata()?.len() != entry.bytes
-        || format!("{:x}", hash.finalize()) != entry.sha256
-    {
-        return Err(conflict());
-    }
-    Ok(())
 }
 
 #[cfg(all(test, windows))]

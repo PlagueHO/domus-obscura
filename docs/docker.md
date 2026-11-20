@@ -82,7 +82,14 @@ are supported. Paired files and their parents remain on the same connection.
 A missing folder is reported only after complete successful enumeration.
 Directory checks and repeated listings use the retained reference; a failed
 enumeration cannot be reset into successful absence.
-Publication and recovery are not routed through the adapter.
+Native publication copying and verification now use the common I/O boundary.
+Its paired implementation can create only missing outputs or verify exact
+existing files against their approved length and SHA-256. It does not repair
+partial files. Receipted missing files, case collisions and extra album entries
+fail. It checks claims between bounded requests and requires an explicit write
+grant even when verifying existing output.
+Production folder preparation, publication moves and recovery are not routed
+through the adapter. Paired production publication remains disabled.
 Do not treat this implementation as Windows Docker acceptance.
 
 The adapter verifies complete selected native chains and retains the opened
@@ -715,6 +722,18 @@ The Docker workflow builds and checks Linux candidates without publication on
 pull requests. A release requires the same candidate to pass on a separately
 approved Windows Docker Desktop runner. The Windows job does not install Docker,
 enable host networking, or register a runner.
+
+The selected runner design is a dedicated disposable Windows host. This is not
+permission to provision it, install software, register a runner or incur costs.
+The repository is public. Do not register a personal workstation or give the
+runner unrelated credentials. Review the
+[GitHub self-hosted runner security guidance](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners).
+Use a supported Windows client OS, not Windows Server. An Azure VM candidate also
+needs nested virtualization and Docker Business for Docker's VM support.
+Keep the guest OS persistent throughout the run, then remove the complete test
+host. See [Docker Windows requirements](https://docs.docker.com/desktop/setup/install/windows-install/)
+and [Docker VM support](https://docs.docker.com/desktop/setup/vm-vdi/).
+Provider, licensing, resource limits, cost limits and setup approval remain open.
 
 Only the publish job receives `packages: write`.
 Use a protected `docker-release` environment for release approval.

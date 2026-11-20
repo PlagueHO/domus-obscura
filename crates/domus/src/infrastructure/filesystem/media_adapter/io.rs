@@ -13,6 +13,8 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
+mod output;
+
 pub(crate) enum MediaDirectoryIo {
     Native(Box<LibraryDirectory>),
     Paired(Arc<PairedDirectoryIo>),
@@ -26,6 +28,31 @@ pub(crate) struct PairedDirectoryIo {
 }
 
 impl PairedDirectoryIo {
+    fn with_mut<T>(
+        &self,
+        action: impl FnOnce(
+            &tokio::runtime::Runtime,
+            &mut super::MediaClient,
+            &mut MediaDirectory,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        let mut directory = self
+            .directory
+            .lock()
+            .map_err(|_| Error::Internal("media directory lock failed"))?;
+        let directory = directory
+            .as_mut()
+            .ok_or(Error::Internal("media directory is closed"))?;
+        let mut media = self
+            .media
+            .lock()
+            .map_err(|_| Error::Internal("media session lock failed"))?;
+        let BlockingMedia {
+            runtime, client, ..
+        } = &mut *media;
+        action(runtime, client, directory)
+    }
+
     fn with<T>(
         &self,
         action: impl FnOnce(
@@ -175,10 +202,19 @@ impl MediaDirectoryIo {
     }
 
     pub(crate) fn entries(&self, maximum: usize) -> Result<Vec<MediaEntryIo>> {
+        self.entries_checked(maximum, &|| Ok(()))
+    }
+
+    fn entries_checked(
+        &self,
+        maximum: usize,
+        checkpoint: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Vec<MediaEntryIo>> {
         let mut entries = Vec::new();
         match self {
             Self::Native(directory) => {
                 for entry in directory.entries()? {
+                    checkpoint()?;
                     if entries.len() == maximum {
                         return Err(Error::Conflict(
                             "media folder exceeds its file limit".into(),
@@ -203,10 +239,12 @@ impl MediaDirectoryIo {
                 }
             }
             Self::Paired(directory) => {
+                checkpoint()?;
                 directory.with(|runtime, client, parent| {
                     runtime.block_on(client.rewind_directory(parent))
                 })?;
                 loop {
+                    checkpoint()?;
                     let page = directory.with(|runtime, client, parent| {
                         runtime.block_on(client.page(parent, MAX_PAGE))
                     })?;
