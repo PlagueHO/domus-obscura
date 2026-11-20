@@ -455,12 +455,15 @@ async fn media_adapter_publication_snapshot_native_and_tls_share_exact_bounded_r
                 .open_directory(&LibraryPath::parse("album")?)?
                 .ok_or(Error::Internal("generated album missing"))?;
             let snapshot = media_replacement_snapshot(&album)?;
-            assert_eq!(
-                snapshot.0,
-                native_file_identity(
-                    &LibraryDirectory::open(&media.join("album"))?.directory_file()?
-                )?
-            );
+            let actual = LibraryDirectory::open(&media.join("album"))?.directory_file()?;
+            // Compare file contents without equating native and paired identity namespaces.
+            let identity = match &root {
+                MediaDirectoryIo::Native(_) => native_file_identity(&actual)?,
+                MediaDirectoryIo::Paired(_) => {
+                    crate::infrastructure::filesystem::binding::persistent_file_identity(&actual)?
+                }
+            };
+            assert_eq!(snapshot.0, identity);
             assert_eq!(snapshot.1.len(), 2);
             assert_eq!(snapshot.1[0].name, "empty.bin");
             assert_eq!(snapshot.1[0].bytes, 0);
@@ -471,9 +474,9 @@ async fn media_adapter_publication_snapshot_native_and_tls_share_exact_bounded_r
             );
             assert_eq!(media_replacement_snapshot(&album)?, snapshot);
             if let Some(expected) = &expected {
-                assert_eq!(&snapshot, expected);
+                assert_eq!(&snapshot.1, expected);
             } else {
-                expected = Some(snapshot);
+                expected = Some(snapshot.1);
             }
         }
         Ok(())
