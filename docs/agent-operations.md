@@ -208,12 +208,17 @@ outside SQLite transactions. These previews grant no write or restore approval.
 Native publication folder creation, copy and verification use this same I/O
 boundary. Folder creation retains its original Windows handle instead of
 creating and reopening a pathname. Existing names are never adopted by creation.
+Publication and restore moves also use the shared boundary. Close ordinary source
+handles first. Verify the exact identity and complete approved manifest through
+the actual move-capable source, then rename that same handle without replacement.
+Move sources and their descendants remain read-only. Retire a failed operation;
+do not reopen a source pathname to retry an uncertain effect.
 The paired copy implementation keeps partial files unchanged and verifies exact
 existing bytes without a write stream. Write grants remain required.
 Its checkpoints run while the paired session is locked. Use only local claim,
 approval, stop and staging checks in those callbacks. Never reenter media I/O or
 start another async runtime there. Keep complete namespace checks before and
-after the operation. Production folder selection, moves and recovery still
+after the operation. Production folder selection and recovery deletion still
 use native-only accessors. Do not enable paired publication before those
 operations share the same retained-handle boundary and journal.
 See [selected paired roots](docker.md#select-and-register-a-paired-library-root).

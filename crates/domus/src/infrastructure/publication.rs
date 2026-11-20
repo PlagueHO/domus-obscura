@@ -45,13 +45,53 @@ fn checked(directory: &Dir, permissions: &FilePermissions) -> Result<()> {
     Ok(())
 }
 
-fn create_publication_directory(parent: &LibraryDirectory, name: &str) -> Result<LibraryDirectory> {
+fn create_publication_directory(
+    parent: &LibraryDirectory,
+    name: &str,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<LibraryDirectory> {
     let MediaDirectoryIo::Native(directory) =
-        MediaDirectoryIo::native(parent.try_clone()?)?.create_directory(name, &|| Ok(()))?
+        MediaDirectoryIo::native(parent.try_clone()?)?.create_directory(name, checkpoint)?
     else {
         return Err(Error::Internal("native folder preparation changed profile"));
     };
     Ok(*directory)
+}
+
+fn publication_checkpoint(
+    store: &Store,
+    claim: &super::store::JobClaim,
+    target: &PublicationDestination,
+) -> std::io::Result<()> {
+    store
+        .renew_claim(claim, 300)
+        .map_err(std::io::Error::other)?;
+    store
+        .check_publication(claim, target.id)
+        .map(|_| ())
+        .map_err(std::io::Error::other)
+}
+
+fn rename_reviewed_directory(
+    parent: &LibraryDirectory,
+    from: &str,
+    to: &str,
+    expected: (&str, &[ReplacementFile]),
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<()> {
+    MediaDirectoryIo::native(parent.try_clone()?)?
+        .rename_directory(from, to, expected.0, expected.1, checkpoint)
+}
+
+fn publication_manifest(files: &[PublicationFile]) -> Vec<ReplacementFile> {
+    files
+        .iter()
+        .map(|file| ReplacementFile {
+            name: file.name.clone(),
+            bytes: file.bytes,
+            sha256: file.sha256.clone(),
+        })
+        .collect()
 }
 
 fn check_case(directory: &Dir, name: &str) -> Result<()> {
@@ -337,9 +377,9 @@ fn run_album_restore(store: &mut Store, restore: &AlbumReplacementRestore) -> Re
         let temporary_version = folder_version(&parent, temporary_name, old, new, &permissions)?;
         let rename = match restore_step(state, final_version, retained_version, temporary_version)?
         {
-            RestoreStep::MoveCurrent => (final_name, temporary_name),
-            RestoreStep::MoveOriginal => (retained_name, final_name),
-            RestoreStep::RetainCurrent => (temporary_name, retained_name),
+            RestoreStep::MoveCurrent => (final_name, temporary_name, new),
+            RestoreStep::MoveOriginal => (retained_name, final_name, old),
+            RestoreStep::RetainCurrent => (temporary_name, retained_name, new),
             RestoreStep::Record(next) => {
                 sync(&parent)?;
                 store.record_album_replacement_restore_state(
@@ -354,7 +394,7 @@ fn run_album_restore(store: &mut Store, restore: &AlbumReplacementRestore) -> Re
             }
             RestoreStep::Complete => return Ok(()),
         };
-        rename_no_replace(&parent, rename.0, rename.1)?;
+        rename_reviewed_directory(&parent, rename.0, rename.1, rename.2, &|| Ok(()))?;
         sync(&parent)?;
         #[cfg(test)]
         crate::crash_tests::checkpoint(match state {
@@ -538,60 +578,11 @@ fn album_replacement_previews_for_location(
 pub(crate) fn media_replacement_snapshot(
     directory: &MediaDirectoryIo,
 ) -> Result<(String, Vec<ReplacementFile>)> {
-    directory.check()?;
-    let identity = directory.identity().to_owned();
-    let mut files = Vec::new();
-    let mut names = HashSet::new();
-    for entry in directory.entries(1001)? {
-        let relative = LibraryPath::parse(&entry.name)?;
-        if entry.directory
-            || relative.as_str().is_empty()
-            || relative.as_str().contains('/')
-            || !names.insert(entry.name.to_uppercase())
-        {
-            return Err(conflict());
-        }
-        let mut file = directory.open_file(&entry)?;
-        let before = file.evidence()?;
-        if before.bytes > i64::MAX as u64 || before.links != 1 {
-            return Err(conflict());
-        }
-        let mut hash = Sha256::new();
-        let mut buffer = [0; 65_536];
-        let mut total = 0u64;
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            total = total.checked_add(count as u64).ok_or_else(conflict)?;
-            if total > before.bytes {
-                return Err(conflict());
-            }
-            hash.update(&buffer[..count]);
-        }
-        if total != before.bytes || file.evidence()? != before {
-            return Err(conflict());
-        }
-        file.close()?;
-        files.push(ReplacementFile {
-            name: entry.name,
-            bytes: total,
-            sha256: format!("{:x}", hash.finalize()),
-        });
-    }
-    directory.check()?;
-    files.sort_by(|left, right| {
-        left.name
-            .to_uppercase()
-            .cmp(&right.name.to_uppercase())
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    Ok((identity, files))
+    directory.replacement_snapshot(&|| Ok(()))
 }
 
 pub(crate) struct PublicationDirectory {
-    directory: LibraryDirectory,
+    directory: Option<LibraryDirectory>,
     parent: LibraryDirectory,
     identity: String,
     permissions: FilePermissions,
@@ -608,6 +599,7 @@ impl PublicationDirectory {
     /// never adopted, even if its bytes happen to match.
     pub(crate) fn open(
         store: &Store,
+        claim: &super::store::JobClaim,
         target: &PublicationDestination,
         preparation: &PublicationPreparation,
     ) -> Result<Option<Self>> {
@@ -633,7 +625,9 @@ impl PublicationDirectory {
         checked(&parent, &permissions)?;
         let mut parts = final_parent.split('/').filter(|part| !part.is_empty());
         for name in parts.by_ref() {
-            parent = match create_publication_directory(&parent, name) {
+            parent = match create_publication_directory(&parent, name, &|| {
+                publication_checkpoint(store, claim, target)
+            }) {
                 Ok(directory) => directory,
                 Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     parent.open_dir_nofollow(name)?
@@ -736,7 +730,9 @@ impl PublicationDirectory {
                 if let Some(directory) = prepared_directory.take() {
                     directory
                 } else {
-                    match create_publication_directory(&parent, prepared_name) {
+                    match create_publication_directory(&parent, prepared_name, &|| {
+                        publication_checkpoint(store, claim, target)
+                    }) {
                         Ok(directory) => directory,
                         Err(Error::Io(error))
                             if error.kind() == std::io::ErrorKind::AlreadyExists =>
@@ -769,14 +765,23 @@ impl PublicationDirectory {
                     directory
                 } else {
                     drop(directory);
-                    rename_no_replace(&parent, final_name, prepared_name)?;
+                    let files = publication_manifest(&store.publication_files(claim, target.id)?);
+                    rename_reviewed_directory(
+                        &parent,
+                        final_name,
+                        prepared_name,
+                        (&identity, &files),
+                        &|| publication_checkpoint(store, claim, target),
+                    )?;
                     sync(&parent)?;
                     parent.open_dir_nofollow(prepared_name)?
                 }
             } else if target.album_identity.is_some() {
                 return Err(conflict());
             } else {
-                match create_publication_directory(&parent, prepared_name) {
+                match create_publication_directory(&parent, prepared_name, &|| {
+                    publication_checkpoint(store, claim, target)
+                }) {
                     Ok(directory) => directory,
                     Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                         return Ok(None);
@@ -795,7 +800,7 @@ impl PublicationDirectory {
         }
         checked(&directory, &permissions)?;
         Ok(Some(Self {
-            directory,
+            directory: Some(directory),
             parent,
             identity,
             permissions,
@@ -810,6 +815,12 @@ impl PublicationDirectory {
 
     pub(crate) fn identity(&self) -> &str {
         &self.identity
+    }
+
+    fn directory(&self) -> Result<&LibraryDirectory> {
+        self.directory.as_ref().ok_or(Error::Conflict(
+            "publication move failed; reopen the operation".into(),
+        ))
     }
 
     pub(crate) fn check(&self, store: &Store, target: &PublicationDestination) -> Result<()> {
@@ -828,7 +839,7 @@ impl PublicationDirectory {
         {
             return Err(conflict());
         }
-        checked(&self.directory, &self.permissions)
+        checked(self.directory()?, &self.permissions)
     }
 
     pub(crate) fn is_visible(&self) -> bool {
@@ -871,7 +882,16 @@ impl PublicationDirectory {
                 }
                 verify_replacement(&original, &replacement.original_files)?;
                 drop(original);
-                rename_no_replace(&self.parent, &self.final_name, retained_name)?;
+                rename_reviewed_directory(
+                    &self.parent,
+                    &self.final_name,
+                    retained_name,
+                    (
+                        &replacement.original_album_identity,
+                        &replacement.original_files,
+                    ),
+                    &|| publication_checkpoint(store, claim, target),
+                )?;
                 sync(&self.parent)?;
                 #[cfg(test)]
                 crate::crash_tests::checkpoint("replacement_retained")?;
@@ -880,16 +900,17 @@ impl PublicationDirectory {
             if open_child_directory(&self.parent, &self.final_name)?.is_some() {
                 return Err(conflict());
             }
-            let directory = std::mem::replace(&mut self.directory, self.parent.try_clone()?);
-            drop(directory);
-            if let Err(error) =
-                rename_no_replace(&self.parent, &self.prepared_name, &self.final_name)
-            {
-                self.directory = self.parent.open_dir_nofollow(&self.prepared_name)?;
-                return Err(error);
-            }
+            let files = publication_manifest(&store.publication_files(claim, target.id)?);
+            drop(self.directory.take());
+            rename_reviewed_directory(
+                &self.parent,
+                &self.prepared_name,
+                &self.final_name,
+                (&self.identity, &files),
+                &|| publication_checkpoint(store, claim, target),
+            )?;
             sync(&self.parent)?;
-            self.directory = self.parent.open_dir_nofollow(&self.final_name)?;
+            self.directory = Some(self.parent.open_dir_nofollow(&self.final_name)?);
             self.visible = true;
             #[cfg(test)]
             crate::crash_tests::checkpoint("replacement_visible")?;
@@ -902,15 +923,17 @@ impl PublicationDirectory {
         {
             return Err(conflict());
         }
-        let directory = std::mem::replace(&mut self.directory, self.parent.try_clone()?);
-        drop(directory);
-        let result = rename_no_replace(&self.parent, &self.prepared_name, &self.final_name);
-        if let Err(error) = result {
-            self.directory = self.parent.open_dir_nofollow(&self.prepared_name)?;
-            return Err(error);
-        }
+        let files = publication_manifest(&store.publication_files(claim, target.id)?);
+        drop(self.directory.take());
+        rename_reviewed_directory(
+            &self.parent,
+            &self.prepared_name,
+            &self.final_name,
+            (&self.identity, &files),
+            &|| publication_checkpoint(store, claim, target),
+        )?;
         sync(&self.parent)?;
-        self.directory = self.parent.open_dir_nofollow(&self.final_name)?;
+        self.directory = Some(self.parent.open_dir_nofollow(&self.final_name)?);
         self.visible = true;
         #[cfg(test)]
         crate::crash_tests::checkpoint("publication_visible")?;
@@ -940,7 +963,7 @@ impl PublicationDirectory {
         source: &mut File,
         check: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<()> {
-        MediaDirectoryIo::native(self.directory.try_clone()?)?
+        MediaDirectoryIo::native(self.directory()?.try_clone()?)?
             .copy_publication_file(entry, source, check)
     }
 
@@ -949,7 +972,7 @@ impl PublicationDirectory {
         files: &[PublicationFile],
         check: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<()> {
-        MediaDirectoryIo::native(self.directory.try_clone()?)?
+        MediaDirectoryIo::native(self.directory()?.try_clone()?)?
             .verify_publication_files(files, check)
     }
 }
@@ -1013,6 +1036,7 @@ fn verify_replacement(directory: &Dir, files: &[ReplacementFile]) -> Result<()> 
     Ok(())
 }
 
+#[cfg(all(test, windows))]
 fn rename_no_replace(directory: &Dir, from: &str, to: &str) -> Result<()> {
     super::filesystem::rename_no_replace(directory, from, to)
 }

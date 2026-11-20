@@ -24,9 +24,23 @@ pub(crate) enum MediaDirectoryIo {
 
 pub(crate) struct PairedDirectoryIo {
     media: Arc<Mutex<BlockingMedia>>,
-    directory: Mutex<Option<MediaDirectory>>,
+    directory: Mutex<Option<DirectoryLease>>,
     _parent: Option<Arc<PairedDirectoryIo>>,
     identity: String,
+}
+
+enum DirectoryLease {
+    Opened(MediaDirectory),
+    Move(super::MediaMove),
+}
+
+impl DirectoryLease {
+    fn directory(&self) -> &MediaDirectory {
+        match self {
+            Self::Opened(directory) => directory,
+            Self::Move(source) => source.directory(),
+        }
+    }
 }
 
 impl PairedDirectoryIo {
@@ -45,6 +59,9 @@ impl PairedDirectoryIo {
         let directory = directory
             .as_mut()
             .ok_or(Error::Internal("media directory is closed"))?;
+        let DirectoryLease::Opened(directory) = directory else {
+            return Err(Error::Conflict("reviewed move source is read-only".into()));
+        };
         let mut media = self
             .media
             .lock()
@@ -77,14 +94,14 @@ impl PairedDirectoryIo {
         let BlockingMedia {
             runtime, client, ..
         } = &mut *media;
-        action(runtime, client, directory)
+        action(runtime, client, directory.directory())
     }
 
     fn child(self: &Arc<Self>, directory: MediaDirectory) -> Self {
         Self {
             identity: directory.observation().identity.clone(),
             media: self.media.clone(),
-            directory: Mutex::new(Some(directory)),
+            directory: Mutex::new(Some(DirectoryLease::Opened(directory))),
             _parent: Some(self.clone()),
         }
     }
@@ -106,7 +123,14 @@ impl Drop for PairedDirectoryIo {
                 let BlockingMedia {
                     runtime, client, ..
                 } = &mut *media;
-                runtime.block_on(client.close_directory(directory))?;
+                match directory {
+                    DirectoryLease::Opened(directory) => {
+                        runtime.block_on(client.close_directory(directory))?;
+                    }
+                    DirectoryLease::Move(source) => {
+                        runtime.block_on(client.close_move(source))?;
+                    }
+                }
             }
             Ok(())
         })();
@@ -135,7 +159,7 @@ impl MediaDirectoryIo {
         Ok(Self::Paired(Arc::new(PairedDirectoryIo {
             identity: directory.observation().identity.clone(),
             media: Arc::new(Mutex::new(media)),
-            directory: Mutex::new(Some(directory)),
+            directory: Mutex::new(Some(DirectoryLease::Opened(directory))),
             _parent: None,
         })))
     }
@@ -201,17 +225,7 @@ impl MediaDirectoryIo {
         self.check()?;
         match self {
             Self::Native(parent) => {
-                let key = name.to_uppercase();
-                for entry in parent.entries()? {
-                    checkpoint()?;
-                    let candidate = entry?
-                        .file_name()
-                        .into_string()
-                        .map_err(|_| Error::InvalidInput("media name is not Unicode".into()))?;
-                    if candidate != name && candidate.to_uppercase() == key {
-                        return Err(Error::Conflict("media directory name collides".into()));
-                    }
-                }
+                Self::check_native_case(parent, name, checkpoint)?;
                 checkpoint()?;
                 let directory = Self::native(parent.create_child_directory(name)?)?;
                 sync_directory(parent)?;
@@ -228,10 +242,39 @@ impl MediaDirectoryIo {
         }
     }
 
+    fn check_native_case(
+        parent: &LibraryDirectory,
+        name: &str,
+        checkpoint: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<()> {
+        let key = name.to_uppercase();
+        for entry in parent.entries()? {
+            checkpoint()?;
+            let candidate = entry?
+                .file_name()
+                .into_string()
+                .map_err(|_| Error::InvalidInput("media name is not Unicode".into()))?;
+            if candidate != name && candidate.to_uppercase() == key {
+                return Err(Error::Conflict("media directory name collides".into()));
+            }
+        }
+        Ok(())
+    }
+
     fn find(directory: &PairedDirectoryIo, name: &str) -> Result<Option<ListedEntry>> {
+        Self::find_checked(directory, name, &|| Ok(()))
+    }
+
+    fn find_checked(
+        directory: &PairedDirectoryIo,
+        name: &str,
+        checkpoint: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Option<ListedEntry>> {
+        checkpoint()?;
         directory
             .with(|runtime, client, parent| runtime.block_on(client.rewind_directory(parent)))?;
         loop {
+            checkpoint()?;
             let page = directory
                 .with(|runtime, client, parent| runtime.block_on(client.page(parent, MAX_PAGE)))?;
             if let Some(entry) = page.entries.into_iter().find(|entry| entry.name == name) {
@@ -241,10 +284,6 @@ impl MediaDirectoryIo {
                 return Ok(None);
             }
         }
-    }
-
-    pub(crate) fn entries(&self, maximum: usize) -> Result<Vec<MediaEntryIo>> {
-        self.entries_checked(maximum, &|| Ok(()))
     }
 
     fn entries_checked(

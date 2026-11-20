@@ -487,6 +487,98 @@ async fn media_adapter_publication_snapshot_native_and_tls_share_exact_bounded_r
 }
 
 #[tokio::test]
+async fn media_adapter_publication_moves_native_and_tls_require_the_exact_reviewed_source()
+-> TestResult {
+    use super::super::{BlockingMedia, io::MediaDirectoryIo};
+    use crate::domain::LibraryPath;
+    use crate::infrastructure::filesystem::LibraryDirectory;
+
+    let mut fixture = Fixture::new()?;
+    fixture.selection.writable_roots.push("library".into());
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    let bytes = vec![37; MAX_READ * 2 + 19];
+    let mut clients = Vec::new();
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    for profile in 0..3 {
+        for case in 0..5 {
+            let source = media.join(format!("source-{profile}-{case}"));
+            std::fs::create_dir(&source)?;
+            std::fs::write(source.join("track.flac"), &bytes)?;
+            if case == 3 {
+                let target = media.join(format!("target-{profile}-{case}"));
+                std::fs::create_dir(&target)?;
+                std::fs::write(target.join("sentinel"), b"keep")?;
+            }
+            let client = match profile {
+                0 => None,
+                1 => Some(MediaClient::local(fixture.selection.clone(), Vec::new())?),
+                _ => Some(MediaClient::remote(
+                    fixture.selection.logical(),
+                    keys.client(running.address)?,
+                )?),
+            };
+            clients.push((profile, case, client));
+        }
+    }
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        for (profile, case, client) in clients {
+            let root = match client {
+                None => MediaDirectoryIo::native(LibraryDirectory::open(&media)?)?,
+                Some(client) => {
+                    MediaDirectoryIo::paired(BlockingMedia::new(client, "library".into())?)?
+                }
+            };
+            let from = format!("source-{profile}-{case}");
+            let to = format!("target-{profile}-{case}");
+            let directory = root
+                .open_directory(&LibraryPath::parse(&from)?)?
+                .ok_or(Error::Internal("generated move source missing"))?;
+            let (mut identity, mut files) = directory.replacement_snapshot(&|| Ok(()))?;
+            drop(directory);
+            if case == 1 {
+                identity = "changed-identity".into();
+            } else if case == 2 {
+                files[0].sha256 = "0".repeat(64);
+            }
+            let result = root.rename_directory(&from, &to, &identity, &files, &|| {
+                if case == 4 {
+                    Err(std::io::Error::other("generated approval withdrawn"))
+                } else {
+                    Ok(())
+                }
+            });
+            if case == 0 {
+                result?;
+                assert!(!media.join(&from).exists());
+                assert_eq!(std::fs::read(media.join(&to).join("track.flac"))?, bytes);
+                let moved = root
+                    .open_directory(&LibraryPath::parse(&to)?)?
+                    .ok_or(Error::Internal("generated moved folder missing"))?;
+                assert_eq!(moved.identity(), identity);
+            } else {
+                assert!(result.is_err(), "profile={profile}, case={case}");
+                assert_eq!(std::fs::read(media.join(&from).join("track.flac"))?, bytes);
+                if case == 3 {
+                    assert_eq!(std::fs::read(media.join(&to).join("sentinel"))?, b"keep");
+                } else {
+                    assert!(!media.join(&to).exists());
+                }
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    result?;
+    running.stop().await
+}
+
+#[tokio::test]
 async fn media_adapter_directory_creation_native_and_tls_keep_original_ancestry() -> TestResult {
     use super::super::{BlockingMedia, io::MediaDirectoryIo};
     use crate::infrastructure::{filesystem::LibraryDirectory, store::PublicationFile};
@@ -728,6 +820,14 @@ async fn media_adapter_publication_copy_keeps_read_only_grants_for_existing_and_
                     .is_err()
             );
             assert!(!media.join("missing-directory").exists());
+            let (identity, manifest) = directory.replacement_snapshot(&|| Ok(()))?;
+            let Err(error) =
+                root.rename_directory("album", "renamed-album", &identity, &manifest, &|| Ok(()))
+            else {
+                return Err(Error::Internal("read-only root authorized a move"));
+            };
+            assert!(matches!(error, Error::Conflict(message) if message.contains("read-only")));
+            assert!(!media.with_file_name("renamed-album").exists());
             let mut entry = PublicationFile {
                 ordinal: 1,
                 name: "track.flac".into(),

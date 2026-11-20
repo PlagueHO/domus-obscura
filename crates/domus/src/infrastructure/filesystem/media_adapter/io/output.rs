@@ -1,6 +1,6 @@
 use super::*;
 use crate::infrastructure::filesystem::{is_unsafe_link, sync_directory};
-use crate::infrastructure::store::PublicationFile;
+use crate::infrastructure::store::{PublicationFile, ReplacementFile};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
@@ -10,6 +10,21 @@ fn conflict() -> Error {
     Error::Conflict(
         "publication file differs from its approved receipt; nothing was overwritten".into(),
     )
+}
+
+fn folder_conflict() -> Error {
+    Error::Conflict(
+        "media folder changed or differs from the expected files; nothing was overwritten".into(),
+    )
+}
+
+fn sort_manifest(files: &mut [ReplacementFile]) {
+    files.sort_by(|left, right| {
+        left.name
+            .to_uppercase()
+            .cmp(&right.name.to_uppercase())
+            .then_with(|| left.name.cmp(&right.name))
+    });
 }
 
 fn options(create: bool) -> cap_std::fs::OpenOptions {
@@ -83,6 +98,143 @@ fn verify_native(
 }
 
 impl MediaDirectoryIo {
+    pub(crate) fn replacement_snapshot(
+        &self,
+        checkpoint: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<(String, Vec<ReplacementFile>)> {
+        checkpoint()?;
+        self.check()?;
+        let identity = self.identity().to_owned();
+        let mut files = Vec::new();
+        let mut names = HashSet::new();
+        for entry in self.entries_checked(1001, checkpoint)? {
+            checkpoint()?;
+            let relative = LibraryPath::parse(&entry.name)?;
+            if entry.directory
+                || relative.as_str().is_empty()
+                || relative.as_str().contains('/')
+                || !names.insert(entry.name.to_uppercase())
+            {
+                return Err(folder_conflict());
+            }
+            let mut file = self.open_file(&entry)?;
+            let before = file.evidence()?;
+            if before.bytes > i64::MAX as u64 || before.links != 1 {
+                return Err(folder_conflict());
+            }
+            let mut hash = Sha256::new();
+            let mut buffer = [0; 65_536];
+            let mut total = 0u64;
+            loop {
+                checkpoint()?;
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                total = total
+                    .checked_add(count as u64)
+                    .ok_or_else(folder_conflict)?;
+                if total > before.bytes {
+                    return Err(folder_conflict());
+                }
+                hash.update(&buffer[..count]);
+            }
+            if total != before.bytes || file.evidence()? != before {
+                return Err(folder_conflict());
+            }
+            file.close()?;
+            files.push(ReplacementFile {
+                name: entry.name,
+                bytes: total,
+                sha256: format!("{:x}", hash.finalize()),
+            });
+        }
+        checkpoint()?;
+        self.check()?;
+        sort_manifest(&mut files);
+        Ok((identity, files))
+    }
+
+    /// Verify through the actual move-capable source, then rename that same
+    /// handle without replacement. Any failure retires this operation; a lost
+    /// reply never authorizes a pathname retry. The caller owns durable intent.
+    pub(crate) fn rename_directory(
+        &self,
+        from: &str,
+        to: &str,
+        identity: &str,
+        expected: &[ReplacementFile],
+        checkpoint: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<()> {
+        super::super::mutation::component(from)?;
+        super::super::mutation::component(to)?;
+        if expected.len() > 1001 {
+            return Err(folder_conflict());
+        }
+        checkpoint()?;
+        self.check()?;
+        let source = match self {
+            Self::Native(parent) => {
+                Self::check_native_case(parent, to, checkpoint)?;
+                checkpoint()?;
+                Self::native(parent.open_child_for_move(from)?)?
+            }
+            Self::Paired(parent) => {
+                let entry =
+                    Self::find_checked(parent, from, checkpoint)?.ok_or_else(folder_conflict)?;
+                checkpoint()?;
+                let source = parent.with(|runtime, client, directory| {
+                    runtime.block_on(client.prepare_move(directory, &entry))
+                })?;
+                Self::Paired(Arc::new(PairedDirectoryIo {
+                    identity: source.directory().observation().identity.clone(),
+                    media: parent.media.clone(),
+                    directory: Mutex::new(Some(DirectoryLease::Move(source))),
+                    _parent: Some(parent.clone()),
+                }))
+            }
+        };
+        if source.identity() != identity {
+            return Err(folder_conflict());
+        }
+        let (_, actual) = source.replacement_snapshot(checkpoint)?;
+        let mut expected = expected.to_vec();
+        sort_manifest(&mut expected);
+        if actual != expected {
+            return Err(folder_conflict());
+        }
+        checkpoint()?;
+        match (self, source) {
+            (Self::Native(parent), Self::Native(source)) => {
+                parent.rename_retained_child(&source, to)?;
+                sync_directory(parent)?;
+            }
+            (Self::Paired(parent), Self::Paired(source)) => {
+                if Arc::strong_count(&source) != 1 {
+                    return Err(Error::Conflict("move source still has child leases".into()));
+                }
+                let lease = source
+                    .directory
+                    .lock()
+                    .map_err(|_| Error::Internal("media directory lock failed"))?
+                    .take();
+                let Some(DirectoryLease::Move(source)) = lease else {
+                    return Err(Error::Internal("reviewed move source disappeared"));
+                };
+                parent.with_mut(|runtime, client, directory| {
+                    runtime.block_on(client.rename_directory_checked(
+                        directory,
+                        source,
+                        to,
+                        &mut || checkpoint().map_err(Error::from),
+                    ))
+                })?;
+            }
+            _ => return Err(Error::Internal("move source changed I/O profile")),
+        }
+        Ok(())
+    }
+
     /// Copy only a missing output, or sync and verify an exact existing output.
     /// The caller owns durable intent and approval. Checkpoints may access local
     /// claims and staging, never this media session or another async runtime.

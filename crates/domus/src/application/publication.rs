@@ -151,7 +151,7 @@ pub fn publish_new_album(
             let mut preparation = store.prepare_publication_path(claim, target.id)?;
             let mut opened = None;
             for _ in 0..32 {
-                opened = PublicationDirectory::open(store, &target, &preparation)?;
+                opened = PublicationDirectory::open(store, claim, &target, &preparation)?;
                 if opened.is_some() {
                     break;
                 }
@@ -246,9 +246,10 @@ pub fn publish_new_album(
         }
         let result: Result<()> = (|| {
             let preparation = store.publication_preparation(claim, target.id)?;
-            let directory = PublicationDirectory::open(store, &target, &preparation)?.ok_or(
-                Error::Conflict("published album folder is unavailable".into()),
-            )?;
+            let directory = PublicationDirectory::open(store, claim, &target, &preparation)?
+                .ok_or(Error::Conflict(
+                    "published album folder is unavailable".into(),
+                ))?;
             let files = store.publication_files(claim, target.id)?;
             let heartbeat = Heartbeat::new();
             check(store, claim, staging, &directory, &target)?;
