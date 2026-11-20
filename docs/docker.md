@@ -109,6 +109,42 @@ retained-file deletion. This is native test evidence, not Linux-container
 client evidence or whole-image acceptance.
 Do not treat this implementation as Windows Docker acceptance.
 
+### Generated writable container workflow
+
+The separate `media-workflow-artifacts` build target exports a source-stamped
+Linux unit-test executable. It does not add test code or build tools to the
+runtime image. The Windows coordinator requires an existing clean runtime
+candidate with the same source revision as the helper and its checkout.
+It does not pull an image, change Docker settings, or install a service.
+
+From a clean, committed checkout, first build the runtime with the normal Docker
+build task. Then export the helper and run the ignored coordinator:
+
+```powershell
+$revision = git rev-parse HEAD
+docker build --platform linux/amd64 --build-arg "DOMUS_SOURCE_REVISION=$revision" --target media-workflow-artifacts --output type=local,dest=target\media-workflow .
+$env:DOMUS_MEDIA_WORKFLOW_IMAGE = 'domus-obscura:local'
+$env:DOMUS_MEDIA_WORKFLOW_BINARY = (Resolve-Path target\media-workflow\media-workflow).Path
+.\dev.ps1 -TaskArgs @('test', '--lib', 'media_adapter_production_docker_workflow', '--', '--ignored')
+```
+
+Each published/restored case uses separate generated Windows main and backup
+roots with explicit write grants. Private guest state uses a fresh Linux Docker
+volume. The helper runs under the exact inspected runtime image ID, with
+loopback host networking, dropped capabilities, no new privileges, a read-only
+image filesystem, and bounded process resources and time. Pairing input contains
+only generated certificates and logical roots.
+
+The workflow interrupts copy, restore, and deletion journal writes. Continuation
+uses new selected connections. The coordinator independently checks exact
+visible Windows bytes and retained-folder absence. It stops the native adapter
+and removes its owned containers, volume, and Windows fixture. Cleanup errors
+fail the check. The ordinary suite skips this workflow.
+
+The report is `target/media-adapter-docker-workflow.json`. This is generated
+Windows Docker Desktop media evidence, not native Linux-host acceptance,
+installed-service evidence, power-loss proof, or complete release acceptance.
+
 The adapter verifies complete selected native chains and retains the opened
 directories and files. Only the Windows/native host maps root IDs to paths.
 The client sends frozen root definitions and a logical selection digest.

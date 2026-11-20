@@ -28,6 +28,15 @@ FROM builder AS package-verification
 ENV TMPDIR=/checks
 CMD ["python3", "packaging/linux/package-check.py", "/verification/package.tar.gz"]
 
+FROM builder AS media-workflow-verification
+RUN --mount=type=cache,id=domus-obscura-cargo-1.99.1-amd64,target=/home/ubuntu/.cargo,uid=1000,gid=1000,sharing=locked \
+    --mount=type=cache,id=domus-obscura-target-1.99.1-amd64,target=/src/target,uid=1000,gid=1000,sharing=locked \
+    DOMUS_MEDIA_FIXTURE_REVISION="$DOMUS_SOURCE_REVISION" python3 packaging/docker/build-media-fixture.py
+
+FROM scratch AS media-workflow-artifacts
+COPY --from=media-workflow-verification /verification/media-workflow /media-workflow
+COPY --from=media-workflow-verification /verification/media-workflow.revision /media-workflow.revision
+
 FROM ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libgcc-s1 \
     && rm -rf /var/lib/apt/lists/* \
