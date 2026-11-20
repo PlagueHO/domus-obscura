@@ -34,13 +34,19 @@ impl MediaClient {
         }
     }
 
+    fn writable_directory(&self, directory: &MediaDirectory) -> Result<&Live> {
+        let live = self.require(&directory.owner, &directory.reference, Kind::Directory)?;
+        if !live.writable {
+            return Err(Error::Conflict("media root is selected read-only".into()));
+        }
+        Ok(live)
+    }
+
     pub(super) fn writable_parent(&self, parent: &MediaDirectory, name: &str) -> Result<()> {
         self.capacity()?;
         let live = self.require(&parent.owner, &parent.reference, Kind::Directory)?;
         let path = LibraryPath::parse(name)?;
-        if !live.writable {
-            return Err(Error::Conflict("media root is selected read-only".into()));
-        }
+        self.writable_directory(parent)?;
         if live.depth >= MAX_DEPTH
             || path.as_str().is_empty()
             || path.as_str().contains('/')
@@ -51,6 +57,27 @@ impl MediaClient {
             ));
         }
         Ok(())
+    }
+
+    /// Sync the retained writable parent before a durable reconciliation record.
+    /// Directory status stays passive. Check local application state before
+    /// submission; a failed or changed directory is never adopted.
+    pub async fn sync_directory_checked(
+        &mut self,
+        directory: &MediaDirectory,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let expected = self.writable_directory(directory)?.observed.clone();
+        checkpoint()?;
+        match self
+            .execute(Request::SyncDirectory {
+                directory: directory.reference.clone(),
+            })
+            .await?
+        {
+            Response::DirectoryStatus { observed } if observed == expected => Ok(()),
+            _ => self.protocol_error(),
+        }
     }
 
     fn created_node(

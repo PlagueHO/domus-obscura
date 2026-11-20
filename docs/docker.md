@@ -329,6 +329,14 @@ A pending delete, occupied name or lost response requires explicit reconciliatio
 with saved application intent, not automatic replay. Unix removal still requires
 cooperative external writers.
 
+Parent synchronization uses an explicit writable retained-directory request.
+The caller must sync before recording a reconciled restore state, including
+after an interrupted rename. Ordinary status checks have no sync effect.
+Changed observations, failed listing and read-only move sources cannot authorize
+sync. It reuses native directory synchronization; Windows directory sync remains
+a deliberate no-op. File flushing and primitive tests do not prove Windows
+power-loss safety.
+
 The typed client's checked creation, verification, removal, move and seal methods accept an application
 checkpoint before each bounded native request. Use it to renew the current
 claim and recheck approval and stop, including between name pages and hash steps.

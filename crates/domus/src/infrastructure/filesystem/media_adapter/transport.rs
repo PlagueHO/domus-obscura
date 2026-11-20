@@ -473,9 +473,10 @@ fn require_response(request: &Request, response: &Response) -> Result<()> {
         (Request::Seal { .. }, Response::Sealed { observed }) => {
             observed.kind == super::Kind::File && observed.links == 1
         }
-        (Request::DirectoryStatus { .. }, Response::DirectoryStatus { observed }) => {
-            observed.kind == super::Kind::Directory
-        }
+        (
+            Request::DirectoryStatus { .. } | Request::SyncDirectory { .. },
+            Response::DirectoryStatus { observed },
+        ) => observed.kind == super::Kind::Directory,
         (Request::Close { .. }, Response::Closed) => true,
         _ => false,
     };

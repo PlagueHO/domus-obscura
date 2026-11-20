@@ -509,9 +509,28 @@ fn media_adapter_rejects_hard_linked_private_inputs() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn directory_alias(alias: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(alias)
+            .arg(target)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "generated junction creation failed"
+        );
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, alias)?;
+    Ok(())
+}
+
 #[test]
 fn media_adapter_rejects_reparse_or_symlink_entries_without_confirming_absence() -> Result<()> {
-    let fixture = Fixture::new()?;
+    let mut fixture = Fixture::new()?;
+    fixture.selection.writable_roots.push("library".into());
     let alias = fixture
         .selection
         .provider
@@ -520,20 +539,7 @@ fn media_adapter_rejects_reparse_or_symlink_entries_without_confirming_absence()
         .join("media")
         .join("alias");
     let target = fixture.selection.provider.boundary.join("private");
-    #[cfg(windows)]
-    {
-        let output = std::process::Command::new("cmd.exe")
-            .args(["/d", "/c", "mklink", "/J"])
-            .arg(&alias)
-            .arg(&target)
-            .output()?;
-        assert!(
-            output.status.success(),
-            "generated junction creation failed"
-        );
-    }
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, &alias)?;
+    directory_alias(&alias, &target)?;
     let adapter = fixture.adapter()?;
     let mut session = Session::new()?;
     let (root, _) = opened(session.dispatch(&adapter, fixture.request()?)?)?;
@@ -545,6 +551,16 @@ fn media_adapter_rejects_reparse_or_symlink_entries_without_confirming_absence()
                     directory: root.clone(),
                     limit: MAX_PAGE
                 }
+            )
+            .is_err()
+    );
+    assert!(
+        session
+            .dispatch(
+                &adapter,
+                Request::SyncDirectory {
+                    directory: root.clone(),
+                },
             )
             .is_err()
     );

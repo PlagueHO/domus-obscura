@@ -24,17 +24,24 @@ async function control(page: Page, path: string, data = {}) {
   expect(response.ok(), await response.text()).toBe(true);
 }
 
-async function resumePublication(page: Page) {
-  await page.getByRole("button", { name: "Review publication recovery", exact: true }).click();
+async function submitCommand(page: Page, path: string, button: string) {
   const [response] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname === "/api/jobs/1/plans/2/publication/resume",
+        response.request().method() === "POST" && new URL(response.url()).pathname === path,
     ),
-    page.getByRole("button", { name: "Confirm publication recovery", exact: true }).click(),
+    page.getByRole("button", { name: button, exact: true }).click(),
   ]);
-  expect(response.status(), await response.text()).toBe(204);
+  expect(response.status()).toBe(204);
+}
+
+async function resumePublication(page: Page) {
+  await page.getByRole("button", { name: "Review publication recovery", exact: true }).click();
+  await submitCommand(
+    page,
+    "/api/jobs/1/plans/2/publication/resume",
+    "Confirm publication recovery",
+  );
 }
 
 test.beforeEach(async ({ page, browser }) => {
@@ -153,7 +160,7 @@ for (const format of ["mp3", "flac"] as const) {
       await selectAlbums(page, 1, backup, format === "mp3" ? "mp3_cbr320" : "flac_lossless");
       await approveAlbum(page);
       if (backup) await control(page, "/__fixture/backup", { offline: true });
-      await page.getByRole("button", { name: "Start Download", exact: true }).click();
+      await submitCommand(page, "/api/jobs/1/plans/2/run", "Start Download");
       if (backup) {
         await expect(
           page.getByText("The primary is verified. The backup is not complete.", { exact: false }),

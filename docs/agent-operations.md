@@ -213,6 +213,11 @@ handles first. Verify the exact identity and complete approved manifest through
 the actual move-capable source, then rename that same handle without replacement.
 Move sources and their descendants remain read-only. Retire a failed operation;
 do not reopen a source pathname to retry an uncertain effect.
+Parent synchronization also uses the shared boundary, including before restore
+reconciliation records after an interrupted rename. Paired synchronization is
+an explicit writable-directory request. Directory status stays passive. Reject
+changed evidence, failed enumeration and reviewed move sources. Preserve the
+native Windows directory-sync no-op; this is not power-loss proof.
 Journalled recovery removal also uses the shared boundary. Verify the complete
 file through its actual removal-capable source. Check the current recovery
 version between bounded reads and before removal. Remove directories only when

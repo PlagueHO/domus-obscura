@@ -1,7 +1,5 @@
 use super::filesystem::media_adapter::MediaDirectoryIo;
-use super::filesystem::{
-    LibraryDirectory, is_unsafe_cap_link, is_unsafe_link, sync_directory as sync,
-};
+use super::filesystem::{LibraryDirectory, is_unsafe_cap_link, is_unsafe_link};
 use super::permissions::FilePermissions;
 use super::store::{
     AlbumReplacementPreview, AlbumReplacementRestore, AlbumReplacementRestoreDecision,
@@ -43,6 +41,10 @@ fn checked(directory: &Dir, permissions: &FilePermissions) -> Result<()> {
     }
     permissions.check(&directory.try_clone()?.into_std_file(), false)?;
     Ok(())
+}
+
+fn sync(directory: &LibraryDirectory) -> Result<()> {
+    MediaDirectoryIo::native(directory.try_clone()?)?.sync_checked(&|| Ok(()))
 }
 
 fn create_publication_directory(

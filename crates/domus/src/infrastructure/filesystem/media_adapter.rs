@@ -280,6 +280,9 @@ pub enum Request {
         directory: Reference,
         rewind: bool,
     },
+    SyncDirectory {
+        directory: Reference,
+    },
     Read {
         file: Reference,
         offset: u64,
@@ -656,36 +659,51 @@ impl Session {
         })
     }
 
+    fn directory_status(
+        &mut self,
+        adapter: &NativeAdapter,
+        id: u64,
+        rewind: bool,
+    ) -> Result<Response> {
+        let entry = self
+            .entries
+            .get_mut(&id)
+            .ok_or(Error::Internal("media directory disappeared"))?;
+        let Object::Directory {
+            directory,
+            cursor,
+            failed,
+            ..
+        } = &mut entry.object
+        else {
+            return Err(Error::InvalidInput(
+                "media reference is not a directory".into(),
+            ));
+        };
+        let observed = adapter.observe(&directory.directory_file()?, Kind::Directory)?;
+        if *failed || observed != entry.observed {
+            return Err(Error::Conflict(
+                "media directory changed or enumeration failed; open a new reference".into(),
+            ));
+        }
+        if rewind {
+            *cursor = None;
+        }
+        Ok(Response::DirectoryStatus { observed })
+    }
+
     fn dispatch(&mut self, adapter: &NativeAdapter, request: Request) -> Result<Response> {
         match request {
             Request::DirectoryStatus { directory, rewind } => {
                 let id = self.require(&directory)?;
-                let entry = self
-                    .entries
-                    .get_mut(&id)
-                    .ok_or(Error::Internal("media directory disappeared"))?;
-                let Object::Directory {
-                    directory,
-                    cursor,
-                    failed,
-                    ..
-                } = &mut entry.object
-                else {
-                    return Err(Error::InvalidInput(
-                        "media reference is not a directory".into(),
-                    ));
-                };
-                let observed = adapter.observe(&directory.directory_file()?, Kind::Directory)?;
-                if *failed || observed != entry.observed {
-                    return Err(Error::Conflict(
-                        "media directory changed or enumeration failed; open a new reference"
-                            .into(),
-                    ));
-                }
-                if rewind {
-                    *cursor = None;
-                }
-                Ok(Response::DirectoryStatus { observed })
+                self.directory_status(adapter, id, rewind)
+            }
+            Request::SyncDirectory { directory } => {
+                let id = self.require(&directory)?;
+                self.directory_status(adapter, id, false)?;
+                let parent = self.mutation_parent(adapter, id)?;
+                super::sync_directory(&parent)?;
+                self.directory_status(adapter, id, false)
             }
             request @ (Request::RemoveFile { .. } | Request::RemoveDirectory { .. }) => {
                 self.remove_object(adapter, request)

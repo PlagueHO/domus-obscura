@@ -183,6 +183,25 @@ impl MediaDirectoryIo {
         }
     }
 
+    /// Preserve the actual parent's sync boundary before journal completion.
+    /// Callbacks use only local state. Windows directory sync remains the
+    /// native no-op; this does not establish power-loss safety.
+    pub(crate) fn sync_checked(&self, checkpoint: &dyn Fn() -> std::io::Result<()>) -> Result<()> {
+        checkpoint()?;
+        self.check()?;
+        match self {
+            Self::Native(directory) => sync_directory(directory)?,
+            Self::Paired(directory) => {
+                directory.with(|runtime, client, directory| {
+                    runtime.block_on(client.sync_directory_checked(directory, &mut || {
+                        checkpoint().map_err(Error::from)
+                    }))
+                })?
+            }
+        }
+        self.check()
+    }
+
     pub(crate) fn open_directory(&self, relative: &LibraryPath) -> Result<Option<Self>> {
         let Self::Paired(root) = self else {
             let Self::Native(root) = self else {

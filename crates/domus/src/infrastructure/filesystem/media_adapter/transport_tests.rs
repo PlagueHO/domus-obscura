@@ -487,6 +487,107 @@ async fn media_adapter_publication_snapshot_native_and_tls_share_exact_bounded_r
 }
 
 #[tokio::test]
+async fn media_adapter_publication_sync_native_and_tls_rejects_changed_or_failed_sources()
+-> TestResult {
+    use super::super::{BlockingMedia, io::MediaDirectoryIo};
+    use crate::infrastructure::filesystem::LibraryDirectory;
+
+    let mut fixture = Fixture::new()?;
+    fixture.selection.writable_roots.push("library".into());
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let local = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let remote = MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    let native = LibraryDirectory::open(&media)?;
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        let roots = [
+            MediaDirectoryIo::native(native)?,
+            MediaDirectoryIo::paired(BlockingMedia::new(local, "library".into())?)?,
+            MediaDirectoryIo::paired(BlockingMedia::new(remote, "library".into())?)?,
+        ];
+        for (profile, root) in roots.into_iter().enumerate() {
+            root.sync_checked(&|| Ok(())).map_err(|error| {
+                std::io::Error::other(format!("generated sync profile {profile}: {error}"))
+            })?;
+            let Err(error) =
+                root.sync_checked(&|| Err(std::io::Error::other("sync approval withdrawn")))
+            else {
+                return Err(Error::Internal("sync ignored its application checkpoint"));
+            };
+            assert!(error.to_string().contains("sync approval withdrawn"));
+        }
+        Ok(())
+    })
+    .await?;
+    result?;
+
+    for (index, remote) in [false, true].into_iter().enumerate() {
+        let connect = || -> Result<MediaClient> {
+            if remote {
+                MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)
+            } else {
+                MediaClient::local(fixture.selection.clone(), Vec::new())
+            }
+        };
+        let mut client = connect()?;
+        let root = client.open_root("library").await?;
+        let album = client
+            .page(&root, MAX_PAGE)
+            .await?
+            .entries
+            .into_iter()
+            .find(|entry| entry.name == "album")
+            .ok_or(Error::Internal("generated sync album missing"))?;
+        let source = client.prepare_move(&root, &album).await.map_err(|error| {
+            std::io::Error::other(format!("generated move profile {index}: {error}"))
+        })?;
+        let Err(error) = client
+            .sync_directory_checked(source.directory(), &mut || Ok(()))
+            .await
+        else {
+            return Err(Error::Internal("reviewed move source authorized sync").into());
+        };
+        assert!(matches!(error, Error::Conflict(message) if message.contains("read-only")));
+        client.close_move(source).await?;
+        std::fs::create_dir(media.join(format!("changed-sync-{index}")))?;
+        assert!(
+            client
+                .sync_directory_checked(&root, &mut || Ok(()))
+                .await
+                .is_err()
+        );
+        drop(client);
+
+        let alias = media.join(format!("unsafe-sync-{index}"));
+        super::super::tests::directory_alias(
+            &alias,
+            &fixture.selection.provider.boundary.join("private"),
+        )?;
+        let mut client = connect()?;
+        let root = client.open_root("library").await?;
+        assert!(client.page(&root, MAX_PAGE).await.is_err());
+        assert!(
+            client
+                .sync_directory_checked(&root, &mut || Ok(()))
+                .await
+                .is_err()
+        );
+        drop(client);
+        #[cfg(windows)]
+        std::fs::remove_dir(alias)?;
+        #[cfg(unix)]
+        std::fs::remove_file(alias)?;
+    }
+    running.stop().await
+}
+
+#[tokio::test]
 async fn media_adapter_recovery_removal_native_and_tls_preserves_changed_and_nonempty_sources()
 -> TestResult {
     use super::super::{BlockingMedia, io::MediaDirectoryIo};
@@ -933,6 +1034,10 @@ async fn media_adapter_publication_copy_keeps_read_only_grants_for_existing_and_
             let directory = root
                 .open_directory(&LibraryPath::parse("album")?)?
                 .ok_or(Error::Internal("generated read-only album missing"))?;
+            let Err(error) = directory.sync_checked(&|| Ok(())) else {
+                return Err(Error::Internal("read-only root authorized sync"));
+            };
+            assert!(matches!(error, Error::Conflict(message) if message.contains("read-only")));
             assert!(
                 directory
                     .create_directory("missing-directory", &|| Ok(()))
@@ -2426,20 +2531,7 @@ async fn media_adapter_paired_scan_stop_resumes_and_unsafe_refresh_never_confirm
         assert_eq!(before.len(), 1);
         std::fs::remove_file(media.join("album").join("track.flac"))?;
         let alias = media.join("album").join("alias");
-        #[cfg(windows)]
-        {
-            let output = std::process::Command::new("cmd.exe")
-                .args(["/d", "/c", "mklink", "/J"])
-                .arg(&alias)
-                .arg(&target)
-                .output()?;
-            assert!(
-                output.status.success(),
-                "generated junction creation failed"
-            );
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &alias)?;
+        super::super::tests::directory_alias(&alias, &target)?;
         assert!(
             refresh_library_folder(&mut store, location, &LibraryPath::parse("album")?).is_err()
         );
