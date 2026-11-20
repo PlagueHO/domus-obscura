@@ -24,6 +24,19 @@ async function control(page: Page, path: string, data = {}) {
   expect(response.ok(), await response.text()).toBe(true);
 }
 
+async function resumePublication(page: Page) {
+  await page.getByRole("button", { name: "Review publication recovery", exact: true }).click();
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/jobs/1/plans/2/publication/resume",
+    ),
+    page.getByRole("button", { name: "Confirm publication recovery", exact: true }).click(),
+  ]);
+  expect(response.status(), await response.text()).toBe(204);
+}
+
 test.beforeEach(async ({ page, browser }) => {
   test.info().annotations.push({ type: "browser-version", description: browser.version() });
   await control(page, "/__fixture/reset");
@@ -149,12 +162,7 @@ for (const format of ["mp3", "flac"] as const) {
         const premature = await page.request.get("/__fixture/verify/1/2");
         expect(premature.status()).toBe(409);
         await control(page, "/__fixture/backup", { offline: false });
-        await page
-          .getByRole("button", { name: "Review publication recovery", exact: true })
-          .click();
-        await page
-          .getByRole("button", { name: "Confirm publication recovery", exact: true })
-          .click();
+        await resumePublication(page);
       }
       await expect(
         page.getByText("The server reports this request complete.", { exact: false }),
@@ -352,8 +360,7 @@ test("backup pending keeps the verified main separate and resumes retained publi
   ).toBeVisible();
   await verifyOutput(page, 1, { backup: true, pending: true });
   await control(page, "/__fixture/backup", { offline: false });
-  await page.getByRole("button", { name: "Review publication recovery", exact: true }).click();
-  await page.getByRole("button", { name: "Confirm publication recovery", exact: true }).click();
+  await resumePublication(page);
   await expect(
     page.getByText("The server reports this request complete.", { exact: false }),
   ).toBeVisible();

@@ -139,13 +139,18 @@ fn unchanged(before: &Metadata, after: &Metadata) -> bool {
     true
 }
 
-fn evidence(handle: &mut File, name: &str) -> Result<RecoveryFile> {
+fn evidence(
+    handle: &mut File,
+    name: &str,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<RecoveryFile> {
     let before = regular(handle)?;
     let identity = native_file_identity(handle)?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 65_536];
     let mut total = 0u64;
     loop {
+        checkpoint()?;
         let count = handle.read(&mut buffer)?;
         if count == 0 {
             break;
@@ -205,7 +210,7 @@ pub(crate) fn inspect(
         let mut handle = directory
             .open_with(name, &options(false, false))?
             .into_std();
-        let current = evidence(&mut handle, name)?;
+        let current = evidence(&mut handle, name, &|| Ok(()))?;
         if current.bytes != expected.bytes || current.sha256 != expected.sha256 {
             return Err(conflict());
         }
@@ -224,20 +229,32 @@ pub(crate) fn file(directory: &Dir, name: &str) -> Result<RecoveryFile> {
     let mut handle = directory
         .open_with(name, &options(false, false))?
         .into_std();
-    evidence(&mut handle, name)
+    evidence(&mut handle, name, &|| Ok(()))
+}
+
+#[cfg(test)]
+fn delete_file(directory: &Dir, expected: &RecoveryFile) -> Result<()> {
+    delete_file_checked(directory, expected, &|| Ok(()))
 }
 
 /// Remove only the exact, still-complete file bound to this receipt.
+/// Check current approval between bounded reads and before the effect.
 /// No file contents are rewritten, including on an error.
-pub(crate) fn delete_file(directory: &Dir, expected: &RecoveryFile) -> Result<()> {
+pub(crate) fn delete_file_checked(
+    directory: &Dir,
+    expected: &RecoveryFile,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<()> {
+    checkpoint()?;
     checked_directory(directory)?;
     exact_name(directory, &expected.name)?;
     let mut handle = directory
         .open_with(&expected.name, &options(true, false))?
         .into_std();
-    if evidence(&mut handle, &expected.name)? != *expected {
+    if evidence(&mut handle, &expected.name, checkpoint)? != *expected {
         return Err(conflict());
     }
+    checkpoint()?;
     #[cfg(windows)]
     native_file_delete::ValidatedHandle::file(handle)?.delete()?;
     #[cfg(unix)]
@@ -255,8 +272,19 @@ pub(crate) fn delete_file(directory: &Dir, expected: &RecoveryFile) -> Result<()
     sync_directory(directory)
 }
 
+#[cfg(test)]
+fn remove_directory(parent: &Dir, name: &str, identity: &str) -> Result<()> {
+    remove_directory_checked(parent, name, identity, &|| Ok(()))
+}
+
 /// Remove one exact empty directory. Never recurse or remove an ancestor.
-pub(crate) fn remove_directory(parent: &Dir, name: &str, identity: &str) -> Result<()> {
+pub(crate) fn remove_directory_checked(
+    parent: &Dir,
+    name: &str,
+    identity: &str,
+    checkpoint: &dyn Fn() -> std::io::Result<()>,
+) -> Result<()> {
+    checkpoint()?;
     checked_directory(parent)?;
     exact_name(parent, name)?;
     let handle = parent.open_with(name, &options(true, true))?.into_std();
@@ -265,6 +293,7 @@ pub(crate) fn remove_directory(parent: &Dir, name: &str, identity: &str) -> Resu
         return Err(conflict());
     }
     let handle = directory.into_std_file();
+    checkpoint()?;
     #[cfg(windows)]
     native_file_delete::ValidatedHandle::directory(handle)?.delete()?;
     #[cfg(unix)]

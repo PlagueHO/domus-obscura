@@ -88,12 +88,16 @@ Creation refuses existing names and case collisions instead of adopting them.
 Publication and restore moves verify the exact identity and approved complete
 manifest through the actual move-capable source. They rename that same handle
 without replacement. A failed operation cannot retry an uncertain move by path.
+Native journalled recovery removal uses the same boundary. Exact file removal
+verifies the actual removal-capable source and checks the current recovery
+version between bounded reads. Directory removal requires an exact empty source.
+Final absence is required before the existing journal records completion.
 Its paired implementation can create only missing outputs or verify exact
 existing files against their approved length and SHA-256. It does not repair
 partial files. Receipted missing files, case collisions and extra album entries
 fail. It checks claims between bounded requests and requires an explicit write
 grant even when verifying existing output.
-Production folder selection and recovery deletion are not routed
+Production folder selection and recovery inspection are not routed
 through the adapter. Paired production publication remains disabled.
 Do not treat this implementation as Windows Docker acceptance.
 

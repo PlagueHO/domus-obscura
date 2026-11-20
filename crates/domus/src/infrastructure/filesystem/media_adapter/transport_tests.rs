@@ -487,6 +487,125 @@ async fn media_adapter_publication_snapshot_native_and_tls_share_exact_bounded_r
 }
 
 #[tokio::test]
+async fn media_adapter_recovery_removal_native_and_tls_preserves_changed_and_nonempty_sources()
+-> TestResult {
+    use super::super::{BlockingMedia, io::MediaDirectoryIo};
+    use crate::domain::LibraryPath;
+    use crate::infrastructure::filesystem::{
+        LibraryDirectory, binding::persistent_file_identity, native_file_identity,
+    };
+    use crate::infrastructure::store::RecoveryFile;
+    use sha2::{Digest, Sha256};
+    use std::cell::Cell;
+
+    let mut fixture = Fixture::new()?;
+    fixture.selection.writable_roots.push("library".into());
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    let bytes = vec![61; MAX_READ * 2 + 19];
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let mut clients = Vec::new();
+    for profile in 0..3 {
+        for case in 0..6 {
+            let folder = media.join(format!("removal-{profile}-{case}"));
+            std::fs::create_dir(&folder)?;
+            if case != 5 {
+                std::fs::write(folder.join("track.flac"), &bytes)?;
+            }
+            let client = match profile {
+                0 => None,
+                1 => Some(MediaClient::local(fixture.selection.clone(), Vec::new())?),
+                _ => Some(MediaClient::remote(
+                    fixture.selection.logical(),
+                    keys.client(running.address)?,
+                )?),
+            };
+            clients.push((profile, case, client));
+        }
+    }
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        for (profile, case, client) in clients {
+            let root = match client {
+                None => MediaDirectoryIo::native(LibraryDirectory::open(&media)?)?,
+                Some(client) => {
+                    MediaDirectoryIo::paired(BlockingMedia::new(client, "library".into())?)?
+                }
+            };
+            let name = format!("removal-{profile}-{case}");
+            let folder = media.join(&name);
+            let directory = root
+                .open_directory(&LibraryPath::parse(&name)?)?
+                .ok_or(Error::Internal("generated recovery source missing"))?;
+            let identity = directory.identity().to_owned();
+            if case < 4 {
+                let file = std::fs::File::open(folder.join("track.flac"))?;
+                let file_identity = if profile == 0 {
+                    native_file_identity(&file)?
+                } else {
+                    persistent_file_identity(&file)?
+                };
+                drop(file);
+                let mut expected = RecoveryFile {
+                    name: "track.flac".into(),
+                    bytes: bytes.len() as u64,
+                    sha256: format!("{:x}", Sha256::digest(&bytes)),
+                    identity: file_identity,
+                };
+                if case == 1 {
+                    expected.identity = "changed-identity".into();
+                } else if case == 2 {
+                    expected.sha256 = "0".repeat(64);
+                }
+                let calls = Cell::new(0);
+                let result = directory.remove_recovery_file(&expected, &|| {
+                    calls.set(calls.get() + 1);
+                    if case == 3 && calls.get() >= 4 {
+                        Err(std::io::Error::other("generated approval withdrawn"))
+                    } else {
+                        Ok(())
+                    }
+                });
+                drop(directory);
+                if case == 0 {
+                    result?;
+                    assert!(!folder.join("track.flac").exists());
+                    root.remove_recovery_directory(&name, &identity, &|| Ok(()))?;
+                    assert!(!folder.exists());
+                } else {
+                    assert!(result.is_err(), "profile={profile}, case={case}");
+                    assert_eq!(std::fs::read(folder.join("track.flac"))?, bytes);
+                }
+            } else {
+                drop(directory);
+                let expected = if case == 5 {
+                    "changed-identity"
+                } else {
+                    &identity
+                };
+                assert!(
+                    root.remove_recovery_directory(&name, expected, &|| Ok(()))
+                        .is_err(),
+                    "profile={profile}, case={case}"
+                );
+                assert!(folder.is_dir());
+                if case == 4 {
+                    assert_eq!(std::fs::read(folder.join("track.flac"))?, bytes);
+                }
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    result?;
+    running.stop().await
+}
+
+#[tokio::test]
 async fn media_adapter_publication_moves_native_and_tls_require_the_exact_reviewed_source()
 -> TestResult {
     use super::super::{BlockingMedia, io::MediaDirectoryIo};
@@ -828,6 +947,26 @@ async fn media_adapter_publication_copy_keeps_read_only_grants_for_existing_and_
             };
             assert!(matches!(error, Error::Conflict(message) if message.contains("read-only")));
             assert!(!media.with_file_name("renamed-album").exists());
+            let file = std::fs::File::open(media.join("track.flac"))?;
+            let expected = crate::infrastructure::store::RecoveryFile {
+                name: "track.flac".into(),
+                bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                identity: crate::infrastructure::filesystem::binding::persistent_file_identity(
+                    &file,
+                )?,
+            };
+            drop(file);
+            assert!(
+                directory
+                    .remove_recovery_file(&expected, &|| Ok(()))
+                    .is_err()
+            );
+            assert!(
+                root.remove_recovery_directory("album", &identity, &|| Ok(()))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(media.join("track.flac"))?, bytes);
             let mut entry = PublicationFile {
                 ordinal: 1,
                 name: "track.flac".into(),

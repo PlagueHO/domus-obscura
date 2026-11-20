@@ -168,7 +168,7 @@ pub fn publish_new_album(
                 let heartbeat = Heartbeat::new();
                 check(store, claim, staging, &directory, &target)?;
                 directory.verify(&files, &|| {
-                    heartbeat.tick(|| check(store, claim, staging, &directory, &target))
+                    heartbeat.tick(|| check_local(store, claim, staging, &target))
                 })?;
                 check(store, claim, staging, &directory, &target)?;
                 if target.replacement.is_some() {
@@ -198,8 +198,7 @@ pub fn publish_new_album(
                 {
                     check(store, claim, staging, &directory, &target)?;
                     let heartbeat = Heartbeat::new();
-                    let tick =
-                        || heartbeat.tick(|| check(store, claim, staging, &directory, &target));
+                    let tick = || heartbeat.tick(|| check_local(store, claim, staging, &target));
                     let mut input = source.publication_input(item, &tick)?;
                     check(store, claim, staging, &directory, &target)?;
                     directory.copy(file, &mut input, &tick)?;
@@ -212,7 +211,7 @@ pub fn publish_new_album(
             let heartbeat = Heartbeat::new();
             check(store, claim, staging, &directory, &target)?;
             directory.verify(&files, &|| {
-                heartbeat.tick(|| check(store, claim, staging, &directory, &target))
+                heartbeat.tick(|| check_local(store, claim, staging, &target))
             })?;
             check(store, claim, staging, &directory, &target)?;
             #[cfg(test)]
@@ -220,7 +219,7 @@ pub fn publish_new_album(
             directory.publish(store, claim, &target)?;
             let heartbeat = Heartbeat::new();
             directory.verify(&files, &|| {
-                heartbeat.tick(|| check(store, claim, staging, &directory, &target))
+                heartbeat.tick(|| check_local(store, claim, staging, &target))
             })?;
             check(store, claim, staging, &directory, &target)?;
             store.record_publication_visible(claim, target.id)?;
@@ -254,7 +253,7 @@ pub fn publish_new_album(
             let heartbeat = Heartbeat::new();
             check(store, claim, staging, &directory, &target)?;
             directory.verify(&files, &|| {
-                heartbeat.tick(|| check(store, claim, staging, &directory, &target))
+                heartbeat.tick(|| check_local(store, claim, staging, &target))
             })?;
             check(store, claim, staging, &directory, &target)?;
             Ok(())
@@ -285,14 +284,24 @@ fn check(
     directory: &PublicationDirectory,
     target: &PublicationDestination,
 ) -> std::io::Result<()> {
+    check_local(store, claim, staging, target)?;
+    directory
+        .check(store, target)
+        .map_err(std::io::Error::other)
+}
+
+fn check_local(
+    store: &Store,
+    claim: &JobClaim,
+    staging: &StagingRoot,
+    target: &PublicationDestination,
+) -> std::io::Result<()> {
     store
         .renew_claim(claim, 300)
         .map_err(std::io::Error::other)?;
     staging.check_store(store).map_err(std::io::Error::other)?;
     store
         .check_publication(claim, target.id)
-        .map_err(std::io::Error::other)?;
-    directory
-        .check(store, target)
+        .map(|_| ())
         .map_err(std::io::Error::other)
 }

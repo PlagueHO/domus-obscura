@@ -16,6 +16,7 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 mod output;
+mod recovery;
 
 pub(crate) enum MediaDirectoryIo {
     Native(Box<LibraryDirectory>),

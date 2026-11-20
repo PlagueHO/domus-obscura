@@ -213,12 +213,18 @@ handles first. Verify the exact identity and complete approved manifest through
 the actual move-capable source, then rename that same handle without replacement.
 Move sources and their descendants remain read-only. Retire a failed operation;
 do not reopen a source pathname to retry an uncertain effect.
+Journalled recovery removal also uses the shared boundary. Verify the complete
+file through its actual removal-capable source. Check the current recovery
+version between bounded reads and before removal. Remove directories only when
+they are exact and empty. Require final absence; an occupied or delete-pending
+name is not success. Keep the existing per-item intent and completion records.
 The paired copy implementation keeps partial files unchanged and verifies exact
 existing bytes without a write stream. Write grants remain required.
 Its checkpoints run while the paired session is locked. Use only local claim,
 approval, stop and staging checks in those callbacks. Never reenter media I/O or
 start another async runtime there. Keep complete namespace checks before and
-after the operation. Production folder selection and recovery deletion still
+after the operation. Publication callbacks keep these local checks separate
+from namespace checks. Production folder selection and recovery inspection still
 use native-only accessors. Do not enable paired publication before those
 operations share the same retained-handle boundary and journal.
 See [selected paired roots](docker.md#select-and-register-a-paired-library-root).

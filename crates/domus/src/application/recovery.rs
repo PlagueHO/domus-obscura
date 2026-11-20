@@ -1,4 +1,5 @@
 use crate::domain::{LibraryPath, Page};
+use crate::infrastructure::filesystem::media_adapter::MediaDirectoryIo;
 use crate::infrastructure::filesystem::{LibraryDirectory, native_file_identity, sync_directory};
 use crate::infrastructure::recovery_files;
 use crate::infrastructure::staging::StagingRoot;
@@ -434,14 +435,20 @@ fn run_operation(
                             "removing",
                         )?;
                     }
+                    let directory = MediaDirectoryIo::native(parent.try_clone()?)?;
+                    let checkpoint = || {
+                        store
+                            .check_recovery_current(&entry)
+                            .map_err(std::io::Error::other)
+                    };
                     if item.directory {
-                        recovery_files::remove_directory(
-                            &parent,
+                        directory.remove_recovery_directory(
                             &item.file.name,
                             &item.file.identity,
+                            &checkpoint,
                         )?;
                     } else {
-                        recovery_files::delete_file(&parent, &item.file)?;
+                        directory.remove_recovery_file(&item.file, &checkpoint)?;
                     }
                     sync_directory(&parent)?;
                     #[cfg(test)]
