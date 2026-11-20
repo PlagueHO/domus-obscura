@@ -205,13 +205,15 @@ move source through a second connection. Retained directory status checks and
 listing rewinds must reject changed evidence and failed enumeration. A new
 listing is not permission to clear incomplete coverage. Media I/O must remain
 outside SQLite transactions. These previews grant no write or restore approval.
-Native publication copy and verification now use this same I/O boundary.
+Native publication folder creation, copy and verification use this same I/O
+boundary. Folder creation retains its original Windows handle instead of
+creating and reopening a pathname. Existing names are never adopted by creation.
 The paired copy implementation keeps partial files unchanged and verifies exact
 existing bytes without a write stream. Write grants remain required.
 Its checkpoints run while the paired session is locked. Use only local claim,
 approval, stop and staging checks in those callbacks. Never reenter media I/O or
 start another async runtime there. Keep complete namespace checks before and
-after the operation. Production folder preparation, moves and recovery still
+after the operation. Production folder selection, moves and recovery still
 use native-only accessors. Do not enable paired publication before those
 operations share the same retained-handle boundary and journal.
 See [selected paired roots](docker.md#select-and-register-a-paired-library-root).

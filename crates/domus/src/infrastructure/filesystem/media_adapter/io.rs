@@ -6,7 +6,9 @@ use super::{
 };
 use crate::domain::LibraryPath;
 use crate::infrastructure::filesystem::read_only::ReadEvidence;
-use crate::infrastructure::filesystem::{LibraryDirectory, ReadFile, is_unsafe_cap_link};
+use crate::infrastructure::filesystem::{
+    LibraryDirectory, ReadFile, is_unsafe_cap_link, sync_directory,
+};
 use crate::infrastructure::permissions::FilePermissions;
 use crate::{Error, Result};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
@@ -184,6 +186,46 @@ impl MediaDirectoryIo {
             directory = Arc::new(directory.child(child));
         }
         Ok(Some(Self::Paired(directory)))
+    }
+
+    /// Create a missing child and retain its original Windows creation handle.
+    /// Existing names are never adopted. The caller owns durable intent; paired
+    /// checkpoints must not reenter this session or another async runtime.
+    pub(crate) fn create_directory(
+        &self,
+        name: &str,
+        checkpoint: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Self> {
+        super::mutation::component(name)?;
+        checkpoint()?;
+        self.check()?;
+        match self {
+            Self::Native(parent) => {
+                let key = name.to_uppercase();
+                for entry in parent.entries()? {
+                    checkpoint()?;
+                    let candidate = entry?
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| Error::InvalidInput("media name is not Unicode".into()))?;
+                    if candidate != name && candidate.to_uppercase() == key {
+                        return Err(Error::Conflict("media directory name collides".into()));
+                    }
+                }
+                checkpoint()?;
+                let directory = Self::native(parent.create_child_directory(name)?)?;
+                sync_directory(parent)?;
+                Ok(directory)
+            }
+            Self::Paired(parent) => {
+                let directory = parent.with_mut(|runtime, client, directory| {
+                    runtime.block_on(client.create_directory_checked(directory, name, &mut || {
+                        checkpoint().map_err(Error::from)
+                    }))
+                })?;
+                Ok(Self::Paired(Arc::new(parent.child(directory))))
+            }
+        }
     }
 
     fn find(directory: &PairedDirectoryIo, name: &str) -> Result<Option<ListedEntry>> {

@@ -45,6 +45,15 @@ fn checked(directory: &Dir, permissions: &FilePermissions) -> Result<()> {
     Ok(())
 }
 
+fn create_publication_directory(parent: &LibraryDirectory, name: &str) -> Result<LibraryDirectory> {
+    let MediaDirectoryIo::Native(directory) =
+        MediaDirectoryIo::native(parent.try_clone()?)?.create_directory(name, &|| Ok(()))?
+    else {
+        return Err(Error::Internal("native folder preparation changed profile"));
+    };
+    Ok(*directory)
+}
+
 fn check_case(directory: &Dir, name: &str) -> Result<()> {
     let key = name.to_uppercase();
     for entry in directory.entries()? {
@@ -624,13 +633,13 @@ impl PublicationDirectory {
         checked(&parent, &permissions)?;
         let mut parts = final_parent.split('/').filter(|part| !part.is_empty());
         for name in parts.by_ref() {
-            check_case(&parent, name)?;
-            match parent.create_dir(name) {
-                Ok(()) => sync(&parent)?,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
-            parent = parent.open_dir_nofollow(name)?;
+            parent = match create_publication_directory(&parent, name) {
+                Ok(directory) => directory,
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    parent.open_dir_nofollow(name)?
+                }
+                Err(error) => return Err(error),
+            };
             checked(&parent, &permissions)?;
         }
         let final_name = final_path
@@ -727,15 +736,14 @@ impl PublicationDirectory {
                 if let Some(directory) = prepared_directory.take() {
                     directory
                 } else {
-                    match parent.create_dir(prepared_name) {
-                        Ok(()) => {
-                            sync(&parent)?;
-                            parent.open_dir_nofollow(prepared_name)?
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    match create_publication_directory(&parent, prepared_name) {
+                        Ok(directory) => directory,
+                        Err(Error::Io(error))
+                            if error.kind() == std::io::ErrorKind::AlreadyExists =>
+                        {
                             return Ok(None);
                         }
-                        Err(error) => return Err(error.into()),
+                        Err(error) => return Err(error),
                     }
                 }
             }
@@ -768,15 +776,12 @@ impl PublicationDirectory {
             } else if target.album_identity.is_some() {
                 return Err(conflict());
             } else {
-                match parent.create_dir(prepared_name) {
-                    Ok(()) => {
-                        sync(&parent)?;
-                        parent.open_dir_nofollow(prepared_name)?
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                match create_publication_directory(&parent, prepared_name) {
+                    Ok(directory) => directory,
+                    Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                         return Ok(None);
                     }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(error),
                 }
             }
         };

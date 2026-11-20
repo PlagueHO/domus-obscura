@@ -487,6 +487,91 @@ async fn media_adapter_publication_snapshot_native_and_tls_share_exact_bounded_r
 }
 
 #[tokio::test]
+async fn media_adapter_directory_creation_native_and_tls_keep_original_ancestry() -> TestResult {
+    use super::super::{BlockingMedia, io::MediaDirectoryIo};
+    use crate::infrastructure::{filesystem::LibraryDirectory, store::PublicationFile};
+    use sha2::{Digest, Sha256};
+    use std::cell::Cell;
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut fixture = Fixture::new()?;
+    fixture.selection.writable_roots.push("library".into());
+    let media = fixture
+        .selection
+        .provider
+        .boundary
+        .join("parent")
+        .join("media");
+    for index in 0..MAX_PAGE * 3 {
+        std::fs::write(media.join(format!("unrelated-{index}")), [])?;
+    }
+    let keys = Certificates::new()?;
+    let running = Running::start(&fixture, &keys)?;
+    let local = MediaClient::local(fixture.selection.clone(), Vec::new())?;
+    let remote = MediaClient::remote(fixture.selection.logical(), keys.client(running.address)?)?;
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        for (index, client) in [None, Some(local), Some(remote)].into_iter().enumerate() {
+            let root = match client {
+                None => MediaDirectoryIo::native(LibraryDirectory::open(&media)?)?,
+                Some(client) => {
+                    MediaDirectoryIo::paired(BlockingMedia::new(client, "library".into())?)?
+                }
+            };
+            let name = format!("created-{index}");
+            let folder = root.create_directory(&name, &|| Ok(()))?;
+            let child = folder.create_directory("Disc", &|| Ok(()))?;
+            assert!(root.create_directory(&name, &|| Ok(())).is_err());
+            assert!(
+                root.create_directory(&name.to_uppercase(), &|| Ok(()))
+                    .is_err()
+            );
+            for invalid in ["", "../escape", "a/b", "a\\b", "track:stream"] {
+                assert!(root.create_directory(invalid, &|| Ok(())).is_err());
+            }
+            let checks = Cell::new(0);
+            assert!(
+                root.create_directory("cancelled-folder", &|| {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == 3 {
+                        Err(std::io::Error::other("generated claim expired"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+            );
+            assert!(!media.join("cancelled-folder").exists());
+            drop(root);
+            drop(folder);
+            child.check()?;
+            #[cfg(windows)]
+            assert!(std::fs::rename(media.join(&name), media.join("moved")).is_err());
+            let bytes = b"generated folder output";
+            let mut source = tempfile::tempfile()?;
+            source.write_all(bytes)?;
+            source.seek(SeekFrom::Start(0))?;
+            let entry = PublicationFile {
+                ordinal: 1,
+                name: "track.flac".into(),
+                bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+                verified_at: None,
+            };
+            child.copy_publication_file(&entry, &mut source, &|| Ok(()))?;
+            child.verify_publication_files(&[entry], &|| Ok(()))?;
+            assert_eq!(
+                std::fs::read(media.join(name).join("Disc").join("track.flac"))?,
+                bytes
+            );
+        }
+        Ok(())
+    })
+    .await?;
+    result?;
+    running.stop().await
+}
+
+#[tokio::test]
 async fn media_adapter_publication_copy_native_and_tls_preserve_exact_and_partial_outputs()
 -> TestResult {
     use super::super::{BlockingMedia, io::MediaDirectoryIo};
@@ -637,6 +722,12 @@ async fn media_adapter_publication_copy_keeps_read_only_grants_for_existing_and_
             let directory = root
                 .open_directory(&LibraryPath::parse("album")?)?
                 .ok_or(Error::Internal("generated read-only album missing"))?;
+            assert!(
+                directory
+                    .create_directory("missing-directory", &|| Ok(()))
+                    .is_err()
+            );
+            assert!(!media.join("missing-directory").exists());
             let mut entry = PublicationFile {
                 ordinal: 1,
                 name: "track.flac".into(),

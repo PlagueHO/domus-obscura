@@ -82,13 +82,15 @@ are supported. Paired files and their parents remain on the same connection.
 A missing folder is reported only after complete successful enumeration.
 Directory checks and repeated listings use the retained reference; a failed
 enumeration cannot be reset into successful absence.
-Native publication copying and verification now use the common I/O boundary.
+Native publication folder creation, copying and verification use the common
+I/O boundary. New folders retain their original Windows creation handle.
+Creation refuses existing names and case collisions instead of adopting them.
 Its paired implementation can create only missing outputs or verify exact
 existing files against their approved length and SHA-256. It does not repair
 partial files. Receipted missing files, case collisions and extra album entries
 fail. It checks claims between bounded requests and requires an explicit write
 grant even when verifying existing output.
-Production folder preparation, publication moves and recovery are not routed
+Production folder selection, publication moves and recovery are not routed
 through the adapter. Paired production publication remains disabled.
 Do not treat this implementation as Windows Docker acceptance.
 
