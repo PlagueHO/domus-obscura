@@ -789,7 +789,8 @@ class WindowsAdapterCheck(Check):
                  "$acl.SetAccessRuleProtection($true, $false); "
                  "$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new("
                  "$sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')); "
-                 "Set-Acl -LiteralPath $env:DOMUS_GENERATED_FIXTURE -AclObject $acl"],
+                 "[IO.FileSystemAclExtensions]::SetAccessControl("
+                 "[IO.DirectoryInfo]::new($env:DOMUS_GENERATED_FIXTURE), $acl)"],
                 env={**os.environ, "DOMUS_GENERATED_FIXTURE": str(temporary.resolve())})
         self.private = temporary / "adapter-private"
         self.native("init", "--storage-root", self.private)
