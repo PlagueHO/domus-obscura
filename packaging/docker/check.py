@@ -942,8 +942,10 @@ class WindowsAdapterCheck(Check):
                  "sha256": hashlib.sha256(b"x").hexdigest()},
             ):
                 status, refused = request({**operation, "parent": opened["reference"]})
-                if status != 400 or refused != {"error": "invalid_request"} or (self.media / "not-permitted").exists():
-                    raise RuntimeError("read-only native media accepted a creation operation")
+                if status != 409 or refused != {"error": "stale"}:
+                    raise RuntimeError(f"read-only native creation did not return the required conflict: {status}")
+                if (self.media / "not-permitted").exists():
+                    raise RuntimeError("read-only native media created an output")
         finally:
             connection.close()
 
