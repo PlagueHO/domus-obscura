@@ -145,6 +145,16 @@ The report is `target/media-adapter-docker-workflow.json`. This is generated
 Windows Docker Desktop media evidence, not native Linux-host acceptance,
 installed-service evidence, power-loss proof, or complete release acceptance.
 
+Linux CI exports the helper and its revision beside the exact tested image.
+The approved Windows job downloads both artifacts from the same workflow run.
+It runs the writable coordinator before the separate complete host checks.
+The runner must already have the pinned development tools and native MSVC/JPEG
+build requirements. The workflow does not change Docker settings or install a
+native adapter service. The coordinator still requires exact clean checkout,
+helper and image revision equality, including a PR merge revision.
+Writable media evidence is retained separately. It cannot satisfy the existing
+complete host or release evidence gate by itself.
+
 The adapter verifies complete selected native chains and retains the opened
 directories and files. Only the Windows/native host maps root IDs to paths.
 The client sends frozen root definitions and a logical selection digest.

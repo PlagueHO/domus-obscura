@@ -46,6 +46,20 @@ jobs:
           path: target/domus-container.tar
           compression-level: 0
           if-no-files-found: error
+      - name: Export the source-matched Linux media workflow helper
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          docker build --platform linux/amd64 --build-arg "DOMUS_SOURCE_REVISION=$SOURCE_REVISION" --target media-workflow-artifacts --output type=local,dest=target/media-workflow .
+          test "$(cat target/media-workflow/media-workflow.revision)" = "$SOURCE_REVISION"
+      - name: Retain the source-matched media workflow helper
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docker-media-workflow-${{ github.sha }}
+          path: target/media-workflow
+          compression-level: 0
+          if-no-files-found: error
 
   windows:
     name: Check the same image on Windows Docker Desktop
@@ -63,11 +77,32 @@ jobs:
         with:
           name: docker-linux-${{ github.sha }}
           path: target
-      - name: Load and check the candidate
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: docker-media-workflow-${{ github.sha }}
+          path: target/media-workflow
+      - name: Load the exact candidate
         shell: pwsh
         run: |
           docker load --input target\domus-container.tar
           if ($LASTEXITCODE -ne 0) { throw 'Candidate load failed.' }
+      - name: Check generated writable Windows media
+        shell: pwsh
+        run: |
+          $env:DOMUS_MEDIA_WORKFLOW_IMAGE = 'domus-obscura:local'
+          $env:DOMUS_MEDIA_WORKFLOW_BINARY = (Resolve-Path target\media-workflow\media-workflow).Path
+          .\dev.ps1 -TaskArgs @('test', '--lib', 'media_adapter_production_docker_workflow', '--', '--ignored', '--nocapture')
+          if ($LASTEXITCODE -ne 0) { throw 'Generated writable Windows media checks failed.' }
+      - name: Retain generated writable Windows media evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docker-windows-media-${{ github.sha }}
+          path: target/media-adapter-docker-workflow.json
+          if-no-files-found: warn
+      - name: Check complete host acceptance
+        shell: pwsh
+        run: |
           python packaging\docker\check.py check --report target\docker-windows.json
           if ($LASTEXITCODE -ne 0) { throw 'Windows Docker host checks failed.' }
           python packaging\docker\check.py validate-evidence --linux-report target\docker-linux.json --windows-report target\docker-windows.json
