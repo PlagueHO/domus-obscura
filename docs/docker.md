@@ -180,7 +180,9 @@ uv run --no-project --python 3.14 packaging\docker\check.py check --windows-adap
 
 The optional native fixture test checks authenticated root access, missing and
 replacement root refusal, private-root overlap refusal and restoration of the
-original binding. It does not require Docker. Without the explicit package
+original binding. It also attempts directory and file creation on a read-only
+native root and confirms refusal without a visible output.
+It does not require Docker. Without the explicit package
 selection, the ordinary self-tests skip this native fixture.
 
 The Docker diagnostic additionally checks real Windows HTTP access, packaged
@@ -190,7 +192,9 @@ and removes generated containers, volumes and fixtures. It does not install a
 service or change Docker settings. The CI job retains its report separately with
 scope `windows-adapter-host-diagnostic`. This scope is still rejected by release
 validation. Checking an empty write-grant declaration is not a denied-write
-operation proof; generated writable/recovery evidence remains separate.
+operation proof. The diagnostic makes authenticated creation requests on the
+read-only fixture and checks both refusal and native absence. Generated
+writable/recovery evidence remains separate.
 
 The adapter verifies complete selected native chains and retains the opened
 directories and files. Only the Windows/native host maps root IDs to paths.

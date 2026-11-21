@@ -12,6 +12,7 @@ from pathlib import Path
 import platform
 import re
 import socket
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -207,6 +208,16 @@ def adapter_package_binary(package, revision):
     return binary, digest
 
 
+def canonical_root(root):
+    canonical = {key: root[key] for key in (
+        "root_id", "binding_revision", "role", "provider_scope", "relative", "expected",
+    )}
+    canonical["expected"] = {
+        key: root["expected"][key] for key in ("profile", "components")
+    }
+    return canonical
+
+
 class Check:
     def __init__(self, image, engine_only, volume_media=False):
         self.image = image
@@ -394,13 +405,7 @@ class Check:
         roots = []
         # Match Rust struct order even when saved JSON sorts object keys.
         for root in sorted(selection["roots"], key=lambda root: root["root_id"]):
-            canonical = {key: root[key] for key in (
-                "root_id", "binding_revision", "role", "provider_scope", "relative", "expected",
-            )}
-            canonical["expected"] = {
-                key: root["expected"][key] for key in ("profile", "components")
-            }
-            roots.append(canonical)
+            roots.append(canonical_root(root))
         semantic = [
             selection["format_version"], selection["selection_revision"],
             sorted(provider["scope"] for provider in selection["providers"]),
@@ -588,7 +593,7 @@ class Check:
             )
         elif os.name == "nt":
             command([
-                "powershell.exe", "-NoProfile", "-Command",
+                "pwsh", "-NoProfile", "-Command",
                 "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:DOMUS_TEST_LINK -Target $env:DOMUS_TEST_TARGET | Out-Null",
             ], env={**os.environ, "DOMUS_TEST_LINK": str(link), "DOMUS_TEST_TARGET": str(outside)})
         else:
@@ -770,6 +775,22 @@ class WindowsAdapterCheck(Check):
             raise ValueError("adapter host diagnostics require the clean runtime checkout")
         self.binary, digest = adapter_package_binary(self.package, revision)
         self.report["adapter_binary_sha256"] = digest
+        if (
+            temporary.resolve().parent != (ROOT / "target").resolve()
+            or not temporary.name.startswith(("docker-check-", "adapter-fixture-"))
+            or temporary.is_symlink()
+        ):
+            raise ValueError("adapter permissions require a fresh generated fixture directory")
+        # Python's OWNER RIGHTS ACE is outside the native SDDL allow-list.
+        command(["pwsh", "-NoProfile", "-Command",
+                 "$ErrorActionPreference = 'Stop'; "
+                 "$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User; "
+                 "$acl = [Security.AccessControl.DirectorySecurity]::new(); "
+                 "$acl.SetAccessRuleProtection($true, $false); "
+                 "$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new("
+                 "$sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')); "
+                 "Set-Acl -LiteralPath $env:DOMUS_GENERATED_FIXTURE -AclObject $acl"],
+                env={**os.environ, "DOMUS_GENERATED_FIXTURE": str(temporary.resolve())})
         self.private = temporary / "adapter-private"
         self.native("init", "--storage-root", self.private)
         command(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt",
@@ -875,7 +896,55 @@ class WindowsAdapterCheck(Check):
             raise RuntimeError("paired media unexpectedly entered a guest filesystem mount")
         if self.client["selection"].get("writable_roots"):
             raise RuntimeError("the read-only fixture unexpectedly grants media writes")
-        self.report["checks"] += ["no-windows-media-mount", "adapter-read-only-declaration"]
+        self.check_denied_writes()
+        self.report["checks"] += ["no-windows-media-mount", "read-only-media"]
+
+    def check_denied_writes(self):
+        selection = self.client["selection"]
+        semantic = [
+            selection["revision"], selection["provider_scope"],
+            [canonical_root(root) for root in sorted(selection["media"], key=lambda root: root["root_id"])],
+            canonical_root(selection["private"]),
+        ]
+        digest = hashlib.sha256(
+            b"domus-native-media-selection-v1\0"
+            + json.dumps(semantic, separators=(",", ":"), ensure_ascii=False).encode()
+        ).hexdigest()
+        context = ssl.create_default_context(cafile=str(self.private / "ca.pem"))
+        context.load_cert_chain(str(self.private / "client.pem"), str(self.private / "client.key"))
+        connection = http.client.HTTPSConnection(
+            "localhost", int(self.address.rsplit(":", 1)[1]), context=context, timeout=10,
+        )
+        headers = {"Content-Type": "application/json", "x-domus-media-adapter": "1"}
+        def request(body):
+            connection.request("POST", "/v1/media", json.dumps(body), headers)
+            response = connection.getresponse()
+            content = response.read(4097)
+            if len(content) > 4096:
+                raise RuntimeError("generated adapter response exceeds 4 KiB")
+            return response.status, json.loads(content)
+        try:
+            connection.connect()
+            pinned = ssl.PEM_cert_to_DER_cert(
+                (self.private / "server-leaf.pem").read_text(encoding="ascii")
+            )
+            if connection.sock.getpeercert(binary_form=True) != pinned:
+                raise RuntimeError("generated adapter leaf differs from its exact pairing")
+            status, opened = request({
+                "operation": "open_root", "selection": digest, "root": selection["media"][0],
+            })
+            if status != 200 or opened.get("result") != "opened" or opened.get("observed", {}).get("kind") != "directory":
+                raise RuntimeError("authenticated read-only root admission failed")
+            for operation in (
+                {"operation": "create_directory", "name": "not-permitted"},
+                {"operation": "create_file", "name": "not-permitted", "length": 1,
+                 "sha256": hashlib.sha256(b"x").hexdigest()},
+            ):
+                status, refused = request({**operation, "parent": opened["reference"]})
+                if status != 400 or refused != {"error": "invalid_request"} or (self.media / "not-permitted").exists():
+                    raise RuntimeError("read-only native media accepted a creation operation")
+        finally:
+            connection.close()
 
     def configure_media(self, configuration):
         for name in ("ca.pem", "server.pem", "client.pem", "client.key"):
@@ -913,9 +982,9 @@ class WindowsAdapterCheck(Check):
         path = self.private / "overlap.json"
         path.write_text(json.dumps(overlap), encoding="utf-8")
         result = self.native("media-adapter-check", path, check=False)
-        if result.returncode == 0:
+        if result.returncode == 0 or "overlap" not in result.stderr.lower():
             raise RuntimeError("the adapter accepted private storage as a media export")
-        self.report["checks"].append("adapter-private-overlap")
+        self.report["checks"].append("root-overlap")
 
     def check_media_replacement(self, temporary, location):
         self.stop_adapter()
@@ -1075,6 +1144,7 @@ class EvidenceTests(unittest.TestCase):
                 def open_root():
                     check.native("media-root-check", "--host", check.private / "config.json", client, "library")
                 open_root()
+                check.check_denied_writes()
                 check.check_root_overlap({})
                 check.missing_sources(temporary)
                 open_root()
