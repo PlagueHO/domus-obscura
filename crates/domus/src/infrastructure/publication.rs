@@ -1,7 +1,6 @@
-use super::filesystem::{
-    LibraryDirectory, is_unsafe_cap_link, is_unsafe_link, sync_directory as sync,
-};
-use super::permissions::FilePermissions;
+#[cfg(test)]
+use super::filesystem::LibraryDirectory;
+use super::filesystem::media_adapter::MediaDirectoryIo;
 use super::store::{
     AlbumReplacementPreview, AlbumReplacementRestore, AlbumReplacementRestoreDecision,
     AlbumRestorePreview, PublicationDestination, PublicationFile, PublicationPreparation,
@@ -9,70 +8,35 @@ use super::store::{
 };
 use crate::domain::LibraryPath;
 use crate::{Error, Result};
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, OpenOptions};
-use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
 
 fn conflict() -> Error {
     Error::Conflict("publication destination changed, is incomplete or contains existing content; nothing was overwritten".into())
 }
 
-fn options(create: bool) -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .create_new(create)
-        .follow(FollowSymlinks::No);
-    #[cfg(windows)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.share_mode(0);
-    }
-    #[cfg(unix)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.mode(0o644);
-    }
-    options
+fn publication_checkpoint(
+    store: &Store,
+    claim: &super::store::JobClaim,
+    target: &PublicationDestination,
+) -> std::io::Result<()> {
+    store
+        .renew_claim(claim, 300)
+        .map_err(std::io::Error::other)?;
+    store
+        .check_publication(claim, target.id)
+        .map(|_| ())
+        .map_err(std::io::Error::other)
 }
 
-fn read_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    #[cfg(unix)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
-    }
-    #[cfg(windows)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.share_mode(0);
-    }
-    options
-}
-
-fn checked(directory: &Dir, permissions: &FilePermissions) -> Result<()> {
-    if is_unsafe_cap_link(&directory.dir_metadata()?) {
-        return Err(conflict());
-    }
-    permissions.check(&directory.try_clone()?.into_std_file(), false)?;
-    Ok(())
-}
-
-fn check_case(directory: &Dir, name: &str) -> Result<()> {
-    let key = name.to_uppercase();
-    for entry in directory.entries()? {
-        let candidate = entry?.file_name().into_string().map_err(|_| conflict())?;
-        if candidate != name && candidate.to_uppercase() == key {
-            return Err(conflict());
-        }
-    }
-    Ok(())
+fn publication_manifest(files: &[PublicationFile]) -> Vec<ReplacementFile> {
+    files
+        .iter()
+        .map(|file| ReplacementFile {
+            name: file.name.clone(),
+            bytes: file.bytes,
+            sha256: file.sha256.clone(),
+        })
+        .collect()
 }
 
 pub(crate) fn album_replacement_previews(
@@ -208,21 +172,20 @@ fn inspect_album_restore(
         );
         if restore.state == "published" && restore.approved_preview.is_none() {
             let current =
-                open_child_directory(&folders.parent, &folders.final_name)?.ok_or_else(conflict)?;
-            let (identity, files) = replacement_snapshot(&current, &folders.permissions)?;
+                open_media_child(&folders.parent, &folders.final_name)?.ok_or_else(conflict)?;
+            let (identity, files) = current.replacement_snapshot(&|| Ok(()))?;
             if identity == restore.original_album_identity
                 || folder_version(
                     &folders.parent,
                     &folders.retained_name,
                     old,
                     (&identity, &files),
-                    &folders.permissions,
                 )? != Some(FolderVersion::Old)
-                || open_child_directory(&folders.parent, &folders.temporary_name)?.is_some()
+                || open_media_child(&folders.parent, &folders.temporary_name)?.is_some()
             {
                 return Err(conflict());
             }
-            verify_replacement(&current, &files)?;
+            current.verify_replacement(&files, &|| Ok(()))?;
             preview.current_album_identity = identity;
             preview.current_files = files;
         } else {
@@ -231,27 +194,9 @@ fn inspect_album_restore(
                 restore.replacement_files.as_slice(),
             );
             let layout = (
-                folder_version(
-                    &folders.parent,
-                    &folders.final_name,
-                    old,
-                    new,
-                    &folders.permissions,
-                )?,
-                folder_version(
-                    &folders.parent,
-                    &folders.retained_name,
-                    old,
-                    new,
-                    &folders.permissions,
-                )?,
-                folder_version(
-                    &folders.parent,
-                    &folders.temporary_name,
-                    old,
-                    new,
-                    &folders.permissions,
-                )?,
+                folder_version(&folders.parent, &folders.final_name, old, new)?,
+                folder_version(&folders.parent, &folders.retained_name, old, new)?,
+                folder_version(&folders.parent, &folders.temporary_name, old, new)?,
             );
             restore_step(&restore.state, layout.0, layout.1, layout.2)?;
         }
@@ -268,8 +213,7 @@ fn inspect_album_restore(
 }
 
 struct RestoreFolders {
-    parent: LibraryDirectory,
-    permissions: FilePermissions,
+    parent: MediaDirectoryIo,
     final_name: String,
     retained_name: String,
     temporary_name: String,
@@ -277,7 +221,7 @@ struct RestoreFolders {
 
 impl RestoreFolders {
     fn open(store: &Store, restore: &AlbumReplacementRestore) -> Result<Self> {
-        let root = store.open_registered_root(&restore.root, "media")?;
+        let root = store.media_directory_io(&restore.root)?;
         if store.root_binding_identity(&restore.root, "media")? != restore.root_identity {
             return Err(conflict());
         }
@@ -299,20 +243,18 @@ impl RestoreFolders {
             return Err(conflict());
         }
 
-        let permissions = FilePermissions::current()?;
         let mut parent = root;
-        checked(&parent, &permissions)?;
+        parent.check_named_directory(&|| Ok(()))?;
         for name in parent_path.split('/').filter(|part| !part.is_empty()) {
-            check_case(&parent, name)?;
-            parent = parent.open_dir_nofollow(name)?;
-            checked(&parent, &permissions)?;
+            parent.check_case(name, &|| Ok(()))?;
+            parent = open_media_child(&parent, name)?.ok_or_else(conflict)?;
+            parent.check_named_directory(&|| Ok(()))?;
         }
         for name in [final_name, retained_name, temporary_name] {
-            check_case(&parent, name)?;
+            parent.check_case(name, &|| Ok(()))?;
         }
         Ok(Self {
             parent,
-            permissions,
             final_name: final_name.into(),
             retained_name: retained_name.into(),
             temporary_name: temporary_name.into(),
@@ -323,7 +265,6 @@ impl RestoreFolders {
 fn run_album_restore(store: &mut Store, restore: &AlbumReplacementRestore) -> Result<()> {
     let RestoreFolders {
         parent,
-        permissions,
         final_name,
         retained_name,
         temporary_name,
@@ -342,16 +283,17 @@ fn run_album_restore(store: &mut Store, restore: &AlbumReplacementRestore) -> Re
 
     let mut state = restore.state.as_str();
     loop {
-        let final_version = folder_version(&parent, final_name, old, new, &permissions)?;
-        let retained_version = folder_version(&parent, retained_name, old, new, &permissions)?;
-        let temporary_version = folder_version(&parent, temporary_name, old, new, &permissions)?;
+        parent.check_named_directory(&|| Ok(()))?;
+        let final_version = folder_version(&parent, final_name, old, new)?;
+        let retained_version = folder_version(&parent, retained_name, old, new)?;
+        let temporary_version = folder_version(&parent, temporary_name, old, new)?;
         let rename = match restore_step(state, final_version, retained_version, temporary_version)?
         {
-            RestoreStep::MoveCurrent => (final_name, temporary_name),
-            RestoreStep::MoveOriginal => (retained_name, final_name),
-            RestoreStep::RetainCurrent => (temporary_name, retained_name),
+            RestoreStep::MoveCurrent => (final_name, temporary_name, new),
+            RestoreStep::MoveOriginal => (retained_name, final_name, old),
+            RestoreStep::RetainCurrent => (temporary_name, retained_name, new),
             RestoreStep::Record(next) => {
-                sync(&parent)?;
+                parent.sync_checked(&|| Ok(()))?;
                 store.record_album_replacement_restore_state(
                     restore.destination_id,
                     state,
@@ -364,8 +306,8 @@ fn run_album_restore(store: &mut Store, restore: &AlbumReplacementRestore) -> Re
             }
             RestoreStep::Complete => return Ok(()),
         };
-        rename_no_replace(&parent, rename.0, rename.1)?;
-        sync(&parent)?;
+        parent.rename_directory(rename.0, rename.1, rename.2.0, rename.2.1, &|| Ok(()))?;
+        parent.sync_checked(&|| Ok(()))?;
         #[cfg(test)]
         crate::crash_tests::checkpoint(match state {
             "restore_prepared" => "restore_current_renamed",
@@ -416,17 +358,16 @@ enum FolderVersion {
 }
 
 fn folder_version(
-    parent: &LibraryDirectory,
+    parent: &MediaDirectoryIo,
     name: &str,
     old: (&str, &[ReplacementFile]),
     new: (&str, &[ReplacementFile]),
-    permissions: &FilePermissions,
 ) -> Result<Option<FolderVersion>> {
-    let Some(directory) = open_child_directory(parent, name)? else {
+    let Some(directory) = open_media_child(parent, name)? else {
         return Ok(None);
     };
-    checked(&directory, permissions)?;
-    let identity = super::filesystem::native_file_identity(&directory.directory_file()?)?;
+    directory.check_named_directory(&|| Ok(()))?;
+    let identity = directory.identity();
     let (version, files) = if identity == old.0 {
         (FolderVersion::Old, old.1)
     } else if identity == new.0 {
@@ -434,73 +375,8 @@ fn folder_version(
     } else {
         return Err(conflict());
     };
-    verify_replacement(&directory, files)?;
+    directory.verify_replacement(files, &|| Ok(()))?;
     Ok(Some(version))
-}
-
-fn replacement_snapshot(
-    directory: &Dir,
-    permissions: &FilePermissions,
-) -> Result<(String, Vec<ReplacementFile>)> {
-    checked(directory, permissions)?;
-    let identity =
-        super::filesystem::native_file_identity(&directory.try_clone()?.into_std_file())?;
-    let mut files = Vec::new();
-    let mut names = HashSet::new();
-    for entry in directory.entries()? {
-        if files.len() == 1001 {
-            return Err(Error::Conflict(
-                "existing album exceeds the replacement file limit".into(),
-            ));
-        }
-        let entry = entry?;
-        let name = entry.file_name().into_string().map_err(|_| conflict())?;
-        LibraryPath::parse(&name)?;
-        let metadata = entry.metadata()?;
-        if name.is_empty()
-            || name.contains('/')
-            || !metadata.is_file()
-            || is_unsafe_cap_link(&metadata)
-            || !names.insert(name.to_uppercase())
-        {
-            return Err(conflict());
-        }
-        let mut file = directory.open_with(&name, &read_options())?.into_std();
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || is_unsafe_link(&metadata) || metadata.len() > i64::MAX as u64 {
-            return Err(conflict());
-        }
-        let bytes = metadata.len();
-        let mut hash = Sha256::new();
-        let mut buffer = [0; 65_536];
-        let mut total = 0u64;
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            total = total.checked_add(count as u64).ok_or_else(conflict)?;
-            if total > bytes {
-                return Err(conflict());
-            }
-            hash.update(&buffer[..count]);
-        }
-        if total != bytes || file.metadata()?.len() != bytes {
-            return Err(conflict());
-        }
-        files.push(ReplacementFile {
-            name,
-            bytes,
-            sha256: format!("{:x}", hash.finalize()),
-        });
-    }
-    files.sort_by(|left, right| {
-        left.name
-            .to_uppercase()
-            .cmp(&right.name.to_uppercase())
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    Ok((identity, files))
 }
 
 fn album_replacement_previews_for_location(
@@ -539,9 +415,9 @@ fn album_replacement_previews_for_location(
         .into_iter()
         .filter(|target| location_id.is_none_or(|location| target.location_id == location))
     {
-        let root = match store.open_registered_root(&target.root, "media") {
+        let root = match store.media_directory_io(&target.root) {
             Ok(root) => root,
-            Err(Error::Io(error)) => {
+            Err(error @ (Error::Io(_) | Error::Remote(_))) => {
                 let mut preview = AlbumReplacementPreview {
                     job_id: job,
                     plan_version: version,
@@ -565,13 +441,9 @@ fn album_replacement_previews_for_location(
             }
             Err(error) => return Err(error),
         };
-        let album = match root.open_directory(&relative) {
-            Ok(album) => Some(album),
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
+        let album = root.open_directory(&relative)?;
         let (album_identity, existing_files) = if let Some(album) = album {
-            let (identity, files) = replacement_snapshot(&album, &FilePermissions::current()?)?;
+            let (identity, files) = media_replacement_snapshot(&album)?;
             (Some(identity), files)
         } else {
             (None, Vec::new())
@@ -606,14 +478,17 @@ fn album_replacement_previews_for_location(
     Ok(previews)
 }
 
+pub(crate) fn media_replacement_snapshot(
+    directory: &MediaDirectoryIo,
+) -> Result<(String, Vec<ReplacementFile>)> {
+    directory.replacement_snapshot(&|| Ok(()))
+}
+
 pub(crate) struct PublicationDirectory {
-    directory: LibraryDirectory,
-    parent: LibraryDirectory,
+    directory: Option<MediaDirectoryIo>,
+    parent: MediaDirectoryIo,
     identity: String,
-    permissions: FilePermissions,
-    prepared_folder: String,
     prepared_name: String,
-    final_folder: String,
     final_name: String,
     retained_name: Option<String>,
     visible: bool,
@@ -624,10 +499,12 @@ impl PublicationDirectory {
     /// never adopted, even if its bytes happen to match.
     pub(crate) fn open(
         store: &Store,
+        claim: &super::store::JobClaim,
         target: &PublicationDestination,
         preparation: &PublicationPreparation,
     ) -> Result<Option<Self>> {
-        let root = store.open_registered_root(&target.root, "media")?;
+        // Keep native admission until restore and recovery own this same I/O.
+        let root = store.media_directory_io(&target.root)?;
         if store.root_binding_identity(&target.root, "media")? != target.root_identity {
             return Err(conflict());
         }
@@ -644,19 +521,24 @@ impl PublicationDirectory {
         {
             return Err(conflict());
         }
-        let permissions = FilePermissions::current()?;
+        let checkpoint = || publication_checkpoint(store, claim, target);
         let mut parent = root;
-        checked(&parent, &permissions)?;
+        parent.check_named_directory(&|| Ok(()))?;
         let mut parts = final_parent.split('/').filter(|part| !part.is_empty());
         for name in parts.by_ref() {
-            check_case(&parent, name)?;
-            match parent.create_dir(name) {
-                Ok(()) => sync(&parent)?,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
-            parent = parent.open_dir_nofollow(name)?;
-            checked(&parent, &permissions)?;
+            parent.check_case(name, &checkpoint)?;
+            parent = match open_media_child(&parent, name)? {
+                Some(directory) => directory,
+                None => match parent.create_directory(name, &checkpoint) {
+                    Ok(directory) => directory,
+                    Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        parent.check_case(name, &checkpoint)?;
+                        open_media_child(&parent, name)?.ok_or_else(conflict)?
+                    }
+                    Err(error) => return Err(error),
+                },
+            };
+            parent.check_named_directory(&|| Ok(()))?;
         }
         let final_name = final_path
             .as_str()
@@ -668,10 +550,10 @@ impl PublicationDirectory {
             .rsplit('/')
             .next()
             .ok_or_else(conflict)?;
-        check_case(&parent, final_name)?;
-        check_case(&parent, prepared_name)?;
-        let mut final_directory = open_child_directory(&parent, final_name)?;
-        let mut prepared_directory = open_child_directory(&parent, prepared_name)?;
+        parent.check_case(final_name, &checkpoint)?;
+        parent.check_case(prepared_name, &checkpoint)?;
+        let mut final_directory = open_media_child(&parent, final_name)?;
+        let mut prepared_directory = open_media_child(&parent, prepared_name)?;
         let mut retained_name = None;
         let mut visible = preparation.published_at.is_some();
         let directory = if let Some(replacement) = target.replacement.as_ref() {
@@ -691,15 +573,13 @@ impl PublicationDirectory {
                 .rsplit('/')
                 .next()
                 .ok_or_else(conflict)?;
-            check_case(&parent, name)?;
-            let retained_directory = open_child_directory(&parent, name)?;
-            let original_at = |directory: &LibraryDirectory| -> Result<bool> {
-                let identity =
-                    super::filesystem::native_file_identity(&directory.directory_file()?)?;
-                if identity != replacement.original_album_identity {
+            parent.check_case(name, &checkpoint)?;
+            let retained_directory = open_media_child(&parent, name)?;
+            let original_at = |directory: &MediaDirectoryIo| -> Result<bool> {
+                if directory.identity() != replacement.original_album_identity {
                     return Ok(false);
                 }
-                verify_replacement(directory, &replacement.original_files)?;
+                directory.verify_replacement(&replacement.original_files, &checkpoint)?;
                 Ok(true)
             };
             if let Some(directory) = retained_directory.as_ref()
@@ -713,9 +593,7 @@ impl PublicationDirectory {
                 .transpose()?
                 .unwrap_or(false);
             let final_is_new = if let Some(directory) = final_directory.as_ref() {
-                let identity =
-                    super::filesystem::native_file_identity(&directory.directory_file()?)?;
-                target.album_identity.as_deref() == Some(identity.as_str())
+                target.album_identity.as_deref() == Some(directory.identity())
             } else {
                 false
             };
@@ -743,24 +621,23 @@ impl PublicationDirectory {
                     return Err(conflict());
                 }
                 if final_is_original {
-                    verify_replacement(
-                        final_directory.as_ref().ok_or_else(conflict)?,
-                        &replacement.original_files,
-                    )?;
+                    final_directory
+                        .as_ref()
+                        .ok_or_else(conflict)?
+                        .verify_replacement(&replacement.original_files, &checkpoint)?;
                 }
                 retained_name = Some(name.to_owned());
                 if let Some(directory) = prepared_directory.take() {
                     directory
                 } else {
-                    match parent.create_dir(prepared_name) {
-                        Ok(()) => {
-                            sync(&parent)?;
-                            parent.open_dir_nofollow(prepared_name)?
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    match parent.create_directory(prepared_name, &checkpoint) {
+                        Ok(directory) => directory,
+                        Err(Error::Io(error))
+                            if error.kind() == std::io::ErrorKind::AlreadyExists =>
+                        {
                             return Ok(None);
                         }
-                        Err(error) => return Err(error.into()),
+                        Err(error) => return Err(error),
                     }
                 }
             }
@@ -776,8 +653,7 @@ impl PublicationDirectory {
             } else if let Some(directory) = prepared_directory.take() {
                 directory
             } else if let Some(directory) = final_directory.take() {
-                let identity =
-                    super::filesystem::native_file_identity(&directory.directory_file()?)?;
+                let identity = directory.identity().to_owned();
                 if target.album_identity.as_deref() != Some(identity.as_str()) {
                     return Err(conflict());
                 }
@@ -786,26 +662,30 @@ impl PublicationDirectory {
                     directory
                 } else {
                     drop(directory);
-                    rename_no_replace(&parent, final_name, prepared_name)?;
-                    sync(&parent)?;
-                    parent.open_dir_nofollow(prepared_name)?
+                    let files = publication_manifest(&store.publication_files(claim, target.id)?);
+                    parent.rename_directory(
+                        final_name,
+                        prepared_name,
+                        &identity,
+                        &files,
+                        &checkpoint,
+                    )?;
+                    parent.sync_checked(&checkpoint)?;
+                    open_media_child(&parent, prepared_name)?.ok_or_else(conflict)?
                 }
             } else if target.album_identity.is_some() {
                 return Err(conflict());
             } else {
-                match parent.create_dir(prepared_name) {
-                    Ok(()) => {
-                        sync(&parent)?;
-                        parent.open_dir_nofollow(prepared_name)?
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                match parent.create_directory(prepared_name, &checkpoint) {
+                    Ok(directory) => directory,
+                    Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                         return Ok(None);
                     }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(error),
                 }
             }
         };
-        let identity = super::filesystem::native_file_identity(&directory.directory_file()?)?;
+        let identity = directory.identity().to_owned();
         if target
             .album_identity
             .as_ref()
@@ -813,15 +693,12 @@ impl PublicationDirectory {
         {
             return Err(conflict());
         }
-        checked(&directory, &permissions)?;
+        directory.check_named_directory(&|| Ok(()))?;
         Ok(Some(Self {
-            directory,
+            directory: Some(directory),
             parent,
             identity,
-            permissions,
-            prepared_folder: preparation.folder.clone(),
             prepared_name: prepared_name.to_owned(),
-            final_folder: target.relative_folder.clone(),
             final_name: final_name.to_owned(),
             retained_name,
             visible,
@@ -832,23 +709,24 @@ impl PublicationDirectory {
         &self.identity
     }
 
+    fn directory(&self) -> Result<&MediaDirectoryIo> {
+        let directory = self.directory.as_ref().ok_or(Error::Conflict(
+            "publication move failed; reopen the operation".into(),
+        ))?;
+        if directory.identity() != self.identity {
+            return Err(conflict());
+        }
+        Ok(directory)
+    }
+
     pub(crate) fn check(&self, store: &Store, target: &PublicationDestination) -> Result<()> {
-        let root = store.open_registered_root(&target.root, "media")?;
         if store.root_binding_identity(&target.root, "media")? != target.root_identity {
             return Err(conflict());
         }
-        let folder = if self.visible {
-            &self.final_folder
-        } else {
-            &self.prepared_folder
-        };
-        let album = root.open_directory(&LibraryPath::parse(folder)?)?;
-        if album.native_root().identity != self.identity
-            || target.album_identity.as_deref() != Some(self.identity.as_str())
-        {
+        if target.album_identity.as_deref() != Some(self.identity.as_str()) {
             return Err(conflict());
         }
-        checked(&self.directory, &self.permissions)
+        self.directory()?.check_named_directory(&|| Ok(()))
     }
 
     pub(crate) fn is_visible(&self) -> bool {
@@ -871,66 +749,84 @@ impl PublicationDirectory {
                 return self.check(store, target);
             }
             let retained_name = self.retained_name.as_deref().ok_or_else(conflict)?;
-            if let Some(retained) = open_child_directory(&self.parent, retained_name)? {
-                let identity =
-                    super::filesystem::native_file_identity(&retained.directory_file()?)?;
+            if let Some(retained) = open_media_child(&self.parent, retained_name)? {
+                let identity = retained.identity();
                 if identity != replacement.original_album_identity {
                     return Err(conflict());
                 }
-                verify_replacement(&retained, &replacement.original_files)?;
+                retained.verify_replacement(&replacement.original_files, &|| {
+                    publication_checkpoint(store, claim, target)
+                })?;
                 if self.target_original_at_final(target)? {
                     return Err(conflict());
                 }
             } else {
                 let original =
-                    open_child_directory(&self.parent, &self.final_name)?.ok_or_else(conflict)?;
-                let identity =
-                    super::filesystem::native_file_identity(&original.directory_file()?)?;
+                    open_media_child(&self.parent, &self.final_name)?.ok_or_else(conflict)?;
+                let identity = original.identity();
                 if identity != replacement.original_album_identity {
                     return Err(conflict());
                 }
-                verify_replacement(&original, &replacement.original_files)?;
+                original.verify_replacement(&replacement.original_files, &|| {
+                    publication_checkpoint(store, claim, target)
+                })?;
                 drop(original);
-                rename_no_replace(&self.parent, &self.final_name, retained_name)?;
-                sync(&self.parent)?;
+                self.parent.rename_directory(
+                    &self.final_name,
+                    retained_name,
+                    &replacement.original_album_identity,
+                    &replacement.original_files,
+                    &|| publication_checkpoint(store, claim, target),
+                )?;
+                self.parent
+                    .sync_checked(&|| publication_checkpoint(store, claim, target))?;
                 #[cfg(test)]
                 crate::crash_tests::checkpoint("replacement_retained")?;
             }
             store.record_publication_replacement_state(claim, target.id, "retained")?;
-            if open_child_directory(&self.parent, &self.final_name)?.is_some() {
+            if open_media_child(&self.parent, &self.final_name)?.is_some() {
                 return Err(conflict());
             }
-            let directory = std::mem::replace(&mut self.directory, self.parent.try_clone()?);
-            drop(directory);
-            if let Err(error) =
-                rename_no_replace(&self.parent, &self.prepared_name, &self.final_name)
-            {
-                self.directory = self.parent.open_dir_nofollow(&self.prepared_name)?;
-                return Err(error);
-            }
-            sync(&self.parent)?;
-            self.directory = self.parent.open_dir_nofollow(&self.final_name)?;
+            let files = publication_manifest(&store.publication_files(claim, target.id)?);
+            drop(self.directory.take());
+            self.parent.rename_directory(
+                &self.prepared_name,
+                &self.final_name,
+                &self.identity,
+                &files,
+                &|| publication_checkpoint(store, claim, target),
+            )?;
+            self.parent
+                .sync_checked(&|| publication_checkpoint(store, claim, target))?;
+            self.directory =
+                Some(open_media_child(&self.parent, &self.final_name)?.ok_or_else(conflict)?);
             self.visible = true;
             #[cfg(test)]
             crate::crash_tests::checkpoint("replacement_visible")?;
             store.record_publication_replacement_state(claim, target.id, "published")?;
             return self.check(store, target);
         }
-        check_case(&self.parent, &self.final_name)?;
-        if open_child_directory(&self.parent, &self.final_name)?.is_some()
+        self.parent.check_case(&self.final_name, &|| {
+            publication_checkpoint(store, claim, target)
+        })?;
+        if open_media_child(&self.parent, &self.final_name)?.is_some()
             && (target.replacement.is_none() || !self.visible)
         {
             return Err(conflict());
         }
-        let directory = std::mem::replace(&mut self.directory, self.parent.try_clone()?);
-        drop(directory);
-        let result = rename_no_replace(&self.parent, &self.prepared_name, &self.final_name);
-        if let Err(error) = result {
-            self.directory = self.parent.open_dir_nofollow(&self.prepared_name)?;
-            return Err(error);
-        }
-        sync(&self.parent)?;
-        self.directory = self.parent.open_dir_nofollow(&self.final_name)?;
+        let files = publication_manifest(&store.publication_files(claim, target.id)?);
+        drop(self.directory.take());
+        self.parent.rename_directory(
+            &self.prepared_name,
+            &self.final_name,
+            &self.identity,
+            &files,
+            &|| publication_checkpoint(store, claim, target),
+        )?;
+        self.parent
+            .sync_checked(&|| publication_checkpoint(store, claim, target))?;
+        self.directory =
+            Some(open_media_child(&self.parent, &self.final_name)?.ok_or_else(conflict)?);
         self.visible = true;
         #[cfg(test)]
         crate::crash_tests::checkpoint("publication_visible")?;
@@ -941,24 +837,15 @@ impl PublicationDirectory {
         let Some(replacement) = target.replacement.as_ref() else {
             return Ok(false);
         };
-        let Some(directory) = open_child_directory(&self.parent, &self.final_name)? else {
+        let Some(directory) = open_media_child(&self.parent, &self.final_name)? else {
             return Ok(false);
         };
-        let identity = super::filesystem::native_file_identity(&directory.directory_file()?)?;
+        let identity = directory.identity();
         if identity != replacement.original_album_identity {
             return Err(conflict());
         }
-        verify_replacement(&directory, &replacement.original_files)?;
+        directory.verify_replacement(&replacement.original_files, &|| Ok(()))?;
         Ok(true)
-    }
-
-    fn regular(&self, file: File) -> Result<File> {
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || is_unsafe_link(&metadata) {
-            return Err(conflict());
-        }
-        self.permissions.check(&file, false)?;
-        Ok(file)
     }
 
     /// Existing exact files can close a sync-before-receipt crash gap. Partial,
@@ -969,62 +856,8 @@ impl PublicationDirectory {
         source: &mut File,
         check: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<()> {
-        check()?;
-        LibraryPath::parse(&entry.name)?;
-        if entry.name.is_empty() || entry.name.contains('/') || entry.bytes == 0 {
-            return Err(conflict());
-        }
-        check_case(&self.directory, &entry.name)?;
-        let (mut file, created) = if entry.verified_at.is_some() {
-            (
-                self.regular(
-                    self.directory
-                        .open_with(&entry.name, &options(false))?
-                        .into_std(),
-                )?,
-                false,
-            )
-        } else {
-            match self.directory.open_with(&entry.name, &options(true)) {
-                Ok(file) => (self.regular(file.into_std())?, true),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
-                    self.regular(
-                        self.directory
-                            .open_with(&entry.name, &options(false))?
-                            .into_std(),
-                    )?,
-                    false,
-                ),
-                Err(error) => return Err(error.into()),
-            }
-        };
-        if created {
-            let mut remaining = entry.bytes;
-            let mut buffer = [0; 65_536];
-            while remaining > 0 {
-                check()?;
-                let count = remaining.min(buffer.len() as u64) as usize;
-                source.read_exact(&mut buffer[..count])?;
-                check()?;
-                file.write_all(&buffer[..count])?;
-                #[cfg(test)]
-                if entry.ordinal > 0 {
-                    crate::crash_tests::checkpoint("publication_writing")?;
-                }
-                remaining -= count as u64;
-            }
-            if source.read(&mut [0; 1])? != 0 {
-                return Err(conflict());
-            }
-        }
-        check()?;
-        file.sync_all()?;
-        verify(&mut file, entry, check)?;
-        sync(&self.directory)?;
-        check()?;
-        #[cfg(test)]
-        crate::crash_tests::checkpoint("publication_synced")?;
-        Ok(())
+        self.directory()?
+            .copy_publication_file(entry, source, check)
     }
 
     pub(crate) fn verify(
@@ -1032,128 +865,50 @@ impl PublicationDirectory {
         files: &[PublicationFile],
         check: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<()> {
-        let mut names = files
-            .iter()
-            .map(|file| file.name.as_str())
-            .collect::<HashSet<_>>();
-        for entry in self.directory.entries()? {
-            check()?;
-            let entry = entry?;
-            let name = entry.file_name().into_string().map_err(|_| conflict())?;
-            if !names.remove(name.as_str()) {
-                return Err(conflict());
-            }
-            if is_unsafe_cap_link(&entry.metadata()?) {
-                return Err(conflict());
-            }
-        }
-        if !names.is_empty() {
-            return Err(conflict());
-        }
-        for entry in files {
-            check()?;
-            let mut file = self.regular(
-                self.directory
-                    .open_with(&entry.name, &options(false))?
-                    .into_std(),
-            )?;
-            verify(&mut file, entry, check)?;
-        }
-        sync(&self.directory)?;
-        check()?;
+        self.directory()?.verify_publication_files(files, check)
+    }
+}
+
+fn open_media_child(parent: &MediaDirectoryIo, name: &str) -> Result<Option<MediaDirectoryIo>> {
+    parent.open_directory(&LibraryPath::parse(name)?)
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn publication_ownership_rejects_a_different_retained_folder_with_identical_bytes() -> Result<()>
+    {
+        let fixture = tempfile::tempdir()?;
+        std::fs::create_dir(fixture.path().join("prepared"))?;
+        std::fs::create_dir(fixture.path().join("other"))?;
+        let parent = LibraryDirectory::open(fixture.path())?;
+        let prepared = MediaDirectoryIo::native(parent.open_dir_nofollow("prepared")?)?;
+        let identity = prepared.identity().to_owned();
+        drop(prepared);
+        let directory = PublicationDirectory {
+            directory: Some(MediaDirectoryIo::native(
+                parent.open_dir_nofollow("other")?,
+            )?),
+            parent: MediaDirectoryIo::native(parent)?,
+            identity,
+            prepared_name: "prepared".into(),
+            final_name: "final".into(),
+            retained_name: None,
+            visible: false,
+        };
+        assert!(matches!(
+            directory.verify(&[], &|| Ok(())),
+            Err(Error::Conflict(_))
+        ));
         Ok(())
     }
 }
 
-fn open_child_directory(parent: &LibraryDirectory, name: &str) -> Result<Option<LibraryDirectory>> {
-    match parent.open_dir_nofollow(name) {
-        Ok(directory) => Ok(Some(directory)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn verify_replacement(directory: &Dir, files: &[ReplacementFile]) -> Result<()> {
-    let mut names = files
-        .iter()
-        .map(|file| file.name.as_str())
-        .collect::<HashSet<_>>();
-    for entry in directory.entries()? {
-        let entry = entry?;
-        let name = entry.file_name().into_string().map_err(|_| conflict())?;
-        if !names.remove(name.as_str()) || is_unsafe_cap_link(&entry.metadata()?) {
-            return Err(conflict());
-        }
-    }
-    if !names.is_empty() {
-        return Err(conflict());
-    }
-    for entry in files {
-        LibraryPath::parse(&entry.name)?;
-        if entry.name.is_empty() || entry.name.contains('/') || entry.bytes > i64::MAX as u64 {
-            return Err(conflict());
-        }
-        let mut file = directory
-            .open_with(&entry.name, &read_options())?
-            .into_std();
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || is_unsafe_link(&metadata) || metadata.len() != entry.bytes {
-            return Err(conflict());
-        }
-        let mut hash = Sha256::new();
-        let mut total = 0u64;
-        let mut buffer = [0; 65_536];
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            total = total.checked_add(count as u64).ok_or_else(conflict)?;
-            if total > entry.bytes {
-                return Err(conflict());
-            }
-            hash.update(&buffer[..count]);
-        }
-        if total != entry.bytes
-            || file.metadata()?.len() != entry.bytes
-            || format!("{:x}", hash.finalize()) != entry.sha256
-        {
-            return Err(conflict());
-        }
-    }
-    Ok(())
-}
-
-fn rename_no_replace(directory: &Dir, from: &str, to: &str) -> Result<()> {
+#[cfg(all(test, windows))]
+fn rename_no_replace(directory: &cap_std::fs::Dir, from: &str, to: &str) -> Result<()> {
     super::filesystem::rename_no_replace(directory, from, to)
-}
-
-fn verify(
-    file: &mut File,
-    entry: &PublicationFile,
-    check: &dyn Fn() -> std::io::Result<()>,
-) -> Result<()> {
-    if file.metadata()?.len() != entry.bytes {
-        return Err(conflict());
-    }
-    file.seek(SeekFrom::Start(0))?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0; 65_536];
-    let mut remaining = entry.bytes;
-    while remaining > 0 {
-        check()?;
-        let count = remaining.min(buffer.len() as u64) as usize;
-        file.read_exact(&mut buffer[..count])?;
-        hash.update(&buffer[..count]);
-        remaining -= count as u64;
-    }
-    if file.read(&mut [0; 1])? != 0
-        || file.metadata()?.len() != entry.bytes
-        || format!("{:x}", hash.finalize()) != entry.sha256
-    {
-        return Err(conflict());
-    }
-    Ok(())
 }
 
 #[cfg(all(test, windows))]

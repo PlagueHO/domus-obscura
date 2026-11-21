@@ -48,8 +48,30 @@ pub(crate) fn modified_ns(file: &File) -> Result<Option<String>> {
     Ok(Some(modified))
 }
 
+#[derive(Eq, PartialEq)]
+pub(crate) struct FileEvidence {
+    pub identity: String,
+    pub length: u64,
+    pub modified_ns: Option<String>,
+}
+
+/// Evidence must describe and recheck the same retained object as Read/Seek.
+pub(crate) trait MetadataInput: Read + Seek {
+    fn evidence(&mut self) -> Result<FileEvidence>;
+}
+
+impl MetadataInput for File {
+    fn evidence(&mut self) -> Result<FileEvidence> {
+        Ok(FileEvidence {
+            identity: super::filesystem::native_file_identity(self)?,
+            length: self.metadata()?.len(),
+            modified_ns: modified_ns(self)?,
+        })
+    }
+}
+
 /// Every failure becomes a durable diagnostic; callers still record file presence.
-pub(crate) fn inspect(file: &mut File, name: &str) -> LibraryMetadata {
+pub(crate) fn inspect(file: &mut impl MetadataInput, name: &str) -> LibraryMetadata {
     let mut observation = LibraryMetadata::default();
     let result = inspect_inner(file, name, &mut observation);
     if let Err(error) = result {
@@ -69,27 +91,26 @@ pub(crate) fn inspect(file: &mut File, name: &str) -> LibraryMetadata {
     observation
 }
 
-fn inspect_inner(file: &mut File, name: &str, observation: &mut LibraryMetadata) -> Result<()> {
-    let identity = super::filesystem::native_file_identity(file)?;
-    let metadata = file.metadata()?;
-    let modified = modified_ns(file)?;
-    observation.native_identity = Some(identity.clone());
-    observation.size = Some(i64::try_from(metadata.len()).map_err(|_| limit())?);
-    observation.modified_ns = modified.clone();
+fn inspect_inner(
+    file: &mut impl MetadataInput,
+    name: &str,
+    observation: &mut LibraryMetadata,
+) -> Result<()> {
+    let evidence = file.evidence()?;
+    observation.native_identity = Some(evidence.identity.clone());
+    observation.size = Some(i64::try_from(evidence.length).map_err(|_| limit())?);
+    observation.modified_ns = evidence.modified_ns.clone();
     let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match extension.as_str() {
         "mp3" => mp3(file, observation)?,
-        "flac" => flac(file, observation)?,
+        "flac" => flac(file, evidence.length, observation)?,
         "m4a" | "aac" | "ogg" | "opus" | "wav" | "aiff" | "wma" | "ape" => {
             observation.audio.format = Some(extension);
             observation.status = "unsupported".into();
         }
         _ => observation.status = "asset".into(),
     }
-    if identity != super::filesystem::native_file_identity(file)?
-        || metadata.len() != file.metadata()?.len()
-        || modified != modified_ns(file)?
-    {
+    if evidence != file.evidence()? {
         return Err(Error::Conflict(
             "file changed during metadata inspection".into(),
         ));
@@ -127,7 +148,7 @@ fn synchsafe(bytes: &[u8]) -> Result<usize> {
         .fold(0usize, |value, byte| (value << 7) | usize::from(*byte)))
 }
 
-fn mp3(file: &mut File, observation: &mut LibraryMetadata) -> Result<()> {
+fn mp3(file: &mut (impl Read + Seek), observation: &mut LibraryMetadata) -> Result<()> {
     observation.audio.format = Some("mp3".into());
     let mut header = [0; 10];
     file.read_exact(&mut header)?;
@@ -278,7 +299,11 @@ fn sized<'a>(bytes: &mut &'a [u8]) -> Result<&'a [u8]> {
     Ok(value)
 }
 
-fn flac(file: &mut File, observation: &mut LibraryMetadata) -> Result<()> {
+fn flac(
+    file: &mut (impl Read + Seek),
+    file_length: u64,
+    observation: &mut LibraryMetadata,
+) -> Result<()> {
     observation.audio.format = Some("flac".into());
     let mut magic = [0; 4];
     file.read_exact(&mut magic)?;
@@ -395,7 +420,7 @@ fn flac(file: &mut File, observation: &mut LibraryMetadata) -> Result<()> {
                 .stream_position()?
                 .checked_add(length as u64)
                 .ok_or_else(limit)?;
-            if end > file.metadata()?.len() {
+            if end > file_length {
                 return Err(invalid("truncated FLAC block"));
             }
             file.seek(SeekFrom::Start(end))?;

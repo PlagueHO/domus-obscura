@@ -1,0 +1,895 @@
+# Docker distribution
+
+## Scope
+
+The image contains the current Rust API and worker, the real connected React
+browser, migrations, dependency notices, and package provenance. Node.js and Rust
+are build tools, not application runtime requirements.
+This packages the current foundation. It does not complete V1 or approve public
+API access.
+
+The planned target is one `linux/amd64` image on Linux Docker Engine or Windows Docker Desktop in
+Linux-container mode. Native Windows containers, ARM64, and network-hosted SQLite
+are not supported. The runtime uses Ubuntu 24.04 and numeric user/group `1000:1000`.
+
+The API requires direct loopback access. Use host networking, not `-p`, a reverse
+proxy, or an anonymous public listener. All Host, Origin, CSRF, TLS, connection,
+and native filesystem guards remain active.
+
+Docker Desktop requires version 4.34 or later with **Enable host networking**
+selected in **Settings > Resources > Network**. Enhanced Container Isolation
+must be disabled for this Docker feature. Review that isolation trade-off before
+changing a host. These settings require separate operator approval.
+See [Docker host networking](https://docs.docker.com/engine/network/drivers/host/)
+and the [Windows WSL backend](https://docs.docker.com/desktop/features/wsl/).
+
+## Acceptance status
+
+The Docker branch is rebased onto main at
+`4f8eafcabc668dc5c4869c0b499a31b87694e975`, which includes merged PR #70
+and its final native setup fixes. The earlier exact-dependency integration
+remains historical evidence, not proof for the current rebased source.
+The current image and Docker workflows need their own checks.
+Native storage checks are not whole-image Docker acceptance.
+
+The previously built `f497e7e` image passes generated-volume browser-byte and API-guard
+checks, worker scanning, selected bindings, overlap refusal, recreation, graceful
+stop, forced exit, invalid configuration, and replacement refusal.
+The image build also passes the full native archive lifecycle check on a fresh
+local volume. These are engine results, not supported-host acceptance.
+After the separately approved Docker Desktop host-network setup and engine
+restart, Windows host access to the existing candidate passes the real API
+session, packaged browser-byte, command-guard and state-recreation checks.
+Report: `target/docker-windows-loopback.json`. Its scope is API loopback only,
+using image source `f497e7ea4c7ecd0dfd260a332eb39d96b7e3ad67`. It does not
+establish external-media or whole-image Windows acceptance.
+The storage dependency replaces the old container-ancestor binding with the
+approved operator-selected filesystem contract. Do not restore the old binding
+model or remove the new admission checks. See the [storage contract](storage.md).
+
+The generated Windows-folder capability probe found a 9p mount. Component-relative
+no-follow opens rejected a generated junction and symlink. Live alias identities
+matched, and replacing a stopped parent changed its observed identity without
+changing the retained leaf. However, the mount refused `name_to_handle_at` with
+errno 95 and `FS_IOC_GETVERSION` with errno 25. No supported persistent native
+identity profile was established. Runtime inode observations are not a saved
+authority fallback. External folder mounts remain required; Linux-private volume
+checks do not replace this gate.
+
+On this host, Docker CLI and Compose created missing Windows bind-source
+directories. This occurred despite `create_host_path: false` and an additional
+CLI check with `bind-create-src=false`. This remains a separate runtime gate.
+Native Linux host acceptance and a public registry pull are still unverified.
+Do not use this image with an existing library until these gates pass.
+
+## Native media adapter proof
+
+The user approved implementation of a native Windows media adapter for the
+Linux image. External Windows folders remain in scope. This changes their
+planned access from guest 9p mounts to authenticated native provider roots.
+It does not approve host changes, installation, or service registration.
+
+The implementation is `infrastructure::filesystem::media_adapter`.
+The explicit `media-adapter` foreground command can now start its listener from
+operator-managed configuration. Host-selected paired roots can now be registered
+explicitly and checked through the application's location availability operation.
+Full library scans and direct-folder refreshes use the retained read-only client.
+Indexed JPEG reads and read-only music sharing also use this client.
+Replacement previews now use a common native/paired snapshot rule. They inspect
+only the selected media root and require exact complete file hashes, one hard
+link, unchanged file evidence and at most 1001 flat files. Empty existing files
+are supported. Paired files and their parents remain on the same connection.
+A missing folder is reported only after complete successful enumeration.
+Directory checks and repeated listings use the retained reference; a failed
+enumeration cannot be reset into successful absence.
+Publication folder creation, copying and verification use the common
+I/O boundary. New folders retain their original Windows creation handle.
+Creation refuses existing names and case collisions instead of adopting them.
+Publication and restore moves verify the exact identity and approved complete
+manifest through the actual move-capable source. They rename that same handle
+without replacement. A failed operation cannot retry an uncertain move by path.
+Journalled media recovery removal uses the same boundary. Exact file removal
+verifies the actual removal-capable source and checks the current recovery
+version between bounded reads. Directory removal requires an exact empty source.
+Final absence is required before the existing journal records completion.
+Its paired implementation can create only missing outputs or verify exact
+existing files against their approved length and SHA-256. It does not repair
+partial files. Receipted missing files, case collisions and extra album entries
+fail. It checks claims between bounded requests and requires an explicit write
+grant even when verifying existing output.
+Production publication, restore and media recovery now use selected native or
+paired admission. Recovery retains one selected connection for layout checks
+and removal. Exact full-stream inspection keeps paired identities opaque.
+Private staging recovery remains native and keeps its OS lock.
+Restore and removal sync the actual parent before durable completion, including
+reconciliation after an interrupted effect. Windows sync remains the deliberate
+native no-op; this is not power-loss proof.
+Generated Windows TLS checks cover main and backup replacement, restore and
+retained-file deletion. This is native test evidence, not Linux-container
+client evidence or whole-image acceptance.
+Do not treat this implementation as Windows Docker acceptance.
+
+### Generated writable container workflow
+
+The separate `media-workflow-artifacts` build target exports a source-stamped
+Linux unit-test executable. It does not add test code or build tools to the
+runtime image. The Windows coordinator requires an existing clean runtime
+candidate with the same source revision as the helper and its checkout.
+It does not pull an image, change Docker settings, or install a service.
+
+From a clean, committed checkout, first build the runtime with the normal Docker
+build task. Then export the helper and run the ignored coordinator:
+
+```powershell
+$revision = git rev-parse HEAD
+docker build --platform linux/amd64 --build-arg "DOMUS_SOURCE_REVISION=$revision" --target media-workflow-artifacts --output type=local,dest=target\media-workflow .
+$env:DOMUS_MEDIA_WORKFLOW_IMAGE = 'domus-obscura:local'
+$env:DOMUS_MEDIA_WORKFLOW_BINARY = (Resolve-Path target\media-workflow\media-workflow).Path
+.\dev.ps1 -TaskArgs @('test', '--lib', 'media_adapter_production_docker_workflow', '--', '--ignored')
+```
+
+Each published/restored case uses separate generated Windows main and backup
+roots with explicit write grants. Private guest state uses a fresh Linux Docker
+volume. The helper runs under the exact inspected runtime image ID, with
+loopback host networking, dropped capabilities, no new privileges, a read-only
+image filesystem, and bounded process resources and time. Pairing input contains
+only generated certificates and logical roots.
+
+The workflow interrupts copy, restore, and deletion journal writes. Continuation
+uses new selected connections. The coordinator independently checks exact
+visible Windows bytes and retained-folder absence. It stops the native adapter
+and removes its owned containers, volume, and Windows fixture. Cleanup errors
+fail the check. The ordinary suite skips this workflow.
+
+The report is `target/media-adapter-docker-workflow.json`. This is generated
+Windows Docker Desktop media evidence, not native Linux-host acceptance,
+installed-service evidence, power-loss proof, or complete release acceptance.
+
+Linux CI exports the helper and its revision beside the exact tested image.
+The approved Windows job downloads both artifacts from the same workflow run.
+The complete Windows host check runs the writable coordinator itself after the
+packaged API/worker and native read-only media checks.
+The runner must already have the pinned development tools, `uv`, Python 3.14,
+and native MSVC/JPEG build requirements. The workflow does not change Docker settings or install a
+native adapter service. The coordinator still requires exact clean checkout,
+helper and image revision equality, including a PR merge revision.
+Writable media evidence is retained separately and bound into the complete host
+report by a fresh run nonce. It cannot satisfy release evidence by itself.
+
+The Windows job also checks real Windows HTTP access to the packaged API and
+browser with fresh private Linux volumes. This separate diagnostic uses
+`check --windows-private-volume-host` and records scope `private-volume-host`.
+It covers API/worker lifecycle and private-volume guards, not external Windows
+media. The release validator rejects this scope. Do not relabel it as complete
+Windows host acceptance or combine it with media reports without a checked,
+adapter-aware acceptance procedure.
+
+The native adapter diagnostic uses the same packaged API/worker lifecycle
+checker, but sends media operations through the paired production client.
+It creates only fresh Windows media and private adapter state. No Windows media
+directory is mounted into the Linux guest. The native executable must match the
+clean image revision and its Windows package manifest hash.
+
+From the matching clean checkout, build the native package and run:
+
+```powershell
+.\dev.ps1 package-windows
+$env:DOMUS_ADAPTER_TEST_PACKAGE = (Resolve-Path target\windows-package).Path
+uv run --no-project --python 3.14 packaging\docker\check.py self-test
+uv run --no-project --python 3.14 packaging\docker\check.py check --windows-adapter-package target\windows-package --report target\docker-windows-adapter.json
+```
+
+The optional native fixture test checks authenticated root access, missing and
+replacement root refusal, private-root overlap refusal and restoration of the
+original binding. It also attempts directory and file creation on a read-only
+native root and confirms refusal without a visible output.
+It does not require Docker. Without the explicit package
+selection, the ordinary self-tests skip this native fixture.
+
+The Docker diagnostic additionally checks real Windows HTTP access, packaged
+browser bytes, worker scans, junction refusal, retained observations while the
+adapter is offline, and API/worker recreation. It stops its foreground adapter
+and removes generated containers, volumes and fixtures. It does not install a
+service or change Docker settings. The CI job retains its report separately with
+scope `windows-adapter-host-diagnostic`. This scope is still rejected by release
+validation. Checking an empty write-grant declaration is not a denied-write
+operation proof. The diagnostic makes authenticated creation requests on the
+read-only fixture and checks both refusal and native absence. Generated
+writable/recovery evidence remains separate.
+
+### Complete adapter-aware Windows acceptance
+
+The complete check executes the native-adapter API/worker diagnostic and the
+source-matched writable coordinator. It does not concatenate old reports.
+Both execute the same inspected immutable image ID. The coordinator must return
+a new nonce-bound report with both published and restored cases and independently
+verified native bytes and retained-folder absence. An existing report, another
+image/revision, missing case, failed cleanup or partial result fails acceptance.
+Cleanup failures and interruptions leave a failed complete-host report.
+
+```powershell
+uv run --no-project --python 3.14 packaging\docker\check.py check --windows-adapter-package target\windows-package --windows-adapter-host --media-workflow-binary target\media-workflow\media-workflow --report target\docker-windows.json
+uv run --no-project --python 3.14 packaging\docker\check.py validate-evidence --linux-report target\docker-linux.json --windows-report target\docker-windows.json
+```
+
+Only this successful execution produces native-adapter `host` scope. Validation
+requires all shared lifecycle/guard checks, native missing/replacement and
+offline-observation checks, actual read-only creation refusal, the exact native
+package hash and the matching writable evidence. Cross-host image configuration
+digest and source revision equality remain required.
+
+The Windows CI job now uses this approved native-adapter path instead of the
+unsupported direct 9p bind path. Partial diagnostic scopes still fail release
+validation. This implements the acceptance procedure; it is not evidence that
+the current candidate has passed on an approved Windows Docker host. Installed
+services, reboot and power-loss proof remain outside these generated checks.
+
+The adapter verifies complete selected native chains and retains the opened
+directories and files. Only the Windows/native host maps root IDs to paths.
+The client sends frozen root definitions and a logical selection digest.
+References belong to one authenticated connection. Closing a parent closes its
+descendants. A new connection or adapter restart cannot reuse those references.
+Private adapter directories and supplied private-input hard-link aliases are
+excluded. Configuration and TLS inputs remain in memory after preparation.
+The adapter cannot open a remote database. Media writes default to denied.
+The new-output primitives below require an explicit per-root write declaration.
+
+The loopback-only channel requires mutual TLS and exact paired leaf certificates
+on both sides. Pinning supplements normal chain, validity, usage and hostname
+checks. It does not replace them. The listener reuses the guarded API server.
+It rejects browser headers and bounds request time, frames, pages, reads, writes,
+blocking tasks and live references. A failed enumeration remains incomplete.
+Connection loss never becomes an empty page or a fallback to 9p.
+Each connection permits 32 live references. Pages have at most 64 entries.
+File chunks are at most 16 KiB, and frames are at most 256 KiB.
+At most eight native operations run at once. Each request has a 10-second
+deadline. A deadline closes the connection; it cannot cancel an OS operation already
+running on a bounded blocking task.
+
+Run the generated native and TLS fixtures on Windows:
+
+```powershell
+.\dev.ps1 test media_adapter
+```
+
+For a separate container-to-host channel diagnostic, use the existing
+`domus-obscura:storage-candidate` image:
+
+```powershell
+.\dev.ps1 -TaskArgs @('test', '--lib', 'media_adapter_docker_loopback_probe', '--', '--ignored')
+```
+
+The diagnostic does not pull an image or change Docker settings. It starts a
+generated Windows fixture and one temporary container. Only generated pairing
+material enters the container's temporary filesystem. Its report is
+`target/media-adapter-docker-loopback.json`. A successful result proves only the
+authenticated root-open channel, not production provider integration or complete
+Windows Docker acceptance. The ordinary test suite skips this diagnostic.
+
+The configured adapter adds generated checks for passive preparation, frozen
+activation, private-input alias refusal and a latched stop before startup.
+The first
+Linux-container diagnostic failed with curl exit 7: connection refused.
+The user then explicitly approved enabling Docker Desktop host networking and
+restarting its engine. The saved setting is now on and the engine is running.
+Enhanced Container Isolation remains off and was not changed.
+The repeated diagnostic passes native Windows mutual TLS and an authenticated
+root-open request from the Linux container. Its generated CA has a distinct
+issuer name so both WebPKI and the image's curl can validate the test chain.
+Certificate verification and exact peer pinning remain enabled.
+Generated containers, fixtures and the API check's private volume were removed.
+
+These fixtures need no service installation, live provider, or existing library.
+Production media consumers and mutation/recovery services now use common
+native/paired I/O. Whole-image supported-host checks remain required.
+Earlier channel-only evidence does not prove that a later runtime candidate
+contains and uses the production client. The adapter itself runs on the native
+Windows host, not inside the Linux image. SQLite and other private application
+storage retain their existing local-only rules.
+
+### Configure the native foreground adapter
+
+The adapter uses a separate operator-managed JSON document. It does not open
+SQLite or use the Linux application's `config.json` as a Windows host file.
+No command creates, adopts, rewrites or rebinds an adapter selection.
+Review the native roots with `storage-root-inspect` before writing the document.
+See the [storage contract](storage.md) for complete native expectations.
+
+The document has these required fields. Unknown or duplicate fields fail.
+
+| Field                | Meaning                                                                            |
+| -------------------- | ---------------------------------------------------------------------------------- |
+| `format_version`     | `1`.                                                                               |
+| `listen`             | A loopback socket address with an explicit nonzero port, such as `127.0.0.1:8088`. |
+| `selection`          | The frozen adapter selection described below.                                      |
+| `certificate_file`   | The server certificate chain, including its issuing CA.                            |
+| `private_key_file`   | The matching server private key.                                                   |
+| `client_ca_file`     | Trust anchors for client certificate verification.                                 |
+| `paired_client_file` | The exact paired client certificate and any required intermediate certificates.    |
+
+`selection` contains a positive `revision`, one `provider` mapping, a nonempty
+`media` root array and one `private` root. The provider has a scope and an
+absolute native boundary. Each root uses its full inspected `StorageRoot`
+record. Media roots must have role `media`; the private root must have role
+`application`. The scope, roles, revisions and complete expected chains must
+match. Known overlaps and changed identities fail.
+
+The document must be directly inside its selected private root. All four TLS
+file references are nonempty `LibraryPath` identifiers beneath that root.
+Use slash-separated relative identifiers, not absolute Windows paths.
+Links, reparse traversal, alternate streams and root escapes fail. The opened
+private directories and files must have owner-only access on supported local
+storage. The document is limited to 256 KiB. Certificates and CA bundles are
+limited to 64 KiB each. The private key retains the existing 16 KiB TLS limit.
+The adapter retains all five input handles and rejects their hard-link aliases
+through media exports. Private keys never enter the database or protocol.
+
+Validate without opening a listener, then run explicitly in the foreground:
+
+```powershell
+domus media-adapter-check D:\DomusAdapter\private\adapter.json
+domus media-adapter D:\DomusAdapter\private\adapter.json
+```
+
+These are operator examples, not permission to change an existing host.
+The commands do not install or register a service. Stop with Ctrl+C.
+On Unix, SIGTERM also requests a stop. Shutdown stops new admission and gives
+active requests up to ten seconds to drain. Stop before editing the
+document or TLS files. Restart to activate changes; there is no live reload,
+automatic pairing, certificate generation or fallback provider.
+
+### Configure the paired client
+
+`MediaClient` provides the same bounded operations for native and
+paired TLS sessions. Writes require the separate grants below.
+Directory and file leases are opaque and belong to one
+client. Closing a directory invalidates its descendants. Cancellation, transport
+loss or inconsistent peer evidence retires the session. Recreate it explicitly;
+never resume a lost cursor or reopen a Windows file through a guest mount.
+Foreign identity records are checked as peer declarations only. They are never
+admitted to local filesystem access.
+
+The client uses a separate operator-managed document beneath the main host's
+admitted private inputs. Load it through `ConfigurationService` with the main
+host configuration. The client document alone does not register a media location.
+Unknown or duplicate fields fail.
+
+| Field                | Meaning                                                                         |
+| -------------------- | ------------------------------------------------------------------------------- |
+| `format_version`     | `1`.                                                                            |
+| `address`            | The adapter's fixed loopback socket address with a nonzero port.                |
+| `selection`          | The exact logical selection described below.                                    |
+| `server_ca_file`     | Trust anchors for server certificate verification.                              |
+| `paired_server_file` | The exact paired server certificate and any required intermediate certificates. |
+| `certificate_file`   | The client certificate chain.                                                   |
+| `private_key_file`   | The matching client private key.                                                |
+
+The logical selection has `revision`, `provider_scope`, `media`, `private`
+and optional `writable_roots`.
+These fields must match the native adapter's frozen declaration. The native
+`provider.boundary` path is not a client field. Complete native expectations
+remain in each root record. The peer must verify them before issuing a lease.
+Known duplicate or nested roots fail before a connection opens.
+
+All TLS references are nonempty `LibraryPath` identifiers beneath the client
+document's directory. Private local-only admission and file permissions remain
+required. The limits remain 256 KiB for the document, 64 KiB for certificates
+and CA bundles, and 16 KiB for the private key.
+
+```powershell
+domus media-client-check --host D:\DomusData\config.json D:\DomusData\media-client.json
+domus media-root-check --host D:\DomusData\config.json D:\DomusData\media-client.json library
+```
+
+The first command validates without contacting the peer. The second explicitly
+opens and closes one selected root over authenticated TLS. It fails if the
+adapter is unavailable, the selection differs or the root ID is not selected.
+Neither command scans, registers a location, starts a worker or mutates media.
+These checks do not establish whole-image or external-folder lifecycle acceptance.
+
+### Explicit new-output permissions
+
+The user approved implementation of explicit per-root write permissions.
+This does not approve their activation on existing libraries or any host change.
+Publication, replacement, backup, restore and recovery deletion use the common
+native/paired I/O boundary. Grants do not replace the required work approvals.
+
+Both selection declarations can include `writable_roots`, a list of exact
+selected media root IDs. Omission or an empty list keeps all roots read-only.
+Private roots, unknown IDs, duplicates and nonexact names fail validation.
+Nonempty grants change the logical selection digest and topology review.
+Update both stopped peers and review the exact topology declarations before
+activation. A changed grant does not change an immutable saved root binding.
+It is not a job, album, replacement, restore or deletion approval.
+
+The native protocol and typed client can create missing directories and files.
+They cannot overwrite an existing name or case-insensitive collision.
+On Windows, directory creation retains the original native creation handle.
+It never creates a directory, closes it and reopens its former name.
+Collision checks examine at most 64 names per request and retain their cursor.
+Changed parent evidence stops continuation before creation.
+Each new file binds a positive exact length and SHA-256 before its first byte.
+Only that original connection can append sequential chunks of at most 16 KiB.
+There is no write operation for an existing file.
+
+An incomplete output is not a readable file lease. Sealing syncs and independently
+hashes the complete retained file in steps of at most 16 KiB. Only an exact
+length, hash, unchanged identity and single hard link can yield a readable lease.
+A failed hash, native write failure, lost response or disconnected session does
+not permit a rewrite. Interrupted and different outputs remain unchanged.
+Reopening a session cannot resume their writes. Native evidence is not an
+application receipt; the existing local application journal remains authoritative.
+
+The protocol also supports a separate retained-source directory move lease.
+It requires the exact listed source, its original parent and an explicit root
+write grant. An ordinary browsing lease cannot move a directory. On Windows,
+the adapter opens the source once with DELETE access, verifies that handle and
+renames that same handle. It does not reopen a reviewed source name.
+Selected roots cannot be sources. The lease permits content inspection, not
+content writes. Close all child leases before the move.
+
+Moves use the same bounded case-insensitive name checks and native no-replace
+effect. They cannot replace an existing target. Successful moves consume the
+source lease, refresh parent evidence and reset its listing cursor.
+Cancellation or a lost response does not prove that the move had no effect.
+Never replay it automatically. Reconcile against the existing application
+journal and exact source/destination evidence. Unix namespace effects retain
+the existing cooperative-writer requirement. These primitives do not approve
+an album or verify its full manifest.
+
+Existing-file verification opens without creation or truncation. It independently
+hashes the exact retained file in bounded steps. Exact empty files are supported.
+On Windows, this internal handle needs write access for `FlushFileBuffers`, but
+the capability has no write operation. Partial, different, stale and hard-linked
+files fail without repair. See [FlushFileBuffers access requirements](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
+
+File removal uses a separate capability. It retains the actual DELETE-capable
+source through complete hash verification and final deletion. Ordinary readable
+files and unsealed removal references cannot authorize deletion. Directory
+removal consumes a retained move lease and requires an empty directory.
+There is no recursive deletion. Selected roots cannot be removed.
+Confirmed removal refreshes the parent and consumes the source reference.
+A pending delete, occupied name or lost response requires explicit reconciliation
+with saved application intent, not automatic replay. Unix removal still requires
+cooperative external writers.
+
+Parent synchronization uses an explicit writable retained-directory request.
+The caller must sync before recording a reconciled restore state, including
+after an interrupted rename. Ordinary status checks have no sync effect.
+Changed observations, failed listing and read-only move sources cannot authorize
+sync. It reuses native directory synchronization; Windows directory sync remains
+a deliberate no-op. File flushing and primitive tests do not prove Windows
+power-loss safety.
+
+The typed client's checked creation, verification, removal, move and seal methods accept an application
+checkpoint before each bounded native request. Use it to renew the current
+claim and recheck approval and stop, including between name pages and hash steps.
+Commit per-file deletion intent before the final removal request.
+The production publication/recovery callers are not connected yet.
+
+### Select and register a paired library root
+
+The main host document can select one paired provider with `paired_media`.
+Its required fields are `client_file` and `topology_assurances`. The client file
+is a private local path, resolved relative to the main host document. Its
+contents and pairing material are frozen during host preparation. Each later
+availability operation opens its own authenticated session. It does not reread
+the client document or share a live connection with another operation.
+
+Keep all local private roots in the existing `storage` selection.
+Do not put foreign media expectations into that local selection or give them a
+dummy native path. The paired provider scope and all root IDs must be distinct
+from the local provider scopes and root IDs.
+
+Before adding `paired_media`, obtain the exact review digest from the stopped
+host's existing local selection and the candidate client document:
+
+```powershell
+domus media-storage-digest --host D:\DomusData\config.json D:\DomusData\media-client.json
+```
+
+This command reads private configuration. It does not contact the peer or
+approve a topology. For each paired media root and each local root, the operator
+must supply a `TopologyAssurance` with `left`, `right` and `selection_digest`.
+`left` and `right` each contain `root_id` and `binding_revision`. Order the two
+root IDs lexically. Use the printed digest for `selection_digest`. Also supply
+an assurance between the adapter's private root and each local media root.
+Do not add private-to-private assurances.
+
+These are explicit operator declarations that the selected namespaces do not
+overlap. Review the real host/share mappings before making them. Every required
+pair must appear exactly once. Unknown roots, stale revisions, wrong digests,
+duplicate pairs and known native overlap fail. An assurance cannot override a
+known overlap. This uses logical filesystem mappings, not physical-device
+identity. The main host document retains its existing 16 KiB limit.
+
+Add the reviewed `paired_media` section while all state users are stopped.
+Validate the saved host configuration, then restart all components together.
+Passive host preparation does not contact the adapter. Missing or invalid
+selected client configuration fails; there is no provider fallback.
+
+Register one selected root explicitly, then check its saved binding:
+
+```powershell
+domus location-add-paired --host D:\DomusData\config.json library main
+domus location-check --host D:\DomusData\config.json 1
+```
+
+Registration requires writable system settings and an authenticated root-open
+and close before its database transaction. It saves only the provider/root
+definition, not Windows paths, TLS keys or live tokens. Existing limits of
+100 locations and one main location remain. A saved root cannot be replaced.
+An unrelated selection revision can change without rewriting that root.
+Changing its provider, binding revision or complete expectation fails against
+the saved record. Removing a provider with registered roots also fails.
+
+The existing API location-availability operation uses the same saved binding.
+It performs network I/O on a blocking thread without a SQL transaction.
+Peer loss does not change indexed entries, coverage or observation dates.
+Native filesystem and publication accessors reject paired roots explicitly.
+Full scans and direct-folder refreshes enumerate this provider in bounded pages.
+Each descent opens the exact listed object relative to its retained parent.
+MP3 and FLAC inspection uses the same bounded tag parser as native scans through
+retained-file Read/Seek. Reads are limited to 16 KiB per adapter request.
+The existing 8 MiB metadata envelope, frame/comment limits and 64 KiB MPEG probe
+remain. This inspects browsing metadata, not full audio validity.
+
+The existing persistent scan frontier, ownership checks and direct-folder scope
+remain active. Each page, open and read checks worker stop and renews the claim.
+Short persistence transactions contain at most 128 entries. They never span
+network I/O. Stop releases the claim for explicit continuation. Connection loss,
+changed objects, unsafe traversal and failed enumeration leave incomplete
+coverage. They do not mark unseen entries absent. An unsafe directory entry
+currently fails its paired enumeration rather than producing a native-style
+`unsafe_link` row. Invalid tags and unsupported audio remain indexed file
+diagnostics. Recovery folders stay excluded.
+
+Indexed JPEG previews use retained reads with the same exact indexed identity,
+size, high-resolution modification evidence and 8 MiB compressed-input limit.
+The API still applies strict bounded JPEG processing. It never serves original
+bytes or treats a preview as artwork approval.
+
+Read-only music sharing uses explicit folder inspection and binding, the existing
+bounded catalog and exact retained file reads. Saved native bindings keep their
+existing format. Paired bindings save logical root authority and the directory
+identity chain, never paths, credentials or live leases. Each directory reopen
+must match that chain. Files require exactly one hard link. File changes, folder
+replacement, peer loss and stale catalog generations fail rather than adopting
+new evidence. Uploads retain the visibility guard through the last byte and
+support the existing exact resume offsets. Publication intent, membership and
+hash checks remain active. The adapter observation now requires a hard-link
+count; update both ends together. Old peers without this field fail explicitly.
+
+Publication and recovery are not yet routed through this provider. Their
+native-only accessors still fail explicitly. These limits remain required work
+for issue #66.
+
+### Selected-folder lifecycle
+
+A missing selected native folder fails adapter validation and startup. Neither
+operation creates the folder. A different folder at the same path also fails,
+even when it contains copied media with identical bytes. Do not inspect that
+replacement and save new expectations as automatic recovery.
+
+The generated Windows retained-handle check also verifies that the active
+selection denies renaming its root with a sharing violation. Stop the adapter
+before an operator changes its selected-folder layout. This is not permission
+to change an existing library. After stopping, a missing or copied replacement
+still fails against the saved configuration. Restoring the exact original
+folder permits restart without rebinding the library or its share folders.
+These checks do not prove drive-disconnection or power-loss behavior.
+
+The clean `f192685` Linux image was checked against generated Windows folders
+for missing-root refusal, copied-root refusal and exact-original restoration.
+After restoration and adapter restart, the existing API returned the indexed
+JPEG and the same share binding. Cached location coverage and observation
+evidence stayed unchanged. This extends read-only Windows Docker Desktop
+evidence only. Writable publication, recovery and both full supported-host
+acceptance results remain separate gates.
+
+## Build and verify
+
+From a checkout on Windows:
+
+```powershell
+.\dev.ps1 docker-build
+.\dev.ps1 docker-check
+```
+
+On Linux:
+
+```sh
+cargo task docker-build
+cargo task docker-check
+```
+
+Docker, Python 3, and the repository task launcher must already be available.
+The Docker build installs its build tools inside the build image only.
+It does not install host software or change Docker Desktop settings.
+
+The local tag is `domus-obscura:local`. The image bases and language tools are
+pinned. Dependency restores use the checked-in lockfiles and the default package
+registry. The task runs the existing Linux archive and process checks.
+BuildKit caches can use unsupported overlayfs storage. Archive structure checks
+run during image assembly. The unchanged lifecycle checker then runs in a
+temporary verification image, with fresh state on a Docker local volume.
+The task exports the runtime image only after those checks pass. The temporary
+container, image and volume are removed. A raw `docker build` does not replace
+this verification task.
+The native SQLite wrapper downloads and verifies its pinned upstream archive.
+Complete SQLite or SQLCipher sources are not committed or copied into the runtime.
+The source context excludes Git worktree metadata, private state, credentials,
+and generated build outputs.
+
+The native package manifest records a supplied commit and `dirty: null` for an
+image build without Git metadata. This means the build cannot inspect the source
+checkout. The image's `io.domus.source.dirty` label records the launcher's source
+status. Neither field authenticates a publisher. Release workflows require a
+clean checkout and both host results for the same image.
+
+`docker-check` uses fresh volumes and a small generated media directory.
+It checks the real browser/API, command guards, a read-only mount, a worker scan,
+native bindings, state after recreation, worker contention, safe stop, forced
+exit, invalid configuration, and rejected replacement roots.
+On Windows, it also checks a generated junction to a directory outside the
+mounted library. It never uses an existing library or live credentials.
+
+Results are written to `target/docker-check.json`. The runner deletes only its
+named test containers, volumes, and generated directory. It does not prune Docker.
+A separate diagnostic can check the Linux engine without claiming host access:
+
+```powershell
+python packaging\docker\check.py check --engine-only --report target\docker-engine-check.json
+```
+
+An engine-only result is not Windows-host acceptance and cannot authorize release.
+Image creation, native package checks, and Compose parsing are also not runtime
+acceptance.
+
+An additional diagnostic isolates Linux-private media from Windows filesystem
+translation:
+
+```powershell
+python packaging\docker\check.py check --engine-only --volume-media --report target\docker-linux-volume-engine.json
+```
+
+This mode also cannot authorize release or prove Windows bind-mount safety.
+
+## Run the API
+
+Use `compose.yaml` with a trusted image. For a published release, set `DOMUS_IMAGE`
+to the exact registry digest from that release. Do not invent a tag before
+publication has completed.
+
+Windows:
+
+```powershell
+$env:DOMUS_IMAGE = 'ghcr.io/plagueho/domus-obscura@sha256:<release-digest>'
+docker compose pull
+docker compose up -d api
+docker compose ps
+docker compose logs --tail 100 api
+```
+
+Linux:
+
+```sh
+export DOMUS_IMAGE='ghcr.io/plagueho/domus-obscura@sha256:<release-digest>'
+docker compose pull
+docker compose up -d api
+docker compose ps
+docker compose logs --tail 100 api
+```
+
+For the locally built image, leave `DOMUS_IMAGE` unset or set it to
+`domus-obscura:local`. Open `http://127.0.0.1:8080` after API readiness.
+An occupied port or failed startup is an error.
+
+The default starts only the API. Fresh state selects `single_user` anonymous
+HTTP, read-only system settings, and disabled providers. A retained configuration
+is reused. No failed secure configuration falls back to anonymous mode.
+
+Compose runs without Linux capabilities or privilege elevation and uses a
+read-only program filesystem. `/tmp` is a bounded temporary filesystem.
+One local named volume retains `/storage`. Fresh setup creates
+`/storage/application/config.json` and `/storage/application/state/state.db`. Optional cache, staging and
+certificate directories are children of the same application directory.
+The API uses `serve --storage-root /storage/application`. The worker uses the same
+`/storage/application/config.json`. The extra child keeps the application's setup
+parent on the supported volume, not on the container's overlay filesystem.
+Existing configuration is operator-managed and read-only
+to application components.
+Installed browser assets can use the read-only image overlay. This exception
+does not apply to state, secrets or selected writable roots. Startup refuses
+browser assets on a writable image overlay. Keep `read_only: true`.
+Do not use network volume drivers for private state.
+The current Linux native adapter requires supported ext-family storage for
+private state. A Windows host directory is not a substitute for this volume.
+
+## Mount external media
+
+Set an existing absolute host directory and add `compose.media.yaml`.
+The mount is read-only for both services.
+
+Windows:
+
+```powershell
+$env:DOMUS_MEDIA_ROOT = 'D:\Media\Music'
+docker compose -f compose.yaml -f compose.media.yaml up -d api
+```
+
+Linux:
+
+```sh
+export DOMUS_MEDIA_ROOT='/srv/media/music'
+docker compose -f compose.yaml -f compose.media.yaml up -d api
+```
+
+The same data appears at `/media` inside the container.
+Use `/media` in application configuration, not the host path.
+The override sets `create_host_path: false`. Acceptance requires missing source
+directories to fail without creation. The tested Docker Desktop host did not
+meet that requirement. Do not treat this option as verified protection.
+See [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/).
+
+Run the generated mount checks on the selected host/filesystem before operating
+an existing library. Windows path translation is not proof of junction safety,
+stable file identities, or private Unix permissions.
+Do not use Windows bind mounts for SQLite, credentials, TLS private keys, or
+cache/staging state. Keep those resources in Linux-private local volumes.
+
+Mounting data does not select, register or approve it. Stop all state users.
+Inspect an existing candidate with the runtime binary:
+
+```sh
+docker compose -f compose.yaml -f compose.media.yaml run --rm --no-deps api \
+  storage-root-inspect /media media main 1 media ""
+```
+
+Review the candidate and the combined operator selection before editing
+`/storage/application/config.json`. Follow [additional-root selection](storage.md#inspecting-an-additional-root)
+for provider mapping, complete expectations and exact topology assurances where
+required. Assurances are trusted operator statements, not measured separation.
+Never generate them automatically for arbitrary operator mounts.
+
+Run `configuration-check /storage/application/config.json` with all state users stopped.
+Then register a separately approved new library:
+
+```sh
+docker compose -f compose.yaml -f compose.media.yaml run --rm --no-deps api \
+  location-add --host /storage/application/config.json /media main
+```
+
+The host policy must permit this command. Use the returned location ID with the
+existing guarded scan and browse commands. Bare database-path commands are not
+supported. Existing Windows-native bindings are not Linux-container bindings.
+Do not copy database bindings, configuration, owner markers or receipts to
+authorize replacement storage. Incompatible pre-production state needs an
+explicit fresh setup, not migration, adoption or reset. Preserve existing data.
+
+Grant write access only for a separately approved media operation.
+Use a reviewed Compose override for only that mount and service.
+Never recursively change permissions on an existing library to resolve a
+container access error. No container startup grants source, plan, or artwork
+approval.
+
+## Configure the worker and secure mode
+
+Stop all containers that use the state before manual configuration editing:
+
+```sh
+docker compose --profile worker stop
+```
+
+The operator can edit private JSON under the same `1000:1000` runtime identity. Preserve mode
+`0600` and its stable sibling lock. Do not replace a live lock.
+Keep the configuration inside an admitted private storage boundary. The
+application never saves changes to existing host JSON. The
+`system_settings_read_only` policy controls SQLite commands, not host JSON writes.
+Do not enable the removed configuration-save or API-only reload operations.
+
+An explicit `production_worker` section enables the worker.
+A scan-only worker can use:
+
+```json
+{
+  "production_worker": {
+    "queue_capacity": 64,
+    "acquisition": null
+  }
+}
+```
+
+Preserve all other configuration sections. Do not substitute this fragment for
+the complete saved configuration.
+Use `system_settings_read_only: false` only when administrator configuration
+writes and scan commands are intended.
+
+Start the API and the explicitly configured worker:
+
+```sh
+docker compose --profile worker up -d
+```
+
+Compose waits for the API's browser readiness before worker startup.
+Inspect `/api/local/status` for an online worker and its exact active
+configuration revision. A running worker container is not readiness evidence.
+Use the same media override files for both startup and later commands.
+Do not scale the worker or run another deployment against the same state.
+
+Production still requires Entra and validated TLS material.
+Explicit development still requires trusted loopback HTTPS.
+Provide private material through Linux-private file references.
+For HTTPS or a changed port, override the API health environment with the
+configured browser URL and, where required, `DOMUS_HEALTH_CA`.
+The CA path identifies a public trust certificate, not a private key.
+The probe does not disable certificate validation or follow redirects.
+Generated health tests check HTTP 200, redirect rejection, and HTTPS CA trust.
+
+Operator edits do not activate a new configuration in running processes.
+Stop all state users, edit and validate, then restart all with the same file.
+Review pending work and use the existing safe boundary.
+Provider credentials, plaintext-login acknowledgement, peer reachability, and
+live transfers remain separately configured and approved.
+
+## Stop, backup, and upgrade
+
+```sh
+docker compose --profile worker stop
+docker compose --profile worker down
+```
+
+Stop gives the application up to two minutes to drain. A forced exit preserves
+recovery evidence; it does not approve deletion or reset uncertain submissions.
+Use the [operator guide](operator-guide.md) for recovery and consistent backups.
+
+Do not use `docker compose down --volumes`. That deletes retained state.
+Stop every state user before backup or restore. Copy the complete private state
+and required bound roots with the existing stopped-process procedure.
+
+Retain the exact image digest used by a deployment. Acceptance requires the same image and mount
+layout to preserve native bindings after recreation.
+A new image or Docker/filesystem change can change storage admission.
+The operator-selected logical bindings exclude container-specific ancestors,
+but retain complete expectations within the selected boundary.
+Do not automatically rewrite bindings after an upgrade.
+Test the candidate against generated retained state first. If binding checks
+fail, preserve the original deployment and use explicit reviewed recovery.
+Do not report an unavailable mount as confirmed absence.
+
+## Release and evidence
+
+The Docker workflow builds and checks Linux candidates without publication on
+pull requests. A release requires the same candidate to pass on a separately
+approved Windows Docker Desktop runner. The Windows job does not install Docker,
+enable host networking, or register a runner.
+
+The selected runner design is a dedicated disposable Windows host. This is not
+permission to provision it, install software, register a runner or incur costs.
+The repository is public. Do not register a personal workstation or give the
+runner unrelated credentials. Review the
+[GitHub self-hosted runner security guidance](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners).
+Use a supported Windows client OS, not Windows Server. An Azure VM candidate also
+needs nested virtualization and Docker Business for Docker's VM support.
+Keep the guest OS persistent throughout the run, then remove the complete test
+host. See [Docker Windows requirements](https://docs.docker.com/desktop/setup/install/windows-install/)
+and [Docker VM support](https://docs.docker.com/desktop/setup/vm-vdi/).
+Provider, licensing, resource limits, cost limits and setup approval remain open.
+
+Only the publish job receives `packages: write`.
+Use a protected `docker-release` environment for release approval.
+The publish job fails if that environment has no required reviewers.
+The release version must match the package version.
+Both reports must identify the same image and clean source revision.
+The report keeps the engine-local image ID for diagnostics. Cross-host comparison
+uses the digest of the saved image configuration, which includes the layer-content
+identities. Engine-local IDs can differ between image storage backends.
+Public GHCR packages permit anonymous pulls, but new packages start private.
+An operator must approve and perform the initial public-visibility change.
+Verify an anonymous pull before claiming a public release.
+See [GitHub Container Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
+Dependency notice collection is not independent legal review.
+Keep the existing distribution review in #26 separate.
+Keep built, checked on Linux, checked on Windows, published, and publicly
+pullable states separate. A missing host result blocks issue #66 acceptance.

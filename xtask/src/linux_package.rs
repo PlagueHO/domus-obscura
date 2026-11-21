@@ -214,12 +214,15 @@ fn verify(root: &Path) -> Result<BTreeMap<String, String>> {
     Ok(observed)
 }
 
-fn archive_check(archive: &Path) -> Result<()> {
-    output(
-        Command::new("python3")
-            .arg("packaging/linux/package-check.py")
-            .arg(std::path::absolute(archive)?),
-    )?;
+fn archive_check(archive: &Path, lifecycle: bool) -> Result<()> {
+    let mut command = Command::new("python3");
+    command
+        .arg("packaging/linux/package-check.py")
+        .arg(std::path::absolute(archive)?);
+    if !lifecycle {
+        command.arg("--verify-only");
+    }
+    output(&mut command)?;
     Ok(())
 }
 
@@ -241,15 +244,32 @@ fn release_command(cargo: &std::ffi::OsStr) -> Command {
 
 pub fn check() -> Result<()> {
     verify(Path::new(ROOT))?;
-    archive_check(Path::new(ARCHIVE))?;
+    archive_check(Path::new(ARCHIVE), true)?;
     println!(
         "Linux archive and isolated lifecycle checks passed. Installed services and reboot remain separate checks."
     );
     Ok(())
 }
 
-pub fn build() -> Result<()> {
+fn provenance(revision: Option<&str>) -> Result<(String, Option<bool>)> {
+    if let Some(revision) = revision {
+        if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("container source revision must be a full 40-character Git commit".into());
+        }
+        return Ok((revision.to_owned(), None));
+    }
+    Ok((
+        output(Command::new("git").args(["rev-parse", "HEAD"]))?
+            .trim()
+            .to_owned(),
+        Some(!output(Command::new("git").args(["status", "--porcelain"]))?.is_empty()),
+    ))
+}
+
+pub fn build(revision: Option<&str>) -> Result<()> {
     require_host()?;
+    let container = revision.is_some();
+    let (revision, dirty) = provenance(revision)?;
     if std::env::var_os("RUSTFLAGS").is_some()
         || std::env::var_os("CARGO_ENCODED_RUSTFLAGS").is_some()
     {
@@ -260,7 +280,13 @@ pub fn build() -> Result<()> {
     if !command.status()?.success() {
         return Err("Linux release compilation failed".into());
     }
-    let staging = Path::new("target").join(format!("linux-package-{}.pending", std::process::id()));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let staging = Path::new("target").join(format!(
+        "linux-package-{}-{nonce}.pending",
+        std::process::id()
+    ));
     fs::create_dir(&staging)?;
     copy(
         &Path::new("target").join(TARGET).join("release/domus"),
@@ -301,8 +327,8 @@ pub fn build() -> Result<()> {
     let manifest = serde_json::json!({
         "format": 1, "target": TARGET, "version": env!("CARGO_PKG_VERSION"),
         "baseline": {"distribution": "Ubuntu 24.04", "glibc": "2.39", "systemd": "255"},
-        "revision": output(Command::new("git").args(["rev-parse", "HEAD"]))?.trim(),
-        "dirty": !output(Command::new("git").args(["status", "--porcelain"]))?.is_empty(),
+        "revision": revision,
+        "dirty": dirty,
         "rust": output(Command::new("rustc").arg("--version"))?.trim(),
         "node": output(Command::new("node").arg("--version"))?.trim(),
         "elf": inspect(&staging.join("domus"))?,
@@ -316,7 +342,7 @@ pub fn build() -> Result<()> {
     set_modes(&staging)?;
     verify(&staging)?;
     let archive = Path::new("target").join(format!(
-        "linux-archive-{}.pending.tar.gz",
+        "linux-archive-{}-{nonce}.pending.tar.gz",
         std::process::id()
     ));
     if archive.exists() {
@@ -337,7 +363,9 @@ pub fn build() -> Result<()> {
             .arg(&staging)
             .arg("."),
     )?;
-    archive_check(&archive)?;
+    // BuildKit caches can use overlayfs. The Docker task runs the unchanged
+    // lifecycle checker separately on a supported local volume before export.
+    archive_check(&archive, !container)?;
     let previous = Path::new(ROOT);
     let previous_files = if previous.exists() {
         Some(verify(previous)?)
@@ -369,12 +397,27 @@ pub fn build() -> Result<()> {
     println!(
         "Verified Linux candidate: {ARCHIVE}. Manual installation requires separate approval."
     );
+    if container {
+        println!(
+            "Container archive structure checked; Docker volume lifecycle verification is still required."
+        );
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn container_provenance_does_not_claim_a_clean_git_checkout() -> Result<()> {
+        let revision = "429fbc33c5137131c703a54b8a153766939398f6";
+        assert_eq!(provenance(Some(revision))?, (revision.to_owned(), None));
+        for invalid in ["", "main", "../checkout", &"z".repeat(40)] {
+            assert!(provenance(Some(invalid)).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn linux_package_pins_the_release_output_directory() {

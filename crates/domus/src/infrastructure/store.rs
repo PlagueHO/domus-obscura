@@ -103,6 +103,7 @@ pub struct Store {
     path: PathBuf,
     directory: std::sync::Arc<super::filesystem::LibraryDirectory>,
     filesystem: Option<std::sync::Arc<super::filesystem::FilesystemClient>>,
+    paired_media: Option<std::sync::Arc<super::filesystem::media_adapter::SelectedMedia>>,
     cache: Option<std::sync::Arc<dyn crate::application::services::cache::Cache>>,
     worker_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -124,6 +125,7 @@ pub struct StoreSource {
     path: PathBuf,
     directory: std::sync::Arc<super::filesystem::LibraryDirectory>,
     filesystem: Option<std::sync::Arc<super::filesystem::FilesystemClient>>,
+    paired_media: Option<std::sync::Arc<super::filesystem::media_adapter::SelectedMedia>>,
 }
 
 impl StoreSource {
@@ -170,7 +172,7 @@ impl StoreSource {
                 native_sqlite::OpenMode::ReadOnly
             }
         };
-        let store = Store::from_connection(
+        let mut store = Store::from_connection(
             self.context.open(native_mode)?,
             self.path.clone(),
             self.directory.clone(),
@@ -179,6 +181,7 @@ impl StoreSource {
                 || (self.filesystem.is_none() && matches!(mode, StoreOpenMode::Existing)),
             matches!(mode, StoreOpenMode::ReadCurrent | StoreOpenMode::Snapshot),
         )?;
+        store.paired_media = self.paired_media.clone();
         if matches!(mode, StoreOpenMode::Snapshot) {
             store.connection.execute_batch("BEGIN DEFERRED;")?;
             require_current_schema(&store.connection)?;
@@ -349,6 +352,7 @@ impl Store {
             path,
             directory,
             filesystem: Some(client.clone()),
+            paired_media: None,
         }
         .open(mode)
     }
@@ -359,6 +363,7 @@ impl Store {
             path: self.path.clone(),
             directory: self.directory.clone(),
             filesystem: self.filesystem.clone(),
+            paired_media: self.paired_media.clone(),
         }
     }
 
@@ -379,6 +384,7 @@ impl Store {
                 path,
                 directory,
                 filesystem,
+                paired_media: None,
                 cache: None,
                 worker_stop: None,
             });
@@ -413,6 +419,7 @@ impl Store {
             path,
             directory,
             filesystem,
+            paired_media: None,
             cache: None,
             worker_stop: None,
         })
@@ -426,6 +433,7 @@ impl Store {
             path,
             directory,
             filesystem: None,
+            paired_media: None,
         }
         .open(mode)
     }
@@ -438,6 +446,15 @@ impl Store {
     ) -> Self {
         self.cache = Some(cache);
         self
+    }
+
+    pub(crate) fn with_paired_media(
+        mut self,
+        media: Option<std::sync::Arc<super::filesystem::media_adapter::SelectedMedia>>,
+    ) -> Result<Self> {
+        self.paired_media = media;
+        self.require_paired_media_bindings()?;
+        Ok(self)
     }
 
     pub(crate) fn cache(
@@ -521,7 +538,28 @@ impl Store {
         }
         let binding = self.prepare_root_binding(&opened, "media")?;
         let root = binding.key(root);
-        let root = root.as_str();
+        self.insert_location(&root, Some(root_path), kind, &binding)
+    }
+
+    /// Explicit registration uses a selected root ID, never a peer/native path.
+    /// The authenticated availability check completes before the transaction.
+    pub fn add_paired_location(&self, root_id: &str, kind: &str) -> Result<i64> {
+        if !matches!(kind, "main" | "backup") {
+            return Err(Error::InvalidInput(
+                "location kind must be main or backup".into(),
+            ));
+        }
+        let binding = self.selected_media_binding(root_id)?;
+        self.insert_location(&binding.key(""), None, kind, &binding)
+    }
+
+    fn insert_location(
+        &self,
+        root: &str,
+        root_path: Option<&Path>,
+        kind: &str,
+        binding: &native_roots::SavedRoot,
+    ) -> Result<i64> {
         let transaction = self.connection.unchecked_transaction()?;
         native_roots::require_bound_roots(&transaction)?;
         let (count, mains): (i64, i64) = transaction.query_row(
@@ -539,7 +577,9 @@ impl Store {
         for existing in statement.query_map([], |row| row.get::<_, String>(0))? {
             let existing = existing?;
             if self.filesystem.is_none()
-                && (root_path.starts_with(&existing) || Path::new(&existing).starts_with(root_path))
+                && root_path.is_some_and(|root_path| {
+                    root_path.starts_with(&existing) || Path::new(&existing).starts_with(root_path)
+                })
             {
                 return Err(Error::InvalidInput(
                     "library locations must not overlap media or reserved private roots".into(),
@@ -551,8 +591,9 @@ impl Store {
             &transaction,
             root,
             "media",
-            &binding,
+            binding,
             self.filesystem.as_deref(),
+            self.paired_media.as_deref(),
         )?;
         transaction.execute(
             "INSERT INTO locations(root, kind) VALUES (?1, ?2)",

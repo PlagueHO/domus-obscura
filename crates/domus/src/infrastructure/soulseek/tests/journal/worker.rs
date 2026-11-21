@@ -606,8 +606,9 @@ fn worker_loads_uncertainty_for_reconciliation_and_sealed_input_needs_no_login()
         let preparation = fixture
             .store
             .prepare_publication_path(&publication_claim, target.id)?;
-        let directory = PublicationDirectory::open(&fixture.store, &target, &preparation)?
-            .ok_or("publication preparation collision")?;
+        let directory =
+            PublicationDirectory::open(&fixture.store, &publication_claim, &target, &preparation)?
+                .ok_or("publication preparation collision")?;
         fixture.store.bind_publication_album(
             &publication_claim,
             target.id,

@@ -1095,8 +1095,8 @@ fn upload(
     )
 }
 
-fn transmit(
-    input: &mut std::fs::File,
+pub(crate) fn transmit(
+    input: &mut (impl Read + Seek),
     socket: &mut TcpStream,
     token: u32,
     bytes: u64,
@@ -1127,7 +1127,20 @@ fn transmit(
             return Err(Error::Remote("sharing upload time limit exceeded"));
         }
         let wanted = left.min(buffer.len() as u64) as usize;
-        input.read_exact(&mut buffer[..wanted])?;
+        let mut filled = 0;
+        while filled < wanted {
+            check()?;
+            if Instant::now() >= deadline {
+                return Err(Error::Remote("sharing upload time limit exceeded"));
+            }
+            let count = input.read(&mut buffer[filled..wanted])?;
+            if count == 0 {
+                return Err(Error::Remote(
+                    "shared file ended before its authorized length",
+                ));
+            }
+            filled += count;
+        }
         let mut written = 0;
         while written < wanted {
             check()?;

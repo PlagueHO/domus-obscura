@@ -94,6 +94,7 @@ impl Store {
             kind,
             &binding,
             self.filesystem.as_deref(),
+            self.paired_media.as_deref(),
         )?;
         if !exists {
             transaction.execute(

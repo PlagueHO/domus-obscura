@@ -36,6 +36,11 @@ separation, approval, and recovery guarantees still apply. The
 [storage layout](docs/storage-layout.md) records the agreed model and the details
 that still need review.
 
+Planned Docker distribution uses one Linux image for separate API and optional worker
+containers on Windows Docker Desktop or Linux Docker Engine. Keep shared private
+state on local Linux volumes. Preserve loopback guards and checked native roots.
+Docker delivery and both host acceptance results are tracked separately in #66.
+
 With no host configuration, start the real application in `single_user` mode
 over direct loopback HTTP. Use the fixed `_anonymous` identity. Azure, DNS, TLS
 and Entra are not setup requirements. Keep provider and worker services disabled

@@ -151,7 +151,7 @@ pub fn publish_new_album(
             let mut preparation = store.prepare_publication_path(claim, target.id)?;
             let mut opened = None;
             for _ in 0..32 {
-                opened = PublicationDirectory::open(store, &target, &preparation)?;
+                opened = PublicationDirectory::open(store, claim, &target, &preparation)?;
                 if opened.is_some() {
                     break;
                 }
@@ -168,7 +168,7 @@ pub fn publish_new_album(
                 let heartbeat = Heartbeat::new();
                 check(store, claim, staging, &directory, &target)?;
                 directory.verify(&files, &|| {
-                    heartbeat.tick(|| check(store, claim, staging, &directory, &target))
+                    heartbeat.tick(|| check_local(store, claim, staging, &target))
                 })?;
                 check(store, claim, staging, &directory, &target)?;
                 if target.replacement.is_some() {
@@ -198,8 +198,7 @@ pub fn publish_new_album(
                 {
                     check(store, claim, staging, &directory, &target)?;
                     let heartbeat = Heartbeat::new();
-                    let tick =
-                        || heartbeat.tick(|| check(store, claim, staging, &directory, &target));
+                    let tick = || heartbeat.tick(|| check_local(store, claim, staging, &target));
                     let mut input = source.publication_input(item, &tick)?;
                     check(store, claim, staging, &directory, &target)?;
                     directory.copy(file, &mut input, &tick)?;
@@ -212,7 +211,7 @@ pub fn publish_new_album(
             let heartbeat = Heartbeat::new();
             check(store, claim, staging, &directory, &target)?;
             directory.verify(&files, &|| {
-                heartbeat.tick(|| check(store, claim, staging, &directory, &target))
+                heartbeat.tick(|| check_local(store, claim, staging, &target))
             })?;
             check(store, claim, staging, &directory, &target)?;
             #[cfg(test)]
@@ -220,7 +219,7 @@ pub fn publish_new_album(
             directory.publish(store, claim, &target)?;
             let heartbeat = Heartbeat::new();
             directory.verify(&files, &|| {
-                heartbeat.tick(|| check(store, claim, staging, &directory, &target))
+                heartbeat.tick(|| check_local(store, claim, staging, &target))
             })?;
             check(store, claim, staging, &directory, &target)?;
             store.record_publication_visible(claim, target.id)?;
@@ -246,14 +245,15 @@ pub fn publish_new_album(
         }
         let result: Result<()> = (|| {
             let preparation = store.publication_preparation(claim, target.id)?;
-            let directory = PublicationDirectory::open(store, &target, &preparation)?.ok_or(
-                Error::Conflict("published album folder is unavailable".into()),
-            )?;
+            let directory = PublicationDirectory::open(store, claim, &target, &preparation)?
+                .ok_or(Error::Conflict(
+                    "published album folder is unavailable".into(),
+                ))?;
             let files = store.publication_files(claim, target.id)?;
             let heartbeat = Heartbeat::new();
             check(store, claim, staging, &directory, &target)?;
             directory.verify(&files, &|| {
-                heartbeat.tick(|| check(store, claim, staging, &directory, &target))
+                heartbeat.tick(|| check_local(store, claim, staging, &target))
             })?;
             check(store, claim, staging, &directory, &target)?;
             Ok(())
@@ -284,14 +284,24 @@ fn check(
     directory: &PublicationDirectory,
     target: &PublicationDestination,
 ) -> std::io::Result<()> {
+    check_local(store, claim, staging, target)?;
+    directory
+        .check(store, target)
+        .map_err(std::io::Error::other)
+}
+
+fn check_local(
+    store: &Store,
+    claim: &JobClaim,
+    staging: &StagingRoot,
+    target: &PublicationDestination,
+) -> std::io::Result<()> {
     store
         .renew_claim(claim, 300)
         .map_err(std::io::Error::other)?;
     staging.check_store(store).map_err(std::io::Error::other)?;
     store
         .check_publication(claim, target.id)
-        .map_err(std::io::Error::other)?;
-    directory
-        .check(store, target)
+        .map(|_| ())
         .map_err(std::io::Error::other)
 }

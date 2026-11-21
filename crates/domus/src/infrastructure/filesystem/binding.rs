@@ -34,6 +34,10 @@ pub struct RetainedDirectory {
 }
 
 impl RetainedDirectory {
+    pub(crate) fn directory(&self) -> &LibraryDirectory {
+        &self.directory
+    }
+
     /// Read the opened object's metadata without resolving its former path.
     pub fn metadata(&self) -> Result<std::fs::Metadata> {
         Ok(self.directory.directory_file()?.metadata()?)
@@ -91,6 +95,13 @@ impl DirectoryExpectation {
                 "directory identity profile is unsupported on this host".into(),
             ));
         }
+        self.validate_record(relative)
+    }
+
+    /// Check a saved record's shape without admitting its codec for local I/O.
+    /// Only an explicitly selected native media peer can interpret a foreign
+    /// record; `open` and local selection still require the current profile.
+    pub(crate) fn validate_record(&self, relative: &LibraryPath) -> Result<()> {
         let count = relative
             .as_str()
             .split('/')

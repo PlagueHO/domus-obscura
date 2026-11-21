@@ -1,6 +1,8 @@
 //! Explicit native folder binding. Saving configuration never calls these operations.
 use crate::domain::{LibraryPath, Page};
-use crate::infrastructure::filesystem::{DirectorySnapshot, LibraryDirectory};
+use crate::infrastructure::filesystem::{
+    LibraryDirectory, ReadDirectory, ReadSnapshot as DirectorySnapshot,
+};
 use crate::infrastructure::store::Store;
 use crate::{Error, Result};
 use rusqlite::{OptionalExtension, params};
@@ -35,7 +37,7 @@ pub(crate) fn selected_directory(
     store: &Store,
     location_id: i64,
     relative: &LibraryPath,
-) -> Result<LibraryDirectory> {
+) -> Result<ReadDirectory> {
     if relative.as_str().split('/').count() > 128 {
         return Err(Error::InvalidInput(
             "share folder exceeds the native traversal depth limit".into(),
@@ -56,22 +58,23 @@ pub(crate) fn selected_directory(
             "share folders require a main or backup library".into(),
         ));
     }
-    let root = store.open_registered_root(&location.root, "media")?;
-    let selected = root.open_directory(relative)?;
-    // The existing root registry rejects native overlap with every private root.
-    // Recheck the state directory too, including a moved/aliased database parent.
-    let state = LibraryDirectory::open(
-        store
-            .database_path()
-            .parent()
-            .ok_or(Error::Internal("database parent is missing"))?,
-    )?;
-    if selected.native_root().overlaps(state.native_root()) {
-        return Err(Error::InvalidInput(
-            "share folder overlaps application state".into(),
-        ));
+    let selected = store.read_registered_directory(&location.root, relative)?;
+    if let ReadDirectory::Native(selected) = &selected {
+        // The existing root registry rejects native overlap with every private root.
+        // Recheck the state directory too, including a moved/aliased database parent.
+        let state = LibraryDirectory::open(
+            store
+                .database_path()
+                .parent()
+                .ok_or(Error::Internal("database parent is missing"))?,
+        )?;
+        if selected.native_root().overlaps(state.native_root()) {
+            return Err(Error::InvalidInput(
+                "share folder overlaps application state".into(),
+            ));
+        }
+        store.check_private_ancestry(selected)?;
     }
-    store.check_private_ancestry(&selected)?;
     Ok(selected)
 }
 

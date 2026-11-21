@@ -9,11 +9,15 @@ use std::path::{Component, Path, PathBuf};
 
 mod binding;
 mod identity;
+pub mod media_adapter;
+mod read_only;
 mod selection;
 mod state;
 pub use binding::{DirectoryExpectation, DirectoryIdentityProfile, RetainedDirectory};
 pub(crate) use identity::NativeRoot;
 pub(crate) use identity::file_id as native_file_identity;
+pub use read_only::ReadFile;
+pub(crate) use read_only::{ReadDirectory, ReadSnapshot};
 pub(crate) use selection::DirectorySnapshot;
 #[cfg(test)]
 pub(crate) use selection::fixture_storage;
@@ -63,12 +67,32 @@ pub(crate) fn read_file_in(
     maximum: u64,
     sensitive: bool,
 ) -> Result<Vec<u8>> {
+    read_checked_file_in(directory, name, maximum, sensitive, require_local_file)
+}
+
+/// Installed browser bytes can use a read-only Linux image layer. This does
+/// not admit writable state, secrets or a selected storage root on overlayfs.
+pub(crate) fn read_browser_file_in(
+    directory: &LibraryDirectory,
+    name: &OsStr,
+    maximum: u64,
+) -> Result<Vec<u8>> {
+    read_checked_file_in(directory, name, maximum, false, require_browser_filesystem)
+}
+
+fn read_checked_file_in(
+    directory: &LibraryDirectory,
+    name: &OsStr,
+    maximum: u64,
+    sensitive: bool,
+    check_filesystem: fn(&std::fs::File) -> Result<()>,
+) -> Result<Vec<u8>> {
     let limit = maximum
         .checked_add(1)
         .ok_or_else(|| Error::InvalidInput("local file size limit is too large".into()))?;
-    directory.require_local()?;
+    check_filesystem(&directory.directory_file()?)?;
     let file = directory.open_file(name)?;
-    require_local_file(&file)?;
+    check_filesystem(&file)?;
     super::permissions::FilePermissions::current()?.check(&file, sensitive)?;
     let mut bytes = Vec::new();
     file.take(limit).read_to_end(&mut bytes)?;
@@ -78,6 +102,25 @@ pub(crate) fn read_file_in(
         ));
     }
     Ok(bytes)
+}
+
+fn require_browser_filesystem(file: &std::fs::File) -> Result<()> {
+    if filesystem_class(file)? == FilesystemClass::Local {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let filesystem = rustix::fs::fstatfs(file).map_err(std::io::Error::from)?;
+        let mount = rustix::fs::fstatvfs(file).map_err(std::io::Error::from)?;
+        if filesystem.f_type as u64 == 0x794c_7630
+            && mount.f_flag.contains(rustix::fs::StatVfsMountFlags::RDONLY)
+        {
+            return Ok(());
+        }
+    }
+    Err(Error::InvalidInput(
+        "installed browser assets require supported local storage or a read-only Linux overlay filesystem".into(),
+    ))
 }
 
 #[cfg(windows)]
@@ -287,6 +330,192 @@ impl std::ops::Deref for LibraryDirectory {
 }
 
 impl LibraryDirectory {
+    /// Retain the original Windows creation handle. On Unix, as with other
+    /// publication effects, external writers must respect the operation lock.
+    pub(crate) fn create_child_directory(&self, name: &str) -> Result<Self> {
+        let relative = LibraryPath::parse(name)?;
+        if relative.as_str().is_empty() || relative.as_str().contains('/') {
+            return Err(Error::InvalidInput(
+                "directory creation requires one component".into(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            self.directory.create_dir(name)?;
+            self.open_directory(&relative)
+        }
+        #[cfg(windows)]
+        {
+            let directory = Dir::from_std_file(native_file_delete::create_directory(
+                &self.directory_file()?,
+                OsStr::new(name),
+            )?);
+            self.retain_child_directory(name, directory)
+        }
+    }
+
+    #[cfg(windows)]
+    fn retain_child_directory(&self, name: &str, directory: Dir) -> Result<Self> {
+        Self::check_directory(&directory)?;
+        let mut parents = self
+            .parents
+            .iter()
+            .map(Dir::try_clone)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        parents.push(self.directory.try_clone()?);
+        let mut selection = self.selection.clone();
+        if let Some(selected) = &mut selection {
+            selected.descend(name, &directory.try_clone()?.into_std_file())?;
+        }
+        parents.push(directory);
+        let native = NativeRoot::read(&parents)?;
+        let directory = parents
+            .pop()
+            .ok_or(Error::Internal("retained child is missing"))?;
+        let mut names = self.names.clone();
+        names.push(name.into());
+        Ok(Self {
+            directory,
+            native,
+            parents,
+            names,
+            selection,
+        })
+    }
+
+    /// Windows retains the original no-follow DELETE-capable source. No checked
+    /// source pathname is reopened when the subsequent rename is performed.
+    pub(crate) fn open_child_for_move(&self, name: &str) -> Result<Self> {
+        let relative = LibraryPath::parse(name)?;
+        if relative.as_str().is_empty() || relative.as_str().contains('/') {
+            return Err(Error::InvalidInput(
+                "directory move requires one component".into(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            self.open_directory(&relative)
+        }
+        #[cfg(windows)]
+        {
+            self.retain_child_directory(
+                name,
+                Dir::from_std_file(native_file_delete::open_directory_for_move(
+                    &self.directory_file()?,
+                    OsStr::new(name),
+                )?),
+            )
+        }
+    }
+
+    /// The caller must own the operation lock, saved intent and exact source
+    /// approval. Unix requires cooperative writers, as other renameat effects do.
+    pub(crate) fn rename_retained_child(&self, source: &Self, name: &str) -> Result<()> {
+        let relative = LibraryPath::parse(name)?;
+        if relative.as_str().is_empty()
+            || relative.as_str().contains('/')
+            || NativeRoot::read(&source.parents)? != self.native
+        {
+            return Err(Error::Conflict(
+                "move source is not a direct retained child".into(),
+            ));
+        }
+        #[cfg(windows)]
+        {
+            drop(
+                native_file_delete::ValidatedHandle::directory(source.directory_file()?)?
+                    .rename_directory_noreplace(&self.directory_file()?, OsStr::new(name))?,
+            );
+            Ok(())
+        }
+        #[cfg(unix)]
+        {
+            let from = source
+                .names
+                .last()
+                .and_then(|name| name.to_str())
+                .ok_or(Error::Internal("move source name is missing"))?;
+            rename_no_replace(&self.directory, from, name)
+        }
+    }
+
+    /// Delete only this retained file. Unix still requires cooperative writers
+    /// between the parent-relative identity recheck and unlinkat.
+    pub(crate) fn remove_child_file(&self, name: &str, file: std::fs::File) -> Result<()> {
+        let relative = LibraryPath::parse(name)?;
+        if relative.as_str().is_empty() || relative.as_str().contains('/') {
+            return Err(Error::InvalidInput(
+                "file removal requires one component".into(),
+            ));
+        }
+        #[cfg(windows)]
+        native_file_delete::ValidatedHandle::file(file)?.delete()?;
+        #[cfg(unix)]
+        {
+            let current = self.open_file(OsStr::new(name))?;
+            if !current.metadata()?.is_file()
+                || binding::persistent_file_identity(&current)?
+                    != binding::persistent_file_identity(&file)?
+            {
+                return Err(Error::Conflict("removal source changed".into()));
+            }
+            rustix::fs::unlinkat(&self.directory, name, rustix::fs::AtFlags::empty())
+                .map_err(std::io::Error::from)?;
+            drop(file);
+        }
+        self.require_removed(name)
+    }
+
+    /// Remove an exact empty child, never a root or a recursive tree. The
+    /// original DELETE-capable Windows handle survives through the effect.
+    pub(crate) fn remove_child_directory(&self, source: Self) -> Result<()> {
+        if NativeRoot::read(&source.parents)? != self.native
+            || source.entries()?.next().transpose()?.is_some()
+        {
+            return Err(Error::Conflict(
+                "removal requires an exact empty retained child".into(),
+            ));
+        }
+        let name = source
+            .names
+            .last()
+            .and_then(|name| name.to_str())
+            .ok_or(Error::Internal("removal source name is missing"))?
+            .to_owned();
+        #[cfg(windows)]
+        {
+            let file = source.directory_file()?;
+            drop(source);
+            native_file_delete::ValidatedHandle::directory(file)?.delete()?;
+        }
+        #[cfg(unix)]
+        {
+            let current = self.open_directory(&LibraryPath::parse(&name)?)?;
+            if current.native != source.native {
+                return Err(Error::Conflict("removal directory changed".into()));
+            }
+            rustix::fs::unlinkat(
+                &self.directory,
+                name.as_str(),
+                rustix::fs::AtFlags::REMOVEDIR,
+            )
+            .map_err(std::io::Error::from)?;
+            drop(source);
+        }
+        self.require_removed(&name)
+    }
+
+    fn require_removed(&self, name: &str) -> Result<()> {
+        match self.directory.symlink_metadata(name) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+            Ok(_) => Err(Error::Conflict(
+                "removal is pending or the name is occupied; inspect saved intent before retry"
+                    .into(),
+            )),
+        }
+    }
+
     pub(crate) fn require_local(&self) -> Result<()> {
         require_local_file(&self.directory_file()?)
     }
@@ -343,6 +572,34 @@ impl LibraryDirectory {
             names: self.names.clone(),
             selection: self.selection.clone(),
         })
+    }
+
+    /// Check an ordinary directory's names against its retained ancestors.
+    /// Reviewed DELETE-capable move sources must not use this ordinary reopen.
+    pub(crate) fn check_named_directory(&self, checkpoint: &dyn Fn() -> Result<()>) -> Result<()> {
+        checkpoint()?;
+        if let Some(selection) = &self.selection {
+            selection.reopen()?;
+            checkpoint()?;
+        }
+        if self.names.len() != self.parents.len() {
+            return Err(Error::Internal("retained directory chain is incomplete"));
+        }
+        for ((parent, name), expected) in self.parents.iter().zip(&self.names).zip(
+            self.parents
+                .iter()
+                .skip(1)
+                .chain((!self.names.is_empty()).then_some(&self.directory)),
+        ) {
+            checkpoint()?;
+            let current = Self::open_child(parent, Path::new(name))?;
+            if native_file_identity(&current.into_std_file())?
+                != native_file_identity(&expected.try_clone()?.into_std_file())?
+            {
+                return Err(Error::Conflict("retained directory name changed".into()));
+            }
+        }
+        checkpoint()
     }
 
     /// Keep the complete retained chain when existing capability-based

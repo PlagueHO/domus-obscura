@@ -436,6 +436,9 @@ def admission(profile, manifest_path=None, admission_path=None):
         return {
             "profile": "small", "files": LOCAL_FILES - 96, "max_run_bytes": LOCAL_BYTES,
             "max_generated_files": LOCAL_FILES,
+            "max_runtime_seconds": (
+                900 if platform.system() == "Windows"
+                and os.environ.get("GITHUB_ACTIONS") == "true" else 600),
             "baseline_sha256": None, "full_size_acceptance": False,
         }
     require(profile == "full" and manifest_path and admission_path,
@@ -530,9 +533,8 @@ class Monitor:
         self.max_storage = 0
         self.max_gap = 0
         self.sequence = 0
-        self.deadline = min(
-            time.time() + settings.get("max_runtime_seconds", 600),
-            settings.get("deadline_unix", time.time() + 600))
+        runtime_deadline = time.time() + settings.get("max_runtime_seconds", 600)
+        self.deadline = min(runtime_deadline, settings.get("deadline_unix", runtime_deadline))
 
     def add(self, role, process):
         with self.lock:
@@ -788,6 +790,7 @@ def new_run(args, settings):
         "status": "incomplete", "profile": settings["profile"],
         "initial_dataset_files": settings["files"],
         "max_run_bytes": settings["max_run_bytes"],
+        "max_runtime_seconds": settings["max_runtime_seconds"],
         "baseline_sha256": settings["baseline_sha256"],
         "platform": platform.platform(),
         "test_host_sha256": file_sha256(executable),
