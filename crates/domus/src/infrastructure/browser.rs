@@ -91,6 +91,38 @@ impl BrowserAssets {
 mod tests {
     use super::*;
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn browser_assets_reject_untrusted_writes_on_the_opened_file() -> Result<()> {
+        use std::io::Write;
+        let root = super::super::permissions::private_test_directory()?;
+        let assets = root.path().join("assets");
+        std::fs::create_dir(&assets)?;
+        std::fs::write(root.path().join("index.html"), b"generated browser")?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.access_mode(0xc004_0000);
+        }
+        let mut file = options.open(assets.join("app.js"))?;
+        file.write_all(b"generated asset")?;
+        BrowserAssets::load(root.path())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o666))?;
+        }
+        #[cfg(windows)]
+        native_file_security::set_dacl(&file, "D:P(A;;FA;;;WD)")?;
+        assert!(matches!(
+            BrowserAssets::load(root.path()),
+            Err(Error::InvalidInput(_))
+        ));
+        Ok(())
+    }
+
     #[test]
     fn selected_browser_assets_refuse_a_media_child_before_reading_it() -> Result<()> {
         let fixture = super::super::permissions::private_test_directory()?;

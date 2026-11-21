@@ -175,9 +175,12 @@ impl Fixture {
                 eprintln!("generated browser fixture configuration admission failed: {error}");
             })?;
         #[cfg(not(test))]
-        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../frontend/dist-app")
-            .canonicalize()?;
+        let assets = match std::env::var_os("DOMUS_BROWSER_WORKFLOW_ASSETS") {
+            Some(path) => PathBuf::from(path),
+            None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../frontend/dist-app")
+                .canonicalize()?,
+        };
         #[cfg(test)]
         let assets = {
             let path = root.path().join("assets-fixture");
