@@ -86,20 +86,6 @@ jobs:
         run: |
           docker load --input target\domus-container.tar
           if ($LASTEXITCODE -ne 0) { throw 'Candidate load failed.' }
-      - name: Check generated writable Windows media
-        shell: pwsh
-        run: |
-          $env:DOMUS_MEDIA_WORKFLOW_IMAGE = 'domus-obscura:local'
-          $env:DOMUS_MEDIA_WORKFLOW_BINARY = (Resolve-Path target\media-workflow\media-workflow).Path
-          .\dev.ps1 -TaskArgs @('test', '--lib', 'media_adapter_production_docker_workflow', '--', '--ignored', '--nocapture')
-          if ($LASTEXITCODE -ne 0) { throw 'Generated writable Windows media checks failed.' }
-      - name: Retain generated writable Windows media evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: docker-windows-media-${{ github.sha }}
-          path: target/media-adapter-docker-workflow.json
-          if-no-files-found: warn
       - name: Check Windows host access with fresh private volumes
         shell: pwsh
         run: |
@@ -120,23 +106,21 @@ jobs:
           $env:DOMUS_ADAPTER_TEST_PACKAGE = (Resolve-Path target\windows-package).Path
           uv run --no-project --python 3.14 packaging\docker\check.py self-test
           if ($LASTEXITCODE -ne 0) { throw 'Native adapter fixture checks failed.' }
-      - name: Check packaged API and worker with native Windows media
+      - name: Check complete adapter-aware Windows host acceptance
         shell: pwsh
         run: |
-          uv run --no-project --python 3.14 packaging\docker\check.py check --windows-adapter-package target\windows-package --report target\docker-windows-adapter.json
-          if ($LASTEXITCODE -ne 0) { throw 'Windows adapter host diagnostics failed.' }
-      - name: Retain Windows adapter host diagnostics
+          uv run --no-project --python 3.14 packaging\docker\check.py check --windows-adapter-package target\windows-package --windows-adapter-host --media-workflow-binary target\media-workflow\media-workflow --report target\docker-windows.json
+          if ($LASTEXITCODE -ne 0) { throw 'Windows adapter host acceptance failed.' }
+      - name: Retain generated writable Windows media evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: docker-windows-adapter-${{ github.sha }}
-          path: target/docker-windows-adapter.json
+          name: docker-windows-media-${{ github.sha }}
+          path: target/media-adapter-docker-workflow-*.json
           if-no-files-found: warn
-      - name: Check complete host acceptance
+      - name: Check the exact same candidate on both hosts
         shell: pwsh
         run: |
-          uv run --no-project --python 3.14 packaging\docker\check.py check --report target\docker-windows.json
-          if ($LASTEXITCODE -ne 0) { throw 'Windows Docker host checks failed.' }
           uv run --no-project --python 3.14 packaging\docker\check.py validate-evidence --linux-report target\docker-linux.json --windows-report target\docker-windows.json
           if ($LASTEXITCODE -ne 0) { throw 'Candidate evidence differs between hosts.' }
       - name: Retain Windows host evidence

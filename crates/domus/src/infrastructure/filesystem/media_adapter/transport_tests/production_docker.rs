@@ -8,6 +8,19 @@ use std::time::{Duration, Instant};
 #[tokio::test]
 #[ignore = "requires the source-matched runtime image and exported Linux test helper"]
 async fn media_adapter_production_docker_workflow() -> TestResult {
+    let run = match std::env::var("DOMUS_MEDIA_WORKFLOW_RUN") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err("the generated workflow report nonce encoding is invalid".into()),
+    };
+    if run.as_ref().is_some_and(|value| {
+        value.len() != 32
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) {
+        return Err("the generated workflow report nonce is invalid".into());
+    }
     let image = std::env::var("DOMUS_MEDIA_WORKFLOW_IMAGE")?;
     let helper =
         PathBuf::from(std::env::var_os("DOMUS_MEDIA_WORKFLOW_BINARY").ok_or(
@@ -98,21 +111,32 @@ async fn media_adapter_production_docker_workflow() -> TestResult {
         verification?;
         cases.push(if restore_old { "restored" } else { "published" });
     }
+    let filename = run.as_ref().map_or_else(
+        || "media-adapter-docker-workflow.json".to_owned(),
+        |value| format!("media-adapter-docker-workflow-{value}.json"),
+    );
     let report = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
         .ok_or("missing workspace")?
         .join("target")
-        .join("media-adapter-docker-workflow.json");
-    std::fs::write(
-        report,
-        serde_json::to_vec_pretty(&json!({
-            "scope": "windows-docker-desktop-generated-media-workflow",
-            "revision": revision, "image_id": image_id, "cases": cases,
-            "result": "passed", "native_windows_bytes": true,
-            "native_windows_retained_absence": true,
-        }))?,
-    )?;
+        .join(filename);
+    let content = serde_json::to_vec_pretty(&json!({
+        "scope": "windows-docker-desktop-generated-media-workflow",
+        "revision": revision, "image_id": image_id, "cases": cases,
+        "run_nonce": run,
+        "result": "passed", "native_windows_bytes": true,
+        "native_windows_retained_absence": true,
+    }))?;
+    if run.is_some() {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(report)?
+            .write_all(&content)?;
+    } else {
+        std::fs::write(report, content)?;
+    }
     Ok(())
 }
 

@@ -147,13 +147,14 @@ installed-service evidence, power-loss proof, or complete release acceptance.
 
 Linux CI exports the helper and its revision beside the exact tested image.
 The approved Windows job downloads both artifacts from the same workflow run.
-It runs the writable coordinator before the separate complete host checks.
+The complete Windows host check runs the writable coordinator itself after the
+packaged API/worker and native read-only media checks.
 The runner must already have the pinned development tools, `uv`, Python 3.14,
 and native MSVC/JPEG build requirements. The workflow does not change Docker settings or install a
 native adapter service. The coordinator still requires exact clean checkout,
 helper and image revision equality, including a PR merge revision.
-Writable media evidence is retained separately. It cannot satisfy the existing
-complete host or release evidence gate by itself.
+Writable media evidence is retained separately and bound into the complete host
+report by a fresh run nonce. It cannot satisfy release evidence by itself.
 
 The Windows job also checks real Windows HTTP access to the packaged API and
 browser with fresh private Linux volumes. This separate diagnostic uses
@@ -195,6 +196,33 @@ validation. Checking an empty write-grant declaration is not a denied-write
 operation proof. The diagnostic makes authenticated creation requests on the
 read-only fixture and checks both refusal and native absence. Generated
 writable/recovery evidence remains separate.
+
+### Complete adapter-aware Windows acceptance
+
+The complete check executes the native-adapter API/worker diagnostic and the
+source-matched writable coordinator. It does not concatenate old reports.
+Both execute the same inspected immutable image ID. The coordinator must return
+a new nonce-bound report with both published and restored cases and independently
+verified native bytes and retained-folder absence. An existing report, another
+image/revision, missing case, failed cleanup or partial result fails acceptance.
+Cleanup failures and interruptions leave a failed complete-host report.
+
+```powershell
+uv run --no-project --python 3.14 packaging\docker\check.py check --windows-adapter-package target\windows-package --windows-adapter-host --media-workflow-binary target\media-workflow\media-workflow --report target\docker-windows.json
+uv run --no-project --python 3.14 packaging\docker\check.py validate-evidence --linux-report target\docker-linux.json --windows-report target\docker-windows.json
+```
+
+Only this successful execution produces native-adapter `host` scope. Validation
+requires all shared lifecycle/guard checks, native missing/replacement and
+offline-observation checks, actual read-only creation refusal, the exact native
+package hash and the matching writable evidence. Cross-host image configuration
+digest and source revision equality remain required.
+
+The Windows CI job now uses this approved native-adapter path instead of the
+unsupported direct 9p bind path. Partial diagnostic scopes still fail release
+validation. This implements the acceptance procedure; it is not evidence that
+the current candidate has passed on an approved Windows Docker host. Installed
+services, reboot and power-loss proof remain outside these generated checks.
 
 The adapter verifies complete selected native chains and retains the opened
 directories and files. Only the Windows/native host maps root IDs to paths.
@@ -252,11 +280,12 @@ Certificate verification and exact peer pinning remain enabled.
 Generated containers, fixtures and the API check's private volume were removed.
 
 These fixtures need no service installation, live provider, or existing library.
-The remaining production media consumers, approved mutation/recovery operations,
-and whole-image supported-host checks remain required. The successful channel
-diagnostic does not place the adapter in the cached Linux image or route
-production operations through it. SQLite and other private application storage
-retain their existing local-only rules.
+Production media consumers and mutation/recovery services now use common
+native/paired I/O. Whole-image supported-host checks remain required.
+Earlier channel-only evidence does not prove that a later runtime candidate
+contains and uses the production client. The adapter itself runs on the native
+Windows host, not inside the Linux image. SQLite and other private application
+storage retain their existing local-only rules.
 
 ### Configure the native foreground adapter
 
@@ -362,8 +391,8 @@ These checks do not establish whole-image or external-folder lifecycle acceptanc
 
 The user approved implementation of explicit per-root write permissions.
 This does not approve their activation on existing libraries or any host change.
-Publication, replacement, backup, restore and recovery deletion are still not
-routed through the adapter.
+Publication, replacement, backup, restore and recovery deletion use the common
+native/paired I/O boundary. Grants do not replace the required work approvals.
 
 Both selection declarations can include `writable_roots`, a list of exact
 selected media root IDs. Omission or an empty list keeps all roots read-only.

@@ -131,7 +131,10 @@ impl Fixture {
             std::fs::create_dir(&path)?;
             private::directory(&path).map_err(|error| Error::InvalidInput(error.to_string()))?;
         }
-        let mut store = Store::open(&root.path().join("state").join("state.db"))?;
+        let mut store =
+            Store::open(&root.path().join("state").join("state.db")).inspect_err(|error| {
+                eprintln!("generated browser fixture database admission failed: {error}");
+            })?;
         let main = add_location(&store, &root.path().join("main"), "main")?;
         let backup = add_location(&store, &root.path().join("backup"), "backup")?;
         scan_location(&mut store, main)?;
@@ -147,12 +150,18 @@ impl Fixture {
                 rusqlite::params![query.source(),body,Sha256::digest(&body).to_vec()],
             )?;
         }
-        let staging = StagingRoot::open(&mut store, &root.path().join("staging"))?;
+        let staging =
+            StagingRoot::open(&mut store, &root.path().join("staging")).inspect_err(|error| {
+                eprintln!("generated browser fixture staging admission failed: {error}");
+            })?;
         let configuration_path = root.path().join("state").join("backend.json");
         let storage = domus::infrastructure::filesystem::StorageConfiguration::inspect_initial(
             &root.path().join("state"),
             &domus::domain::LibraryPath::parse("")?,
-        )?;
+        )
+        .inspect_err(|error| {
+            eprintln!("generated browser fixture storage inspection failed: {error}");
+        })?;
         std::fs::write(
             &configuration_path,
             serde_json::to_vec(&json!({
@@ -161,7 +170,10 @@ impl Fixture {
                 "storage":storage
             }))?,
         )?;
-        let configuration = ConfigurationService::open(&configuration_path)?;
+        let configuration =
+            ConfigurationService::open(&configuration_path).inspect_err(|error| {
+                eprintln!("generated browser fixture configuration admission failed: {error}");
+            })?;
         #[cfg(not(test))]
         let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../frontend/dist-app")
@@ -178,7 +190,9 @@ impl Fixture {
             store,
             configuration,
             staging,
-            assets: BrowserAssets::load(&assets)?,
+            assets: BrowserAssets::load(&assets).inspect_err(|error| {
+                eprintln!("generated browser fixture asset admission failed: {error}");
+            })?,
             source: match format {
                 AudioFormat::Mp3 => {
                     media::mp3().map_err(|error| Error::InvalidInput(error.to_string()))?

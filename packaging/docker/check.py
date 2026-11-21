@@ -151,6 +151,25 @@ def build(image):
             docker("image", "rm", verification)
 
 
+def validate_writable_workflow(workflow, image_id, revision, run):
+    if (
+        not isinstance(workflow, dict)
+        or not isinstance(image_id, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+        or workflow.get("scope") != "windows-docker-desktop-generated-media-workflow"
+        or workflow.get("result") != "passed"
+        or workflow.get("revision") != revision
+        or workflow.get("image_id") != image_id
+        or workflow.get("run_nonce") != run
+        or not isinstance(run, str)
+        or not re.fullmatch(r"[0-9a-f]{32}", run)
+        or workflow.get("cases") != ["published", "restored"]
+        or workflow.get("native_windows_bytes") is not True
+        or workflow.get("native_windows_retained_absence") is not True
+    ):
+        raise ValueError("fresh source-matched published/restored Windows workflow evidence is required")
+
+
 def validate_evidence(linux, windows):
     for report, host in ((linux, "Linux"), (windows, "Windows")):
         if not isinstance(report, dict) or not isinstance(report.get("checks"), list):
@@ -179,7 +198,22 @@ def validate_evidence(linux, windows):
         or linux["revision"] != windows.get("revision")
     ):
         raise ValueError("both hosts must check the exact same image and source revision")
-    if "windows-bind-mount" not in windows["checks"]:
+    if windows.get("media_transport") == "windows-native-adapter":
+        if (
+            not {
+                "windows-native-adapter", "no-windows-media-mount", "writable-media-workflow",
+                "adapter-offline-retains-observations", "adapter-native-replacement",
+            }.issubset(windows["checks"])
+            or "windows-bind-mount" in windows["checks"]
+            or not isinstance(windows.get("adapter_binary_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", windows["adapter_binary_sha256"])
+        ):
+            raise ValueError("complete native-adapter Windows host evidence is required")
+        validate_writable_workflow(
+            windows.get("writable_workflow"), windows.get("image_id"), windows["revision"],
+            windows.get("writable_run"),
+        )
+    elif windows.get("media_transport") is not None or "windows-bind-mount" not in windows["checks"]:
         raise ValueError("Windows bind-mount safety evidence is required")
 
 
@@ -504,12 +538,19 @@ class Check:
             self.media, self.media_volume = original_media, original_volume
 
     def check_unavailable_media(self, location):
+        browse = ["browse", "--host", CONFIGURATION, location, "Artist/Album", "0", "100"]
+        before = json.loads(self.once(browse).stdout)
         changed = self.once(["scan", "--host", CONFIGURATION, location], check=False)
         if not changed.returncode:
             raise RuntimeError("a replacement or unavailable media root was accepted")
-        retained = json.loads(self.once(["browse", "--host", CONFIGURATION, location, "Artist/Album", "0", "100"]).stdout)
-        if {entry["relative_path"] for entry in retained} != {"Artist/Album/01.mp3", "Artist/Album/02.mp3"}:
-            raise RuntimeError("failed media access erased retained observations")
+        retained = json.loads(self.once(browse).stdout)
+        if (
+            {entry["relative_path"] for entry in before} != {"Artist/Album/01.mp3", "Artist/Album/02.mp3"}
+            or not all(entry["present"] for entry in before)
+            or sorted(retained, key=lambda entry: entry["relative_path"])
+            != sorted(before, key=lambda entry: entry["relative_path"])
+        ):
+            raise RuntimeError("failed media access changed retained observations")
 
     def check_root_overlap(self, configuration):
         bad = json.loads(json.dumps(configuration))
@@ -1013,6 +1054,35 @@ class WindowsAdapterCheck(Check):
             self.media.rmdir()
             retained.rename(self.media)
 
+    def check_writable_workflow(self, helper):
+        self.report["result"] = "failed"
+        self.report["phase"] = "generated-writable-workflow"
+        run = uuid.uuid4().hex
+        report = ROOT / "target" / f"media-adapter-docker-workflow-{run}.json"
+        if report.exists():
+            raise RuntimeError("the generated writable report path is not fresh")
+        command([
+            "pwsh", "-NoProfile", "-Command",
+            "$ErrorActionPreference = 'Stop'; "
+            ".\\dev.ps1 -TaskArgs @('test', '--lib', "
+            "'media_adapter_production_docker_workflow', '--', '--ignored', '--nocapture'); "
+            "if ($LASTEXITCODE -ne 0) { throw 'Generated writable workflow failed.' }",
+        ], env={
+            **os.environ, "DOMUS_MEDIA_WORKFLOW_IMAGE": self.image,
+            "DOMUS_MEDIA_WORKFLOW_BINARY": str(helper.resolve()),
+            "DOMUS_MEDIA_WORKFLOW_RUN": run,
+        }, timeout=900)
+        if report.stat().st_size > 4096:
+            raise ValueError("generated writable workflow report exceeds 4 KiB")
+        workflow = json.loads(report.read_text(encoding="utf-8"))
+        validate_writable_workflow(workflow, self.image, self.report["revision"], run)
+        self.report.update({
+            "scope": "host", "media_transport": "windows-native-adapter",
+            "writable_run": run, "writable_workflow": workflow,
+            "result": "passed", "phase": "complete",
+        })
+        self.report["checks"] += ["windows-native-adapter", "writable-media-workflow"]
+
     def cleanup(self):
         try:
             super().cleanup()
@@ -1071,6 +1141,42 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_evidence({**linux, "host_runtime": "wsl"}, windows)
 
+    def test_adapter_host_requires_complete_same_run_writable_evidence(self):
+        linux, windows = self.reports()
+        run = "d" * 32
+        workflow = {
+            "scope": "windows-docker-desktop-generated-media-workflow", "result": "passed",
+            "image_id": windows["image_id"], "revision": windows["revision"],
+            "run_nonce": run, "cases": ["published", "restored"],
+            "native_windows_bytes": True, "native_windows_retained_absence": True,
+        }
+        windows = {
+            **windows, "media_transport": "windows-native-adapter",
+            "adapter_binary_sha256": "f" * 64, "writable_run": run, "writable_workflow": workflow,
+            "checks": sorted(REQUIRED_CHECKS | {
+                "windows-native-adapter", "no-windows-media-mount", "writable-media-workflow",
+                "adapter-offline-retains-observations", "adapter-native-replacement",
+            }),
+        }
+        validate_evidence(linux, windows)
+        for change in (
+            {"scope": "windows-adapter-host-diagnostic"}, {"writable_run": "c" * 32},
+            {"writable_workflow": None}, {"adapter_binary_sha256": None},
+            {"checks": sorted(REQUIRED_CHECKS)},
+            {"checks": [*windows["checks"], "windows-bind-mount"]},
+            {"image_id": None, "writable_workflow": {**workflow, "image_id": None}},
+        ):
+            with self.assertRaises(ValueError):
+                validate_evidence(linux, {**windows, **change})
+        for change in (
+            {"result": "failed"}, {"image_id": "sha256:" + "c" * 64},
+            {"revision": "c" * 40}, {"run_nonce": "c" * 32},
+            {"cases": ["published"]}, {"native_windows_bytes": False},
+            {"native_windows_retained_absence": False},
+        ):
+            with self.assertRaises(ValueError):
+                validate_evidence(linux, {**windows, "writable_workflow": {**workflow, **change}})
+
     def test_private_volume_host_diagnostic_rejects_engine_mode_and_non_windows(self):
         for host, extra in (("Windows", ["--engine-only"]), ("Linux", [])):
             with (
@@ -1082,6 +1188,67 @@ class EvidenceTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     main()
                 execute.assert_not_called()
+
+    def test_complete_adapter_host_requires_its_package_and_workflow_helper(self):
+        for extra in (
+            ["--windows-adapter-host"],
+            ["--windows-adapter-host", "--windows-adapter-package", "unused"],
+            ["--windows-adapter-host", "--media-workflow-binary", "unused"],
+            ["--media-workflow-binary", "unused"],
+        ):
+            with (
+                patch.object(sys, "argv", ["check.py", "check", *extra]),
+                patch("sys.stderr", new=io.StringIO()),
+                patch(__name__ + ".docker") as execute,
+            ):
+                with self.assertRaises(SystemExit):
+                    main()
+                execute.assert_not_called()
+
+    def test_failed_writable_workflow_never_promotes_diagnostic_evidence(self):
+        check = WindowsAdapterCheck("unused", Path("unused"))
+        check.report["result"] = "passed"
+        with patch(__name__ + ".command", side_effect=RuntimeError("generated workflow failed")):
+            with self.assertRaises(RuntimeError):
+                check.check_writable_workflow(Path("unused"))
+        self.assertEqual(check.report["result"], "failed")
+        self.assertEqual(check.report["scope"], "windows-adapter-host-diagnostic")
+
+    def test_fixture_cleanup_failure_invalidates_saved_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with (
+                patch.object(sys, "argv", ["check.py", "check", "--engine-only", "--report", str(report)]),
+                patch(__name__ + ".tempfile.TemporaryDirectory") as fixture,
+                patch.object(Check, "run", autospec=True,
+                             side_effect=lambda check, _: check.report.update({"result": "passed"})),
+                patch.object(Check, "cleanup"),
+            ):
+                fixture.return_value.name = directory
+                fixture.return_value.cleanup.side_effect = PermissionError("owned fixture is still open")
+                with self.assertRaises(PermissionError):
+                    main()
+            saved = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(saved["result"], "failed")
+            self.assertIn("owned fixture is still open", saved["fixture_cleanup_error"])
+
+    def test_interruption_invalidates_saved_report(self):
+        def interrupt(check, _):
+            check.report["result"] = "passed"
+            raise KeyboardInterrupt()
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with (
+                patch.object(sys, "argv", ["check.py", "check", "--engine-only", "--report", str(report)]),
+                patch.object(Check, "run", autospec=True, side_effect=interrupt),
+                patch.object(Check, "cleanup"),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    main()
+            saved = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(saved["result"], "failed")
+            self.assertEqual(saved["error"], "KeyboardInterrupt")
 
     def test_adapter_host_diagnostic_rejects_other_host_or_media_modes(self):
         for host, extra in (
@@ -1123,6 +1290,27 @@ class EvidenceTests(unittest.TestCase):
         arguments = check.arguments()
         self.assertFalse(any("generated-media" in value or "target=/media" in value for value in arguments))
         self.assertIn("type=volume,source=generated-private-volume,target=/storage", arguments)
+
+    def test_unavailable_media_preserves_presence_and_scan_observations(self):
+        entries = [
+            {"relative_path": f"Artist/Album/0{index}.mp3", "present": True, "scan_id": 1}
+            for index in (1, 2)
+        ]
+        for retained in (
+            entries, [{**entry, "present": False} for entry in entries],
+            [{**entry, "scan_id": 2} for entry in entries],
+        ):
+            check = Check("unused", True)
+            with patch.object(check, "once", side_effect=[
+                subprocess.CompletedProcess([], 0, json.dumps(entries)),
+                subprocess.CompletedProcess([], 1, ""),
+                subprocess.CompletedProcess([], 0, json.dumps(retained)),
+            ]):
+                if retained == entries:
+                    check.check_unavailable_media("1")
+                else:
+                    with self.assertRaises(RuntimeError):
+                        check.check_unavailable_media("1")
 
     @unittest.skipUnless(
         platform.system() == "Windows" and os.environ.get("DOMUS_ADAPTER_TEST_PACKAGE"),
@@ -1219,10 +1407,16 @@ def main():
     parser.add_argument("--volume-media", action="store_true")
     parser.add_argument("--windows-private-volume-host", action="store_true")
     parser.add_argument("--windows-adapter-package", type=Path)
+    parser.add_argument("--windows-adapter-host", action="store_true")
+    parser.add_argument("--media-workflow-binary", type=Path)
     parser.add_argument("--linux-report", type=Path)
     parser.add_argument("--windows-report", type=Path)
     parser.add_argument("--report", type=Path, default=ROOT / "target" / "docker-check.json")
     args = parser.parse_args()
+    if args.windows_adapter_host != bool(args.media_workflow_binary) or (
+        args.windows_adapter_host and not args.windows_adapter_package
+    ):
+        parser.error("complete adapter host checks require both native package and Linux workflow helper")
     if args.windows_adapter_package and (
         args.operation != "check" or args.engine_only or args.volume_media
         or args.windows_private_volume_host or platform.system() != "Windows"
@@ -1251,15 +1445,34 @@ def main():
             args.image, args.engine_only,
             args.volume_media or args.windows_private_volume_host,
         )
-        with tempfile.TemporaryDirectory(prefix="docker-check-", dir=ROOT / "target") as directory:
+        args.report.write_text(json.dumps(check.report, indent=2) + "\n", encoding="utf-8")
+        directory = None
+        try:
+            directory = tempfile.TemporaryDirectory(prefix="docker-check-", dir=ROOT / "target")
+            check.run(Path(directory.name))
+            if args.windows_adapter_host:
+                check.check_writable_workflow(args.media_workflow_binary)
+        except (Exception, KeyboardInterrupt) as error:
+            check.report["result"] = "failed"
+            check.report["error"] = str(error) or type(error).__name__
+            raise
+        finally:
+            finished = check.report["result"] == "passed"
+            check.report["result"] = "failed"
+            managed_cleanup = False
             try:
-                check.run(Path(directory))
-            except Exception as error:
-                check.report["error"] = str(error)
-                raise
+                check.cleanup()
+                managed_cleanup = True
             finally:
                 try:
-                    check.cleanup()
+                    if directory is not None:
+                        directory.cleanup()
+                    if finished and managed_cleanup:
+                        check.report["result"] = "passed"
+                except OSError as error:
+                    check.report["result"] = "failed"
+                    check.report["fixture_cleanup_error"] = str(error)
+                    raise
                 finally:
                     args.report.write_text(json.dumps(check.report, indent=2) + "\n", encoding="utf-8")
 
