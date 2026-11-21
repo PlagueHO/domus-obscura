@@ -148,12 +148,20 @@ installed-service evidence, power-loss proof, or complete release acceptance.
 Linux CI exports the helper and its revision beside the exact tested image.
 The approved Windows job downloads both artifacts from the same workflow run.
 It runs the writable coordinator before the separate complete host checks.
-The runner must already have the pinned development tools and native MSVC/JPEG
-build requirements. The workflow does not change Docker settings or install a
+The runner must already have the pinned development tools, `uv`, Python 3.14,
+and native MSVC/JPEG build requirements. The workflow does not change Docker settings or install a
 native adapter service. The coordinator still requires exact clean checkout,
 helper and image revision equality, including a PR merge revision.
 Writable media evidence is retained separately. It cannot satisfy the existing
 complete host or release evidence gate by itself.
+
+The Windows job also checks real Windows HTTP access to the packaged API and
+browser with fresh private Linux volumes. This separate diagnostic uses
+`check --windows-private-volume-host` and records scope `private-volume-host`.
+It covers API/worker lifecycle and private-volume guards, not external Windows
+media. The release validator rejects this scope. Do not relabel it as complete
+Windows host acceptance or combine it with media reports without a checked,
+adapter-aware acceptance procedure.
 
 The adapter verifies complete selected native chains and retains the opened
 directories and files. Only the Windows/native host maps root IDs to paths.

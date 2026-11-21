@@ -195,7 +195,10 @@ class Check:
         self.mounts = []
         self.report = {
             "format": 1, "result": "failed",
-            "host": platform.system(), "scope": "engine-only" if engine_only else "host",
+            "host": platform.system(),
+            "scope": (
+                "engine-only" if engine_only else "private-volume-host" if volume_media else "host"
+            ),
             "host_runtime": (
                 "wsl" if "microsoft" in platform.release().lower()
                 else "native-linux" if platform.system() == "Linux"
@@ -708,7 +711,7 @@ class EvidenceTests(unittest.TestCase):
         )
 
     def test_release_rejects_partial_or_engine_only_results(self):
-        for change in ({"scope": "engine-only"}, {"result": "failed"}, {"source_dirty": True}, {"checks": []}, {"checks": None}, {"image_architecture": "arm64"}, {"checks": sorted(REQUIRED_CHECKS - {"missing-source"})}):
+        for change in ({"scope": "engine-only"}, {"scope": "private-volume-host"}, {"result": "failed"}, {"source_dirty": True}, {"checks": []}, {"checks": None}, {"image_architecture": "arm64"}, {"checks": sorted(REQUIRED_CHECKS - {"missing-source"})}):
             linux, windows = self.reports()
             with self.assertRaises(ValueError):
                 validate_evidence(linux, {**windows, **change})
@@ -738,6 +741,18 @@ class EvidenceTests(unittest.TestCase):
         linux, windows = self.reports()
         with self.assertRaises(ValueError):
             validate_evidence({**linux, "host_runtime": "wsl"}, windows)
+
+    def test_private_volume_host_diagnostic_rejects_engine_mode_and_non_windows(self):
+        for host, extra in (("Windows", ["--engine-only"]), ("Linux", [])):
+            with (
+                patch.object(sys, "argv", ["check.py", "check", "--windows-private-volume-host", *extra]),
+                patch.object(platform, "system", return_value=host),
+                patch("sys.stderr", new=io.StringIO()),
+                patch(__name__ + ".docker") as execute,
+            ):
+                with self.assertRaises(SystemExit):
+                    main()
+                execute.assert_not_called()
 
     def test_scan_wait_uses_the_new_request_not_the_returned_location_id(self):
         check = Check("unused", True)
@@ -797,12 +812,18 @@ def main():
     parser.add_argument("--image", default="domus-obscura:local")
     parser.add_argument("--engine-only", action="store_true")
     parser.add_argument("--volume-media", action="store_true")
+    parser.add_argument("--windows-private-volume-host", action="store_true")
     parser.add_argument("--linux-report", type=Path)
     parser.add_argument("--windows-report", type=Path)
     parser.add_argument("--report", type=Path, default=ROOT / "target" / "docker-check.json")
     args = parser.parse_args()
     if args.volume_media and (args.operation != "check" or not args.engine_only):
         parser.error("Linux-private media diagnostics require check --engine-only")
+    if args.windows_private_volume_host and (
+        args.operation != "check" or args.engine_only or args.volume_media
+        or platform.system() != "Windows"
+    ):
+        parser.error("Windows private-volume host diagnostics require native Windows check mode")
     if args.operation == "build":
         build(args.image)
     elif args.operation == "self-test":
@@ -815,7 +836,10 @@ def main():
         validate_evidence(json.loads(args.linux_report.read_text()), json.loads(args.windows_report.read_text()))
     else:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        check = Check(args.image, args.engine_only, args.volume_media)
+        check = Check(
+            args.image, args.engine_only,
+            args.volume_media or args.windows_private_volume_host,
+        )
         with tempfile.TemporaryDirectory(prefix="docker-check-", dir=ROOT / "target") as directory:
             try:
                 check.run(Path(directory))
