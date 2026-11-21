@@ -203,6 +203,7 @@ def validate_evidence(linux, windows):
             not {
                 "windows-native-adapter", "no-windows-media-mount", "writable-media-workflow",
                 "adapter-offline-retains-observations", "adapter-native-replacement",
+                "paired-unsafe-enumeration",
             }.issubset(windows["checks"])
             or "windows-bind-mount" in windows["checks"]
             or not isinstance(windows.get("adapter_binary_sha256"), str)
@@ -427,6 +428,25 @@ class Check:
             raise RuntimeError("scan did not create exactly one durable worker request")
         return created[0]["id"]
 
+    def create_unsafe_link(self, temporary):
+        link = self.media / "escape-link"
+        outside = temporary / "outside"
+        if os.name == "nt":
+            command([
+                "pwsh", "-NoProfile", "-Command",
+                "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:DOMUS_TEST_LINK -Target $env:DOMUS_TEST_TARGET | Out-Null",
+            ], env={**os.environ, "DOMUS_TEST_LINK": str(link), "DOMUS_TEST_TARGET": str(outside)})
+        else:
+            link.symlink_to(outside, target_is_directory=True)
+
+    def check_unsafe_media(self, temporary, location, guards):
+        root_entries = json.loads(self.request(f"/api/locations/{location}/entries"))
+        unsafe = [entry for entry in root_entries if entry["relative_path"] == "escape-link"]
+        if len(unsafe) != 1 or unsafe[0]["kind"] != "unsafe_link":
+            raise RuntimeError("host link/reparse traversal was not rejected")
+        if json.loads(self.request(f"/api/locations/{location}/entries?folder=escape-link")):
+            raise RuntimeError("files outside the mounted library were indexed")
+
     def inspect_root(self, boundary, scope, root_id, role, relative="", **options):
         return json.loads(self.once([
             "storage-root-inspect", boundary, scope, root_id, "1", role, relative,
@@ -619,7 +639,6 @@ class Check:
         outside = temporary / "outside"
         outside.mkdir()
         (outside / "must-not-index.txt").write_text("outside generated fixture\n")
-        link = self.media / "escape-link"
         if self.volume_media:
             self.media_volume = self.volume("media")
             self.once(["init", "--storage-root", APPLICATION])
@@ -632,13 +651,8 @@ class Check:
                 shell=True, writable_media=True,
                 input=base64.b64encode(audio * 3).decode(),
             )
-        elif os.name == "nt":
-            command([
-                "pwsh", "-NoProfile", "-Command",
-                "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:DOMUS_TEST_LINK -Target $env:DOMUS_TEST_TARGET | Out-Null",
-            ], env={**os.environ, "DOMUS_TEST_LINK": str(link), "DOMUS_TEST_TARGET": str(outside)})
-        else:
-            link.symlink_to(outside, target_is_directory=True)
+        elif not self.paired_media:
+            self.create_unsafe_link(temporary)
 
         self.prepare_media(temporary)
         if not self.volume_media:
@@ -710,12 +724,7 @@ class Check:
             or not all(entry["kind"] == "file" and entry["present"] and entry["size"] == len(audio) * 3 for entry in entries)
         ):
             raise RuntimeError("mounted album inventory differs from the generated files")
-        root_entries = json.loads(self.request(f"/api/locations/{location}/entries"))
-        unsafe = [entry for entry in root_entries if entry["relative_path"] == "escape-link"]
-        if len(unsafe) != 1 or unsafe[0]["kind"] != "unsafe_link":
-            raise RuntimeError("host link/reparse traversal was not rejected")
-        if json.loads(self.request(f"/api/locations/{location}/entries?folder=escape-link")):
-            raise RuntimeError("files outside the mounted library were indexed")
+        self.check_unsafe_media(temporary, location, guards)
         self.report["checks"] += ["worker-scan", "native-bindings"]
         if os.name == "nt" and not self.volume_media and not self.paired_media:
             self.report["checks"].append("windows-bind-mount")
@@ -915,6 +924,10 @@ class WindowsAdapterCheck(Check):
             self.adapter.wait(timeout=15)
             self.adapter = None
         if self.adapter_log is not None:
+            self.adapter_log.seek(0)
+            self.report.setdefault("native_adapter_logs", []).append(
+                self.adapter_log.read(8192).decode("utf-8", errors="replace")
+            )
             self.adapter_log.close()
             self.adapter_log = None
 
@@ -940,6 +953,47 @@ class WindowsAdapterCheck(Check):
             raise RuntimeError("the read-only fixture unexpectedly grants media writes")
         self.check_denied_writes()
         self.report["checks"] += ["no-windows-media-mount", "read-only-media"]
+
+    def check_unsafe_media(self, temporary, location, guards):
+        path = f"/api/locations/{location}/entries?folder=Artist%2FAlbum"
+        before = json.loads(self.request(path))
+        self.create_unsafe_link(temporary)
+        queued = self.queue_scan(location, guards)
+        deadline = time.monotonic() + 45
+        failed = False
+        while time.monotonic() < deadline:
+            requests = json.loads(self.request("/api/worker/requests"))
+            matching = [item for item in requests if item["id"] == queued]
+            if matching and matching[0]["state"] == "failed":
+                failed = bool(matching[0].get("last_error"))
+                break
+            if matching and matching[0]["state"] in ("complete", "waiting"):
+                raise RuntimeError("unsafe paired enumeration did not fail its exact scan")
+            time.sleep(0.5)
+        if not failed:
+            raise RuntimeError("unsafe paired enumeration did not record a bounded scan failure")
+        locations = json.loads(self.request("/api/locations"))
+        matching = [item for item in locations if item["id"] == int(location)]
+        if (
+            len(matching) != 1 or matching[0]["coverage"] != "incomplete"
+            or not matching[0].get("last_error")
+            or json.loads(self.request(path)) != before
+            or json.loads(self.request(f"/api/locations/{location}/entries?folder=escape-link"))
+        ):
+            raise RuntimeError("unsafe paired enumeration lost retained observations or indexed outside media")
+        self.report["unsafe_media_scan"] = {
+            "request_id": queued, "state": "failed", "coverage": "incomplete",
+            "retained_entries": len(before), "outside_indexed": False,
+        }
+        (self.media / "escape-link").rmdir()
+        recovery = self.queue_scan(location, guards)
+        self.wait_scan(recovery)
+        locations = json.loads(self.request("/api/locations"))
+        matching = [item for item in locations if item["id"] == int(location)]
+        if len(matching) != 1 or matching[0]["coverage"] != "complete" or matching[0].get("last_error"):
+            raise RuntimeError("explicit paired recovery scan did not restore complete coverage")
+        self.report["unsafe_media_scan"]["recovery_request_id"] = recovery
+        self.report["checks"].append("paired-unsafe-enumeration")
 
     def check_denied_writes(self):
         selection = self.client["selection"]
@@ -1156,6 +1210,7 @@ class EvidenceTests(unittest.TestCase):
             "checks": sorted(REQUIRED_CHECKS | {
                 "windows-native-adapter", "no-windows-media-mount", "writable-media-workflow",
                 "adapter-offline-retains-observations", "adapter-native-replacement",
+                "paired-unsafe-enumeration",
             }),
         }
         validate_evidence(linux, windows)
@@ -1163,6 +1218,7 @@ class EvidenceTests(unittest.TestCase):
             {"scope": "windows-adapter-host-diagnostic"}, {"writable_run": "c" * 32},
             {"writable_workflow": None}, {"adapter_binary_sha256": None},
             {"checks": sorted(REQUIRED_CHECKS)},
+            {"checks": [name for name in windows["checks"] if name != "paired-unsafe-enumeration"]},
             {"checks": [*windows["checks"], "windows-bind-mount"]},
             {"image_id": None, "writable_workflow": {**workflow, "image_id": None}},
         ):
@@ -1312,6 +1368,56 @@ class EvidenceTests(unittest.TestCase):
                 else:
                     with self.assertRaises(RuntimeError):
                         check.check_unavailable_media("1")
+
+    def test_paired_unsafe_enumeration_retains_observations_and_requires_recovery(self):
+        before = [{"relative_path": f"Artist/Album/0{index}.mp3", "present": True} for index in (1, 2)]
+        with tempfile.TemporaryDirectory() as directory:
+            check = WindowsAdapterCheck("unused", Path("unused"))
+            check.media = Path(directory)
+            responses = [
+                before, [{"id": 8, "state": "failed", "last_error": "incomplete scan"}],
+                [{"id": 1, "coverage": "incomplete", "last_error": "native refusal"}],
+                before, [], [{"id": 1, "coverage": "complete", "last_error": None}],
+            ]
+            with (
+                patch.object(check, "create_unsafe_link", side_effect=lambda _: (check.media / "escape-link").mkdir()),
+                patch.object(check, "request", side_effect=[json.dumps(value).encode() for value in responses]),
+                patch.object(check, "queue_scan", side_effect=[8, 9]),
+                patch.object(check, "wait_scan") as recovery,
+            ):
+                check.check_unsafe_media(Path(directory), "1", {})
+            recovery.assert_called_once_with(9)
+            self.assertFalse((check.media / "escape-link").exists())
+            self.assertIn("paired-unsafe-enumeration", check.report["checks"])
+            self.assertEqual(check.report["unsafe_media_scan"]["recovery_request_id"], 9)
+
+    def test_paired_unsafe_enumeration_rejects_success_or_lost_observations(self):
+        before = [{"relative_path": "Artist/Album/01.mp3", "present": True}]
+        for state, coverage, retained, outside in (
+            ("complete", "incomplete", before, []),
+            ("waiting", "incomplete", before, []),
+            ("failed", "complete", before, []),
+            ("failed", "incomplete", [{**before[0], "present": False}], []),
+            ("failed", "incomplete", before, [{"relative_path": "escape-link/must-not-index.txt"}]),
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                check = WindowsAdapterCheck("unused", Path("unused"))
+                check.media = Path(directory)
+                responses = [
+                    before, [{"id": 8, "state": state, "last_error": "incomplete scan"}],
+                    [{"id": 1, "coverage": coverage, "last_error": "native refusal"}],
+                    retained, outside,
+                ]
+                with (
+                    patch.object(check, "create_unsafe_link", side_effect=lambda _: (check.media / "escape-link").mkdir()),
+                    patch.object(check, "request", side_effect=[json.dumps(value).encode() for value in responses]),
+                    patch.object(check, "queue_scan", return_value=8),
+                    patch.object(check, "wait_scan") as recovery,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        check.check_unsafe_media(Path(directory), "1", {})
+                recovery.assert_not_called()
+                self.assertNotIn("paired-unsafe-enumeration", check.report["checks"])
 
     @unittest.skipUnless(
         platform.system() == "Windows" and os.environ.get("DOMUS_ADAPTER_TEST_PACKAGE"),

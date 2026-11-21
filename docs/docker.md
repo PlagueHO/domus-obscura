@@ -82,6 +82,13 @@ are supported. Paired files and their parents remain on the same connection.
 A missing folder is reported only after complete successful enumeration.
 Directory checks and repeated listings use the retained reference; a failed
 enumeration cannot be reset into successful absence.
+The Docker fixture first requires a complete scan of generated regular files.
+It then adds an unsafe Windows junction and requires a failed scan with
+incomplete coverage, unchanged retained observations and no indexed outside
+files. It removes only that generated junction before an explicit recovery scan.
+The native adapter deliberately refuses the unsafe enumeration; it does not
+return a successful page containing an unsafe entry. Complete adapter-host
+evidence requires this separate refusal and recovery check.
 Publication folder creation, copying and verification use the common
 I/O boundary. New folders retain their original Windows creation handle.
 Creation refuses existing names and case collisions instead of adopting them.
