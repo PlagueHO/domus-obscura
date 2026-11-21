@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import socket
 import subprocess
 import sys
 import tarfile
@@ -181,6 +182,31 @@ def validate_evidence(linux, windows):
         raise ValueError("Windows bind-mount safety evidence is required")
 
 
+def adapter_package_binary(package, revision):
+    manifest_path = package / "package-manifest.json"
+    if manifest_path.stat().st_size > 1024 * 1024:
+        raise ValueError("Windows package manifest exceeds 1 MiB")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
+        raise ValueError("a structured Windows package manifest is required")
+    binary = package / "domus.exe"
+    if (
+        manifest.get("format") != 1
+        or manifest.get("target") != "x86_64-pc-windows-msvc"
+        or manifest.get("dirty") is not False
+        or manifest.get("revision") != revision
+        or not re.fullmatch(r"[0-9a-f]{40}", revision)
+    ):
+        raise ValueError("the native adapter package must match the clean runtime source")
+    if not binary.is_file() or binary.stat().st_size > 512 * 1024 * 1024:
+        raise ValueError("the native adapter executable is missing or exceeds 512 MiB")
+    with binary.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    if manifest.get("files", {}).get("domus.exe") != digest:
+        raise ValueError("the native adapter executable differs from its package manifest")
+    return binary, digest
+
+
 class Check:
     def __init__(self, image, engine_only, volume_media=False):
         self.image = image
@@ -192,6 +218,7 @@ class Check:
         self.media = None
         self.media_volume = None
         self.volume_media = volume_media
+        self.paired_media = False
         self.mounts = []
         self.report = {
             "format": 1, "result": "failed",
@@ -228,7 +255,7 @@ class Check:
             arguments.append("--read-only")
         for volume, target in self.mounts:
             arguments += ["--mount", f"type=volume,source={volume},target={target}"]
-        if self.media_volume or self.media:
+        if not self.paired_media and (self.media_volume or self.media):
             arguments += ["--mount", self.media_mount("/media", writable_media)]
         if media_alias:
             application = next(volume for volume, target in self.mounts if target == "/storage")
@@ -438,6 +465,62 @@ class Check:
             raise RuntimeError("a missing bind source was accepted or created")
         self.report["checks"].append("missing-source")
 
+    def prepare_media(self, temporary):
+        pass
+
+    def check_read_only_media(self, api):
+        mounts = json.loads(docker("inspect", api).stdout)[0]["Mounts"]
+        media_mounts = [mount for mount in mounts if mount["Destination"] == "/media"]
+        if len(media_mounts) != 1 or media_mounts[0].get("RW") is not False:
+            raise RuntimeError("the runtime media mount is not explicitly read-only")
+        denied = docker("exec", api, "sh", "-c", "touch /media/not-permitted", check=False)
+        if not denied.returncode or (self.media / "not-permitted").exists():
+            raise RuntimeError("read-only media mount accepted a write")
+        self.report["checks"].append("read-only-media")
+
+    def configure_media(self, configuration):
+        selection = configuration["storage"]
+        selection["providers"].append({"scope": "media", "boundary": "/media"})
+        selection["roots"].append(self.inspect_root("/media", "media", "media", "media"))
+
+    def register_media(self):
+        return self.once(["location-add", "--host", CONFIGURATION, "/media", "main"]).stdout.strip()
+
+    def check_media_replacement(self, temporary, location):
+        replacement = temporary / "replacement"
+        replacement.mkdir()
+        original_media, original_volume = self.media, self.media_volume
+        self.media = replacement
+        if self.volume_media:
+            self.media_volume = self.volume("replacement-media")
+        try:
+            self.check_unavailable_media(location)
+        finally:
+            self.media, self.media_volume = original_media, original_volume
+
+    def check_unavailable_media(self, location):
+        changed = self.once(["scan", "--host", CONFIGURATION, location], check=False)
+        if not changed.returncode:
+            raise RuntimeError("a replacement or unavailable media root was accepted")
+        retained = json.loads(self.once(["browse", "--host", CONFIGURATION, location, "Artist/Album", "0", "100"]).stdout)
+        if {entry["relative_path"] for entry in retained} != {"Artist/Album/01.mp3", "Artist/Album/02.mp3"}:
+            raise RuntimeError("failed media access erased retained observations")
+
+    def check_root_overlap(self, configuration):
+        bad = json.loads(json.dumps(configuration))
+        bad["storage"]["selection_revision"] += 1
+        bad["storage"]["providers"].append({"scope": "alias", "boundary": "/application-alias"})
+        bad["storage"]["roots"].append(self.inspect_root(
+            "/application-alias", "alias", "private-alias", "media", "application/cache", media_alias=True,
+        ))
+        self.save_fixture_configuration(bad, APPLICATION + "/overlap.json")
+        overlap = self.once([
+            "location-add", "--host", APPLICATION + "/overlap.json", "/application-alias/application/cache", "backup",
+        ], check=False, media_alias=True)
+        if not overlap.returncode or "overlap" not in overlap.stderr:
+            raise RuntimeError("an aliased media root was not rejected for native overlap")
+        self.report["checks"].append("root-overlap")
+
     def run(self, temporary):
         server = json.loads(docker("version", "--format", "{{json .Server}}").stdout)
         if server["Os"] != "linux" or server["Arch"] != "amd64":
@@ -511,6 +594,7 @@ class Check:
         else:
             link.symlink_to(outside, target_is_directory=True)
 
+        self.prepare_media(temporary)
         if not self.volume_media:
             self.report["phase"] = "missing-source"
             self.missing_sources(temporary)
@@ -532,14 +616,7 @@ class Check:
         self.request("/api/session", headers={"Host": "invalid.example"}, expected=421)
         job = json.loads(self.request("/api/jobs", "POST", {}, guards))["job_id"]
         self.report["checks"].append("api-guards")
-        mounts = json.loads(docker("inspect", api).stdout)[0]["Mounts"]
-        media_mounts = [mount for mount in mounts if mount["Destination"] == "/media"]
-        if len(media_mounts) != 1 or media_mounts[0].get("RW") is not False:
-            raise RuntimeError("the runtime media mount is not explicitly read-only")
-        denied = docker("exec", api, "sh", "-c", "touch /media/not-permitted", check=False)
-        if not denied.returncode or (self.media / "not-permitted").exists():
-            raise RuntimeError("read-only media mount accepted a write")
-        self.report["checks"].append("read-only-media")
+        self.check_read_only_media(api)
         self.stop(api)
 
         configuration = json.loads(self.once(["-c", f"cat {CONFIGURATION}"], shell=True).stdout)
@@ -552,12 +629,11 @@ class Check:
         self.once(["-c", f"umask 077; mkdir -p {APPLICATION}/cache {APPLICATION}/staging"], shell=True)
         selection = configuration["storage"]
         selection["selection_revision"] += 1
-        selection["providers"].append({"scope": "media", "boundary": "/media"})
         selection["roots"] += [
             self.inspect_root(APPLICATION, "application", "cache", "cache", "cache"),
             self.inspect_root(APPLICATION, "application", "staging", "staging", "staging"),
-            self.inspect_root("/media", "media", "media", "media"),
         ]
+        self.configure_media(configuration)
         revision = self.save_fixture_configuration(configuration)
         # Explicit startup binds this fresh cache; passive validation cannot.
         self.stop(self.start("api"))
@@ -569,22 +645,10 @@ class Check:
             raise RuntimeError(
                 "generated host configuration validation failed: " + validation.stdout + validation.stderr
             )
-        location = self.once(["location-add", "--host", CONFIGURATION, "/media", "main"]).stdout.strip()
+        location = self.register_media()
         self.once(["staging-init", "--host", CONFIGURATION, APPLICATION + "/staging"])
         self.once(["staging-init", "--host", CONFIGURATION, APPLICATION + "/staging"])
-        bad = json.loads(json.dumps(configuration))
-        bad["storage"]["selection_revision"] += 1
-        bad["storage"]["providers"].append({"scope": "alias", "boundary": "/application-alias"})
-        bad["storage"]["roots"].append(self.inspect_root(
-            "/application-alias", "alias", "private-alias", "media", "application/cache", media_alias=True,
-        ))
-        self.save_fixture_configuration(bad, APPLICATION + "/overlap.json")
-        overlap = self.once([
-            "location-add", "--host", APPLICATION + "/overlap.json", "/application-alias/application/cache", "backup",
-        ], check=False, media_alias=True)
-        if not overlap.returncode or "overlap" not in overlap.stderr:
-            raise RuntimeError("an aliased media root was not rejected for native overlap")
-        self.report["checks"].append("root-overlap")
+        self.check_root_overlap(configuration)
         api = self.start("api")
         worker = self.start("worker")
         self.wait_worker(revision)
@@ -607,7 +671,7 @@ class Check:
         if json.loads(self.request(f"/api/locations/{location}/entries?folder=escape-link")):
             raise RuntimeError("files outside the mounted library were indexed")
         self.report["checks"] += ["worker-scan", "native-bindings"]
-        if os.name == "nt" and not self.volume_media:
+        if os.name == "nt" and not self.volume_media and not self.paired_media:
             self.report["checks"].append("windows-bind-mount")
         if self.volume_media:
             self.report["checks"].append("linux-volume-media")
@@ -639,19 +703,7 @@ class Check:
         if not invalid.returncode:
             raise RuntimeError("insecure configuration selected a fallback")
         self.report["checks"].append("invalid-config")
-        replacement = temporary / "replacement"
-        replacement.mkdir()
-        original_media, original_volume = self.media, self.media_volume
-        self.media = replacement
-        if self.volume_media:
-            self.media_volume = self.volume("replacement-media")
-        changed = self.once(["scan", "--host", CONFIGURATION, location], check=False)
-        if not changed.returncode:
-            raise RuntimeError("a replacement media root was accepted")
-        retained = json.loads(self.once(["browse", "--host", CONFIGURATION, location, "Artist/Album", "0", "100"]).stdout)
-        if {entry["relative_path"] for entry in retained} != {"Artist/Album/01.mp3", "Artist/Album/02.mp3"}:
-            raise RuntimeError("failed mount access erased retained observations")
-        self.media, self.media_volume = original_media, original_volume
+        self.check_media_replacement(temporary, location)
         self.once(["-c", f"set -eu; mv {APPLICATION}/cache {APPLICATION}/cache-retained; "
                    f"mkdir -m 0700 {APPLICATION}/cache; "
                    f"cp {APPLICATION}/cache-retained/owner.lock {APPLICATION}/cache/owner.lock"], shell=True)
@@ -696,6 +748,211 @@ class Check:
             raise RuntimeError("test resource cleanup failed: " + self.report["cleanup_error"])
 
 
+class WindowsAdapterCheck(Check):
+    def __init__(self, image, package):
+        super().__init__(image, False)
+        self.package = package
+        self.paired_media = True
+        self.adapter = None
+        self.adapter_log = None
+        self.report["scope"] = "windows-adapter-host-diagnostic"
+
+    def native(self, *arguments, check=True):
+        return command([str(self.binary), *map(str, arguments)], check=check)
+
+    def prepare_media(self, temporary):
+        revision = self.report["revision"]
+        if (
+            self.report["source_dirty"]
+            or command(["git", "rev-parse", "HEAD"]).stdout.strip() != revision
+            or command(["git", "status", "--porcelain"]).stdout.strip()
+        ):
+            raise ValueError("adapter host diagnostics require the clean runtime checkout")
+        self.binary, digest = adapter_package_binary(self.package, revision)
+        self.report["adapter_binary_sha256"] = digest
+        self.private = temporary / "adapter-private"
+        self.native("init", "--storage-root", self.private)
+        command(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt",
+                 "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1",
+                 "-subj", "/CN=Domus generated adapter CA",
+                 "-addext", "basicConstraints=critical,CA:TRUE",
+                 "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+                 "-keyout", str(self.private / "ca.key"), "-out", str(self.private / "ca.pem")])
+        for kind, purpose, serial in (("server", "serverAuth", "1"), ("client", "clientAuth", "2")):
+            extension = self.private / (kind + ".ext")
+            extension.write_text(
+                "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n"
+                f"extendedKeyUsage={purpose}\nsubjectAltName=DNS:localhost\n",
+                encoding="ascii",
+            )
+            command(["openssl", "req", "-new", "-newkey", "ec", "-pkeyopt",
+                     "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=localhost",
+                     "-keyout", str(self.private / (kind + ".key")),
+                     "-out", str(self.private / (kind + ".csr"))])
+            command(["openssl", "x509", "-req", "-in", str(self.private / (kind + ".csr")),
+                     "-CA", str(self.private / "ca.pem"), "-CAkey", str(self.private / "ca.key"),
+                     "-set_serial", serial, "-days", "1", "-extfile", str(extension),
+                     "-out", str(self.private / (kind + "-leaf.pem"))])
+            (self.private / (kind + ".pem")).write_bytes(
+                (self.private / (kind + "-leaf.pem")).read_bytes()
+                + (self.private / "ca.pem").read_bytes()
+            )
+        scope = "generated-windows-media"
+        root = json.loads(self.native(
+            "storage-root-inspect", temporary, scope, "library", "1", "media", "media",
+        ).stdout)
+        private = json.loads(self.native(
+            "storage-root-inspect", temporary, scope, "adapter-private", "1", "application", "adapter-private",
+        ).stdout)
+        with socket.socket() as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            self.address = f"127.0.0.1:{reserved.getsockname()[1]}"
+        self.client = {
+            "format_version": 1, "address": self.address,
+            "selection": {"revision": 1, "provider_scope": scope, "media": [root], "private": private},
+            "server_ca_file": "ca.pem", "paired_server_file": "server.pem",
+            "certificate_file": "client.pem", "private_key_file": "client.key",
+        }
+        self.adapter_configuration = self.private / "adapter.json"
+        self.adapter_configuration.write_text(json.dumps({
+            "format_version": 1, "listen": self.address,
+            "selection": {
+                "revision": 1, "provider": {"scope": scope, "boundary": str(temporary)},
+                "media": [root], "private": private,
+            },
+            "certificate_file": "server.pem", "private_key_file": "server.key",
+            "client_ca_file": "ca.pem", "paired_client_file": "client.pem",
+        }), encoding="utf-8")
+        self.native("media-adapter-check", self.adapter_configuration)
+        self.start_adapter()
+
+    def start_adapter(self):
+        self.adapter_log = tempfile.TemporaryFile()
+        self.adapter = subprocess.Popen(
+            [str(self.binary), "media-adapter", str(self.adapter_configuration)],
+            stdin=subprocess.DEVNULL, stdout=self.adapter_log, stderr=self.adapter_log, cwd=ROOT,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.adapter.poll() is not None:
+                self.adapter_log.seek(0)
+                raise RuntimeError("generated native adapter exited before readiness: "
+                                   + self.adapter_log.read(8192).decode("utf-8", errors="replace"))
+            try:
+                with socket.create_connection(("127.0.0.1", int(self.address.rsplit(":", 1)[1])), timeout=0.2):
+                    return
+            except (ConnectionRefusedError, TimeoutError):
+                time.sleep(0.05)
+        raise RuntimeError("generated native adapter readiness timed out")
+
+    def stop_adapter(self):
+        if self.adapter is not None:
+            if self.adapter.poll() is None:
+                self.adapter.terminate()
+            self.adapter.wait(timeout=15)
+            self.adapter = None
+        if self.adapter_log is not None:
+            self.adapter_log.close()
+            self.adapter_log = None
+
+    def missing_sources(self, temporary):
+        self.stop_adapter()
+        retained = temporary / "retained-media"
+        self.media.rename(retained)
+        try:
+            for command_name in ("media-adapter-check", "media-adapter"):
+                result = self.native(command_name, self.adapter_configuration, check=False)
+                if result.returncode == 0 or self.media.exists():
+                    raise RuntimeError("the adapter accepted or created a missing selected native root")
+        finally:
+            retained.rename(self.media)
+        self.start_adapter()
+        self.report["checks"].append("missing-source")
+
+    def check_read_only_media(self, api):
+        mounts = json.loads(docker("inspect", api).stdout)[0]["Mounts"]
+        if any(mount["Type"] == "bind" or mount["Destination"] == "/media" for mount in mounts):
+            raise RuntimeError("paired media unexpectedly entered a guest filesystem mount")
+        if self.client["selection"].get("writable_roots"):
+            raise RuntimeError("the read-only fixture unexpectedly grants media writes")
+        self.report["checks"] += ["no-windows-media-mount", "adapter-read-only-declaration"]
+
+    def configure_media(self, configuration):
+        for name in ("ca.pem", "server.pem", "client.pem", "client.key"):
+            self.once(["-c", f"umask 077; base64 -d > {APPLICATION}/{name}"], shell=True,
+                      input=base64.b64encode((self.private / name).read_bytes()).decode())
+        self.once(["-c", f"umask 077; cat > {APPLICATION}/media-client.json"], shell=True,
+                  input=json.dumps(self.client))
+        self.save_fixture_configuration(configuration)
+        digest = self.once([
+            "media-storage-digest", "--host", CONFIGURATION, APPLICATION + "/media-client.json",
+        ]).stdout.strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("the generated paired topology digest is invalid")
+        root = self.client["selection"]["media"][0]
+        assurances = []
+        for native in configuration["storage"]["roots"]:
+            left, right = sorted(
+                ({"root_id": selected["root_id"], "binding_revision": selected["binding_revision"]}
+                 for selected in (root, native)), key=lambda selected: selected["root_id"],
+            )
+            assurances.append({"left": left, "right": right, "selection_digest": digest})
+        configuration["paired_media"] = {"client_file": "media-client.json", "topology_assurances": assurances}
+
+    def register_media(self):
+        return self.once([
+            "location-add-paired", "--host", CONFIGURATION, "library", "main",
+        ]).stdout.strip()
+
+    def check_root_overlap(self, configuration):
+        overlap = json.loads(self.adapter_configuration.read_text(encoding="utf-8"))
+        private = overlap["selection"]["private"]
+        overlap["selection"]["media"].append({
+            **private, "root_id": "private-alias", "role": "media",
+        })
+        path = self.private / "overlap.json"
+        path.write_text(json.dumps(overlap), encoding="utf-8")
+        result = self.native("media-adapter-check", path, check=False)
+        if result.returncode == 0:
+            raise RuntimeError("the adapter accepted private storage as a media export")
+        self.report["checks"].append("adapter-private-overlap")
+
+    def check_media_replacement(self, temporary, location):
+        self.stop_adapter()
+        self.check_unavailable_media(location)
+        self.report["checks"].append("adapter-offline-retains-observations")
+        self.check_native_replacement(temporary, lambda: self.check_unavailable_media(location))
+        self.start_adapter()
+        self.once(["location-check", "--host", CONFIGURATION, location])
+        self.report["checks"].append("adapter-native-replacement")
+
+    def check_native_replacement(self, temporary, verify=None):
+        retained = temporary / "retained-media"
+        self.media.rename(retained)
+        self.media.mkdir()
+        try:
+            for command_name in ("media-adapter-check", "media-adapter"):
+                result = self.native(command_name, self.adapter_configuration, check=False)
+                if result.returncode == 0:
+                    raise RuntimeError("the adapter accepted a replacement native media root")
+            if verify is not None:
+                verify()
+        finally:
+            self.media.rmdir()
+            retained.rename(self.media)
+
+    def cleanup(self):
+        try:
+            super().cleanup()
+        finally:
+            try:
+                self.stop_adapter()
+            except (OSError, subprocess.SubprocessError) as error:
+                self.report["result"] = "failed"
+                self.report["adapter_cleanup_error"] = str(error)
+                raise
+
+
 class EvidenceTests(unittest.TestCase):
     def reports(self):
         common = {
@@ -711,7 +968,7 @@ class EvidenceTests(unittest.TestCase):
         )
 
     def test_release_rejects_partial_or_engine_only_results(self):
-        for change in ({"scope": "engine-only"}, {"scope": "private-volume-host"}, {"result": "failed"}, {"source_dirty": True}, {"checks": []}, {"checks": None}, {"image_architecture": "arm64"}, {"checks": sorted(REQUIRED_CHECKS - {"missing-source"})}):
+        for change in ({"scope": "engine-only"}, {"scope": "private-volume-host"}, {"scope": "windows-adapter-host-diagnostic"}, {"result": "failed"}, {"source_dirty": True}, {"checks": []}, {"checks": None}, {"image_architecture": "arm64"}, {"checks": sorted(REQUIRED_CHECKS - {"missing-source"})}):
             linux, windows = self.reports()
             with self.assertRaises(ValueError):
                 validate_evidence(linux, {**windows, **change})
@@ -753,6 +1010,81 @@ class EvidenceTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     main()
                 execute.assert_not_called()
+
+    def test_adapter_host_diagnostic_rejects_other_host_or_media_modes(self):
+        for host, extra in (
+            ("Linux", []), ("Windows", ["--engine-only"]),
+            ("Windows", ["--windows-private-volume-host"]), ("Windows", ["--volume-media"]),
+        ):
+            with (
+                patch.object(sys, "argv", ["check.py", "check", "--windows-adapter-package", "unused", *extra]),
+                patch.object(platform, "system", return_value=host),
+                patch("sys.stderr", new=io.StringIO()),
+                patch(__name__ + ".docker") as execute,
+            ):
+                with self.assertRaises(SystemExit):
+                    main()
+                execute.assert_not_called()
+
+    def test_adapter_package_requires_exact_clean_source_and_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            binary = package / "domus.exe"
+            binary.write_bytes(b"generated executable fixture")
+            digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+            manifest = {
+                "format": 1, "target": "x86_64-pc-windows-msvc", "revision": "a" * 40,
+                "dirty": False, "files": {"domus.exe": digest},
+            }
+            path = package / "package-manifest.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(adapter_package_binary(package, "a" * 40), (binary, digest))
+            for change in ({"dirty": True}, {"revision": "b" * 40}, {"files": {"domus.exe": "c" * 64}}):
+                path.write_text(json.dumps({**manifest, **change}), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    adapter_package_binary(package, "a" * 40)
+
+    def test_adapter_runtime_never_mounts_windows_media(self):
+        check = WindowsAdapterCheck("unused", Path("unused"))
+        check.media = Path("generated-media")
+        check.mounts = [("generated-private-volume", "/storage")]
+        arguments = check.arguments()
+        self.assertFalse(any("generated-media" in value or "target=/media" in value for value in arguments))
+        self.assertIn("type=volume,source=generated-private-volume,target=/storage", arguments)
+
+    @unittest.skipUnless(
+        platform.system() == "Windows" and os.environ.get("DOMUS_ADAPTER_TEST_PACKAGE"),
+        "requires an explicitly selected source-matched native Windows package",
+    )
+    def test_generated_native_adapter_fixture_lifecycle(self):
+        package = Path(os.environ["DOMUS_ADAPTER_TEST_PACKAGE"]).resolve()
+        check = WindowsAdapterCheck("unused", package)
+        check.report.update({
+            "revision": command(["git", "rev-parse", "HEAD"]).stdout.strip(),
+            "source_dirty": False,
+        })
+        with tempfile.TemporaryDirectory(prefix="adapter-fixture-", dir=ROOT / "target") as directory:
+            temporary = Path(directory)
+            check.media = temporary / "media"
+            check.media.mkdir()
+            (check.media / "generated.txt").write_bytes(b"generated native fixture")
+            try:
+                check.prepare_media(temporary)
+                client = check.private / "media-client.json"
+                client.write_text(json.dumps(check.client), encoding="utf-8")
+                def open_root():
+                    check.native("media-root-check", "--host", check.private / "config.json", client, "library")
+                open_root()
+                check.check_root_overlap({})
+                check.missing_sources(temporary)
+                open_root()
+                check.stop_adapter()
+                check.check_native_replacement(temporary)
+                check.start_adapter()
+                open_root()
+                self.assertEqual((check.media / "generated.txt").read_bytes(), b"generated native fixture")
+            finally:
+                check.stop_adapter()
 
     def test_scan_wait_uses_the_new_request_not_the_returned_location_id(self):
         check = Check("unused", True)
@@ -813,10 +1145,16 @@ def main():
     parser.add_argument("--engine-only", action="store_true")
     parser.add_argument("--volume-media", action="store_true")
     parser.add_argument("--windows-private-volume-host", action="store_true")
+    parser.add_argument("--windows-adapter-package", type=Path)
     parser.add_argument("--linux-report", type=Path)
     parser.add_argument("--windows-report", type=Path)
     parser.add_argument("--report", type=Path, default=ROOT / "target" / "docker-check.json")
     args = parser.parse_args()
+    if args.windows_adapter_package and (
+        args.operation != "check" or args.engine_only or args.volume_media
+        or args.windows_private_volume_host or platform.system() != "Windows"
+    ):
+        parser.error("adapter host diagnostics require native Windows and no guest media mounts")
     if args.volume_media and (args.operation != "check" or not args.engine_only):
         parser.error("Linux-private media diagnostics require check --engine-only")
     if args.windows_private_volume_host and (
@@ -836,7 +1174,7 @@ def main():
         validate_evidence(json.loads(args.linux_report.read_text()), json.loads(args.windows_report.read_text()))
     else:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        check = Check(
+        check = WindowsAdapterCheck(args.image, args.windows_adapter_package) if args.windows_adapter_package else Check(
             args.image, args.engine_only,
             args.volume_media or args.windows_private_volume_host,
         )

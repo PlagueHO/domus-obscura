@@ -163,6 +163,35 @@ media. The release validator rejects this scope. Do not relabel it as complete
 Windows host acceptance or combine it with media reports without a checked,
 adapter-aware acceptance procedure.
 
+The native adapter diagnostic uses the same packaged API/worker lifecycle
+checker, but sends media operations through the paired production client.
+It creates only fresh Windows media and private adapter state. No Windows media
+directory is mounted into the Linux guest. The native executable must match the
+clean image revision and its Windows package manifest hash.
+
+From the matching clean checkout, build the native package and run:
+
+```powershell
+.\dev.ps1 package-windows
+$env:DOMUS_ADAPTER_TEST_PACKAGE = (Resolve-Path target\windows-package).Path
+uv run --no-project --python 3.14 packaging\docker\check.py self-test
+uv run --no-project --python 3.14 packaging\docker\check.py check --windows-adapter-package target\windows-package --report target\docker-windows-adapter.json
+```
+
+The optional native fixture test checks authenticated root access, missing and
+replacement root refusal, private-root overlap refusal and restoration of the
+original binding. It does not require Docker. Without the explicit package
+selection, the ordinary self-tests skip this native fixture.
+
+The Docker diagnostic additionally checks real Windows HTTP access, packaged
+browser bytes, worker scans, junction refusal, retained observations while the
+adapter is offline, and API/worker recreation. It stops its foreground adapter
+and removes generated containers, volumes and fixtures. It does not install a
+service or change Docker settings. The CI job retains its report separately with
+scope `windows-adapter-host-diagnostic`. This scope is still rejected by release
+validation. Checking an empty write-grant declaration is not a denied-write
+operation proof; generated writable/recovery evidence remains separate.
+
 The adapter verifies complete selected native chains and retains the opened
 directories and files. Only the Windows/native host maps root IDs to paths.
 The client sends frozen root definitions and a logical selection digest.
