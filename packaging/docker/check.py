@@ -1241,6 +1241,7 @@ class EvidenceTests(unittest.TestCase):
             report = Path(directory) / "report.json"
             with (
                 patch.object(sys, "argv", ["check.py", "check", "--engine-only", "--report", str(report)]),
+                patch(__name__ + ".ROOT", Path(directory)),
                 patch.object(Check, "run", autospec=True, side_effect=interrupt),
                 patch.object(Check, "cleanup"),
             ):
@@ -1448,6 +1449,7 @@ def main():
         args.report.write_text(json.dumps(check.report, indent=2) + "\n", encoding="utf-8")
         directory = None
         try:
+            (ROOT / "target").mkdir(exist_ok=True)
             directory = tempfile.TemporaryDirectory(prefix="docker-check-", dir=ROOT / "target")
             check.run(Path(directory.name))
             if args.windows_adapter_host:
