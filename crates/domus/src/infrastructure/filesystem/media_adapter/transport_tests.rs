@@ -2856,7 +2856,7 @@ async fn media_adapter_client_configuration_is_private_passive_and_peer_bound() 
         std::fs::write(&path, serde_json::to_vec(&document)?)?;
         assert!(source.prepare_media_client(&path).is_err());
     }
-    drop(reserved);
+    let listener = reserved;
     let adapter = PreparedAdapter::new(
         fixture.selection.clone(),
         Vec::new(),
@@ -2865,7 +2865,6 @@ async fn media_adapter_client_configuration_is_private_passive_and_peer_bound() 
         keys.ca.as_bytes(),
         keys.client.as_bytes(),
     )?;
-    let listener = TcpListener::bind(address)?;
     let handle = axum_server::Handle::new();
     let task = tokio::spawn(adapter.serve(listener, handle.clone()));
     let running = Running {
