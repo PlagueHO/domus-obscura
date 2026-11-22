@@ -85,7 +85,9 @@ enumeration cannot be reset into successful absence.
 The Docker fixture first requires a complete scan of generated regular files.
 It then adds an unsafe Windows junction and requires a failed scan with
 incomplete coverage, unchanged retained observations and no indexed outside
-files. It removes only that generated junction before an explicit recovery scan.
+files. It removes only that generated junction before an explicit retry of the
+same failed worker request. A new scan command retains that unfinished request;
+it does not create replacement work or authorize a retry.
 The native adapter deliberately refuses the unsafe enumeration; it does not
 return a successful page containing an unsafe entry. Complete adapter-host
 evidence requires this separate refusal and recovery check.

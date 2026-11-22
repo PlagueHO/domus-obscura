@@ -986,13 +986,13 @@ class WindowsAdapterCheck(Check):
             "retained_entries": len(before), "outside_indexed": False,
         }
         (self.media / "escape-link").rmdir()
-        recovery = self.queue_scan(location, guards)
-        self.wait_scan(recovery)
+        self.request(f"/api/worker/requests/{queued}/retry", "POST", {}, guards, 202)
+        self.wait_scan(queued)
         locations = json.loads(self.request("/api/locations"))
         matching = [item for item in locations if item["id"] == int(location)]
         if len(matching) != 1 or matching[0]["coverage"] != "complete" or matching[0].get("last_error"):
             raise RuntimeError("explicit paired recovery scan did not restore complete coverage")
-        self.report["unsafe_media_scan"]["recovery_request_id"] = recovery
+        self.report["unsafe_media_scan"]["recovery_request_id"] = queued
         self.report["checks"].append("paired-unsafe-enumeration")
 
     def check_denied_writes(self):
@@ -1377,19 +1377,21 @@ class EvidenceTests(unittest.TestCase):
             responses = [
                 before, [{"id": 8, "state": "failed", "last_error": "incomplete scan"}],
                 [{"id": 1, "coverage": "incomplete", "last_error": "native refusal"}],
-                before, [], [{"id": 1, "coverage": "complete", "last_error": None}],
+                before, [], None, [{"id": 1, "coverage": "complete", "last_error": None}],
             ]
             with (
                 patch.object(check, "create_unsafe_link", side_effect=lambda _: (check.media / "escape-link").mkdir()),
-                patch.object(check, "request", side_effect=[json.dumps(value).encode() for value in responses]),
-                patch.object(check, "queue_scan", side_effect=[8, 9]),
+                patch.object(check, "request", side_effect=[json.dumps(value).encode() for value in responses]) as request,
+                patch.object(check, "queue_scan", return_value=8) as queue,
                 patch.object(check, "wait_scan") as recovery,
             ):
                 check.check_unsafe_media(Path(directory), "1", {})
-            recovery.assert_called_once_with(9)
+            queue.assert_called_once_with("1", {})
+            request.assert_any_call("/api/worker/requests/8/retry", "POST", {}, {}, 202)
+            recovery.assert_called_once_with(8)
             self.assertFalse((check.media / "escape-link").exists())
             self.assertIn("paired-unsafe-enumeration", check.report["checks"])
-            self.assertEqual(check.report["unsafe_media_scan"]["recovery_request_id"], 9)
+            self.assertEqual(check.report["unsafe_media_scan"]["recovery_request_id"], 8)
 
     def test_paired_unsafe_enumeration_rejects_success_or_lost_observations(self):
         before = [{"relative_path": "Artist/Album/01.mp3", "present": True}]
