@@ -31,7 +31,8 @@ CMD ["python3", "packaging/linux/package-check.py", "/verification/package.tar.g
 FROM builder AS media-workflow-verification
 RUN --mount=type=cache,id=domus-obscura-cargo-1.99.1-amd64,target=/home/ubuntu/.cargo,uid=1000,gid=1000,sharing=locked \
     --mount=type=cache,id=domus-obscura-target-1.99.1-amd64,target=/src/target,uid=1000,gid=1000,sharing=locked \
-    DOMUS_MEDIA_FIXTURE_REVISION="$DOMUS_SOURCE_REVISION" python3 packaging/docker/build-media-fixture.py
+    python3 packaging/docker/test_media_fixture.py \
+    && DOMUS_MEDIA_FIXTURE_REVISION="$DOMUS_SOURCE_REVISION" python3 packaging/docker/build-media-fixture.py
 
 FROM scratch AS media-workflow-artifacts
 COPY --from=media-workflow-verification /verification/media-workflow /media-workflow

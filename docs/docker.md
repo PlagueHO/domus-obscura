@@ -122,7 +122,10 @@ Do not treat this implementation as Windows Docker acceptance.
 
 The separate `media-workflow-artifacts` build target exports a source-stamped
 Linux unit-test executable. It does not add test code or build tools to the
-runtime image. The Windows coordinator requires an existing clean runtime
+runtime image. Export removes debug sections from a separate copy; the cached
+compiler artifact stays unchanged. This avoids copying debug data through
+Docker Desktop within the unchanged bounded transfer time.
+The Windows coordinator requires an existing clean runtime
 candidate with the same source revision as the helper and its checkout.
 It does not pull an image, change Docker settings, or install a service.
 

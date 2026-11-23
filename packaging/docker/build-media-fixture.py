@@ -9,6 +9,14 @@ import subprocess
 import sys
 
 
+def export_executable(artifact, output):
+    shutil.copyfile(artifact, output)
+    subprocess.run(["strip", "--strip-debug", str(output)], check=True, timeout=120)
+    if output.stat().st_size > 512 * 1024 * 1024:
+        raise ValueError("The exported media fixture executable is too large")
+    output.chmod(0o755)
+
+
 def main():
     revision = os.environ["DOMUS_MEDIA_FIXTURE_REVISION"]
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -41,8 +49,7 @@ def main():
     if not artifact.is_file() or artifact.stat().st_size > 512 * 1024 * 1024:
         raise ValueError("The media fixture executable is missing or too large")
     output = Path("/verification/media-workflow")
-    shutil.copyfile(artifact, output)
-    output.chmod(0o755)
+    export_executable(artifact, output)
     output.with_suffix(".revision").write_text(revision + "\n", encoding="utf-8")
 
 
