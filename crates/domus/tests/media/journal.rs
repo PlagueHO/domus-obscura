@@ -383,7 +383,7 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
     fixture.store = Store::open_existing(&fixture.database)?;
     fixture.bind_roots()?;
     let version: i64 = raw.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 32);
+    assert_eq!(version, 33);
     let selected = fixture.store.prepare_artwork(
         fixture.job,
         fixture.version,

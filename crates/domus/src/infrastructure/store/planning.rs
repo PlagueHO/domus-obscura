@@ -120,7 +120,7 @@ impl Store {
         settings: &OutputSettings,
     ) -> Result<i64> {
         settings.validate()?;
-        let body = bounded_json(settings, 16384)?;
+        let body = bounded_json(settings, OutputSettings::MAXIMUM_JSON_BYTES)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

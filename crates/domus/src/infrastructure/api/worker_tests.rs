@@ -41,6 +41,48 @@ async fn tag_policy_commands_require_exact_origin_csrf_and_bounded_bodies() -> T
     Ok(())
 }
 
+#[tokio::test]
+async fn settings_api_accepts_combined_maximum_tag_updates() -> TestResult {
+    use crate::domain::{OutputSettings, TagMode, TagPolicy, TagRule};
+
+    let temp = super::super::permissions::private_test_directory()?;
+    let store = Store::open(&temp.path().join("state.sqlite"))?;
+    let router = Api::development("https://localhost:8443", store)?.router();
+    let value = "\\".repeat(4096);
+    let settings = OutputSettings {
+        tag_policy: Some(TagPolicy {
+            genre: TagRule::Update {
+                value: value.clone(),
+                mode: TagMode::Automatic,
+            },
+            composer: TagRule::Update {
+                value: value.clone(),
+                mode: TagMode::Review,
+            },
+            comment: TagRule::Update {
+                value: value.clone(),
+                mode: TagMode::Automatic,
+            },
+            copyright: TagRule::Update {
+                value: format!("2026 {}", "\\".repeat(4091)),
+                mode: TagMode::Automatic,
+            },
+        }),
+        ..OutputSettings::default()
+    };
+    let body = serde_json::to_vec(&serde_json::json!({
+        "expected_version": null,
+        "settings": settings
+    }))?;
+    assert!(body.len() > 16_384);
+    assert!(body.len() <= OutputSettings::MAXIMUM_JSON_BYTES);
+    let mut request = command("/api/settings", true)?;
+    *request.method_mut() = Method::PUT;
+    *request.body_mut() = axum::body::Body::from(body);
+    assert_eq!(router.oneshot(request).await?.status(), StatusCode::OK);
+    Ok(())
+}
+
 fn command(path: &str, csrf: bool) -> Result<Request<axum::body::Body>> {
     let mut request = Request::builder()
         .method("POST")

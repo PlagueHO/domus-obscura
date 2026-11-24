@@ -214,7 +214,8 @@ pub(super) fn run(args: &[String]) -> Result<bool> {
             }
             let source = ConfigurationService::open(Path::new(configuration))?;
             source.require_editable()?;
-            let settings: OutputSettings = json_file(&source, file, 16384)?;
+            let settings: OutputSettings =
+                json_file(&source, file, OutputSettings::MAXIMUM_JSON_BYTES)?;
             let mut store = source.open_store(StoreOpenMode::Current)?;
             println!(
                 "{}",

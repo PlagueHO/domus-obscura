@@ -482,7 +482,10 @@ impl Api {
             )
             .route(
                 "/api/settings",
-                get(settings).merge(put(save_settings).layer(DefaultBodyLimit::max(16384))),
+                get(settings).merge(
+                    put(save_settings)
+                        .layer(DefaultBodyLimit::max(OutputSettings::MAXIMUM_JSON_BYTES)),
+                ),
             )
             .route("/api/system/settings-policy", get(settings_policy))
             .route("/api/system/configuration", get(backend_configuration))

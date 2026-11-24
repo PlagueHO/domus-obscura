@@ -56,6 +56,8 @@ impl Default for OutputSettings {
 }
 
 impl OutputSettings {
+    pub const MAXIMUM_JSON_BYTES: usize = 65_536;
+
     pub fn policy(&self) -> AudioPolicy {
         self.audio_policy.clone().unwrap_or_else(|| AudioPolicy {
             accepted: self

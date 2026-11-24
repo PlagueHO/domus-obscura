@@ -133,23 +133,40 @@ fn prepare_tag_review(store: &mut Store, claim: &JobClaim, staging: &StagingRoot
     for transfer in store.tag_review_inputs(claim)? {
         store.renew_claim(claim, 300)?;
         store.job_work_boundary(claim)?;
-        let mut input = staging.received(&transfer)?;
-        let source =
-            crate::infrastructure::media::source_tags(&mut input, plan.plan.format, policy)?;
-        let output = policy.resolve_for_format(&source, plan.plan.format)?;
-        let verified = staging.received(&transfer)?;
-        if input.sha256() != verified.sha256() {
-            return Err(Error::Conflict("tag review source changed".into()));
-        }
+        let (source, output, input_sha256) = {
+            let heartbeat = ClaimHeartbeat {
+                store,
+                claim,
+                renewed: Cell::new(Instant::now()),
+            };
+            let tick = || heartbeat.tick();
+            let mut input = staging
+                .retained_input(&transfer, &tick)?
+                .ok_or_else(|| Error::Conflict("received tag review input is missing".into()))?;
+            let source =
+                crate::infrastructure::media::source_tags(&mut input, plan.plan.format, policy)?;
+            let output = policy.resolve_for_format(&source, plan.plan.format)?;
+            let verified = staging
+                .retained_input(&transfer, &tick)?
+                .ok_or_else(|| Error::Conflict("received tag review input is missing".into()))?;
+            if input.sha256() != verified.sha256() {
+                return Err(Error::Conflict("tag review source changed".into()));
+            }
+            (
+                source,
+                output,
+                input
+                    .sha256()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            )
+        };
         tracks.push(crate::infrastructure::store::TagReviewTrack {
             track_number: transfer.track_number,
             transfer_id: transfer.id,
             input_bytes: transfer.expected_bytes,
-            input_sha256: input
-                .sha256()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
+            input_sha256,
             source,
             output,
         });
