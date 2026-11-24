@@ -25,6 +25,7 @@ import { RequestHistory } from "./RequestHistory";
 import { AlbumReplacementRestore, PublicationRecovery } from "./PublicationRecovery";
 import { AlbumReplacementReview } from "./AlbumReplacementReview";
 import { TransferProgress, allInputsReceived } from "./TransferProgress";
+import { FrozenTagPolicy, needsTagReview, TagReviewPanel } from "./TagPolicy";
 
 export function RequestProgress({
   planApproved,
@@ -409,6 +410,7 @@ export function RequestPage({
                   : "Inspect saved edition and destinations"}
               </summary>
               <p className="identifier">MusicBrainz release · {stored.plan.edition.release_id}</p>
+              <FrozenTagPolicy policy={stored.plan.settings.tag_policy} />
               <p>
                 {stored.plan.audio
                   ? audioProfileLabel(stored.plan.audio.profile, audioProfiles)
@@ -506,6 +508,19 @@ export function RequestPage({
                 </>
               )}
             </details>
+            {needsTagReview(stored.plan.settings.tag_policy) && (
+              <TagReviewPanel
+                key={`${id}:${version}:${current?.state}`}
+                job={id}
+                version={version}
+                disabled={readsBlocked || stale}
+                onChanged={() => {
+                  setSubmitted(false);
+                  job.refresh();
+                  onChanged();
+                }}
+              />
+            )}
             {editable ? (
               <>
                 <details className="request-editor" open={!source || source.approved_at === null}>

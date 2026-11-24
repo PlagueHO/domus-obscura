@@ -107,6 +107,28 @@ pub(super) fn run(args: &[String]) -> Result<bool> {
                 serde_json::to_string(&store.resume_artwork(number(id)?, number(version)?)?)?
             );
         }
+        ("tag-review", [job, version, after, limit]) => {
+            let store = store(configuration, StoreOpenMode::Snapshot)?;
+            let limit: u16 = number(limit)?;
+            println!(
+                "{}",
+                serde_json::to_string(&store.tag_review(
+                    number(job)?,
+                    number(version)?,
+                    Page::new(number(after)?, limit)?,
+                )?)?
+            );
+        }
+        ("tag-review-approve", [job, version, hash]) => {
+            let mut store = store(configuration, StoreOpenMode::Current)?;
+            store.approve_tag_review(number(job)?, number(version)?, hash)?;
+            println!("Exact tag approval saved. Work remains paused.");
+        }
+        ("tag-review-resume", [job, version, hash]) => {
+            let mut store = store(configuration, StoreOpenMode::Current)?;
+            store.resume_tag_review(number(job)?, number(version)?, hash)?;
+            println!("Saved tag approval applied. No worker or download started.");
+        }
         ("job-control", [job, version, action]) => {
             let action = match action.as_str() {
                 "pause" => domus::infrastructure::store::JobControlAction::Pause,

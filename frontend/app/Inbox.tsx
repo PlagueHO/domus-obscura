@@ -6,6 +6,7 @@ import { request } from "./api";
 import { useCommand, useResource } from "./hooks";
 import { Alert, Badge, Button, Card, Empty, Pager } from "./components/ui";
 import { stateLabel } from "./state";
+import { TagReviewPanel } from "./TagPolicy";
 
 export function Inbox({
   questions,
@@ -115,6 +116,7 @@ export function recoveryCommand(
           }
         : null;
     case "album_restore":
+    case "tags":
     case "manual":
       return null;
   }
@@ -156,6 +158,25 @@ export function QuestionActions({
     setSubmitted(true);
     setNotice("Saved answer applied. This command did not start a worker or a download.");
     onChanged();
+  }
+
+  if (recovery.kind === "tags") {
+    return (
+      <>
+        <p>
+          <a href={`#/request/${question.job_id}/${question.plan_version}`}>
+            Open request #{question.job_id}
+          </a>
+        </p>
+        <TagReviewPanel
+          key={`${question.job_id}:${question.plan_version}`}
+          job={question.job_id}
+          version={question.plan_version}
+          disabled={blocked}
+          onChanged={onChanged}
+        />
+      </>
+    );
   }
 
   return (

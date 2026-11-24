@@ -7,6 +7,10 @@ use serde::Serialize;
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QuestionRecovery {
+    Tags {
+        job_id: i64,
+        plan_version: i64,
+    },
     Artwork {
         decision: ArtworkDecision,
     },
@@ -129,6 +133,16 @@ impl Store {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let restore_current = restore.as_ref().is_some_and(|binding| binding.3);
+        let tag_review: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tag_reviews WHERE question_id=?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if tag_review && (artwork || control.is_some() || restore.is_some()) {
+            return Err(Error::Internal(
+                "question has conflicting recovery bindings",
+            ));
+        }
         let recovery = match (artwork, control, restore) {
             (true, None, None) => QuestionRecovery::Artwork {
                 decision: self.artwork_decision(id)?,
@@ -143,6 +157,10 @@ impl Store {
                     state,
                 }
             }
+            (false, None, None) if tag_review => QuestionRecovery::Tags {
+                job_id: question.job_id,
+                plan_version: question.plan_version,
+            },
             (false, None, None) => QuestionRecovery::Manual,
             _ => {
                 return Err(Error::Internal(

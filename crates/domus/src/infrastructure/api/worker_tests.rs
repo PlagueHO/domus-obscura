@@ -6,6 +6,41 @@ use tower::ServiceExt;
 
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+#[tokio::test]
+async fn tag_policy_commands_require_exact_origin_csrf_and_bounded_bodies() -> TestResult {
+    let temp = super::super::permissions::private_test_directory()?;
+    let store = Store::open(&temp.path().join("state.sqlite"))?;
+    let router = Api::development("https://localhost:8443", store)?.router();
+    for action in ["approve", "resume"] {
+        let path = format!("/api/jobs/1/plans/1/tags/{action}");
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(command(&path, false)?)
+                .await?
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let mut wrong_origin = command(&path, true)?;
+        wrong_origin
+            .headers_mut()
+            .insert(header::ORIGIN, "https://evil.invalid".parse()?);
+        assert_eq!(
+            router.clone().oneshot(wrong_origin).await?.status(),
+            StatusCode::FORBIDDEN
+        );
+        let mut oversized = command(&path, true)?;
+        *oversized.body_mut() = axum::body::Body::from(serde_json::to_string(
+            &serde_json::json!({"sha256":"a".repeat(129)}),
+        )?);
+        assert_eq!(
+            router.clone().oneshot(oversized).await?.status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+    Ok(())
+}
+
 fn command(path: &str, csrf: bool) -> Result<Request<axum::body::Body>> {
     let mut request = Request::builder()
         .method("POST")

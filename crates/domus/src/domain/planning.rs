@@ -25,9 +25,13 @@ impl ArtworkSize {
 /// Plans freeze a settings version so later system changes cannot alter approved work.
 /// `format` is preferred; MP3 means verified 320 kbps CBR and FLAC is lossless.
 /// A missing accepted set preserves both legacy formats.
+/// A missing `tag_policy` preserves legacy release-only recipes. New plans
+/// freeze the explicit default without rewriting a saved settings version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct OutputSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_policy: Option<super::TagPolicy>,
     pub format: AudioFormat,
     #[serde(default)]
     pub accepted_formats: Option<Vec<AudioFormat>>,
@@ -41,6 +45,7 @@ pub struct OutputSettings {
 impl Default for OutputSettings {
     fn default() -> Self {
         Self {
+            tag_policy: None,
             format: AudioFormat::default(),
             accepted_formats: Some(vec![AudioFormat::Mp3, AudioFormat::Flac]),
             audio_policy: None,
@@ -72,6 +77,9 @@ impl OutputSettings {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(policy) = &self.tag_policy {
+            policy.validate()?;
+        }
         let policy = self.policy();
         policy.validate()?;
         if self.audio_policy.is_some()

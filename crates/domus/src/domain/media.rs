@@ -5,6 +5,8 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TrackTags {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) optional_tags: Option<super::OptionalTags>,
     pub(crate) title: String,
     pub(crate) artist: String,
     pub(crate) album_artist: String,
@@ -148,6 +150,7 @@ impl CatalogRelease {
                     return Err(invalid());
                 }
                 tags.push(TrackTags {
+                    optional_tags: None,
                     title: track.title.clone(),
                     artist,
                     album_artist: album_artist.clone(),

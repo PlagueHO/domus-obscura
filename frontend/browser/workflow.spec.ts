@@ -630,6 +630,55 @@ test("a changed cover approval is rejected without transfers or publication", as
   expect(await (await page.request.get("/api/jobs/1/plans/2/transfers")).json()).toEqual([]);
 });
 
+test("tag rules freeze exact album review and keep approval separate from local work", async ({
+  page,
+}) => {
+  await page.goto("/#/settings");
+  if (test.info().project.name === "narrow")
+    await page
+      .getByRole("combobox", { name: "Settings section", exact: true })
+      .selectOption("music_output");
+  else await page.getByRole("button", { name: "Output policy", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Copyright action", exact: true })
+    .selectOption("retain");
+  await expect(page.getByRole("combobox", { name: "Copyright mode", exact: true })).toHaveCount(0);
+  await page.getByRole("combobox", { name: "Composer action", exact: true }).selectOption("update");
+  await page.getByRole("textbox", { name: /^Composer value/ }).fill("  Exact composer  ");
+  await page.getByRole("button", { name: "Save system output settings" }).click();
+  await expect(page.getByText("Output policy saved.", { exact: false })).toBeVisible();
+  await selectAlbums(page);
+  await expect(
+    page.getByText('Composer: update to "  Exact composer  "', { exact: false }),
+  ).toBeVisible();
+  await approveAlbum(page);
+  await page.getByRole("button", { name: "Start Download", exact: true }).click();
+  const review = page
+    .getByRole("heading", { name: "Exact downloaded tag review", exact: true })
+    .locator("..");
+  await expect(
+    review.getByRole("button", { name: "Approve exact tags for this album" }),
+  ).toBeEnabled();
+  await expect(review).toContainText("Not inspected for automatic rule");
+  await review.getByRole("button", { name: "Approve exact tags for this album" }).click();
+  await expect(review.getByRole("button", { name: "Apply saved tag approval" })).toBeEnabled();
+  const approved: { approved: boolean; resumed: boolean } = await (
+    await page.request.get("/api/jobs/1/plans/2/tags")
+  ).json();
+  expect(approved).toMatchObject({ approved: true, resumed: false });
+  await review.getByRole("button", { name: "Apply saved tag approval" }).click();
+  await expect(page.getByText("Tag approval applied.", { exact: false })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Continue approved local work", exact: true }),
+  ).toBeEnabled();
+  expect(await (await page.request.get("/api/jobs/1/plans/2/publication")).json()).toEqual([]);
+  await page.getByRole("button", { name: "Continue approved local work", exact: true }).click();
+  await verifyOutput(page);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  );
+});
+
 test("settings policy is version-bound and read-only; keyboard and reduced motion remain usable", async ({
   page,
 }) => {
@@ -670,6 +719,10 @@ test("settings policy is version-bound and read-only; keyboard and reduced motio
       .selectOption("music_output");
   else await page.getByRole("button", { name: "Output policy", exact: true }).click();
   await expect(page.getByText("This form is read-only.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Genre action", exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Frozen optional tag rules", exact: true }),
+  ).toBeVisible();
   const rejected = await page.request.put("/api/settings", {
     headers: guards,
     data: { expected_version: settings.version + 1, settings: settings.settings },

@@ -1,4 +1,6 @@
 -- Remove newer layers before rebuilding a legacy upgrade fixture.
+DROP TABLE tag_review_tracks;
+DROP TABLE tag_reviews;
 DROP TABLE artist_photo_bindings;
 DROP TABLE commons_gate;
 DROP VIEW recovery_inventory;

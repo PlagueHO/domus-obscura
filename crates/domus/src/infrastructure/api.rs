@@ -590,6 +590,15 @@ impl Api {
                 post(resume_artwork).layer(DefaultBodyLimit::max(128)),
             )
             .route("/api/questions/{id}/answer", post(answer))
+            .route("/api/jobs/{id}/plans/{version}/tags", get(tag_review))
+            .route(
+                "/api/jobs/{id}/plans/{version}/tags/approve",
+                post(approve_tags).layer(DefaultBodyLimit::max(128)),
+            )
+            .route(
+                "/api/jobs/{id}/plans/{version}/tags/resume",
+                post(resume_tags).layer(DefaultBodyLimit::max(128)),
+            )
             .route("/api/events", get(events))
             .route("/api/jobs/{id}/plans/{version}/events", get(plan_events))
             .route("/api/events/cursor", get(event_cursor))
@@ -2508,6 +2517,44 @@ async fn artwork_decision(
         api.database(move |store| store.artwork_decision(id))
             .await?,
     ))
+}
+
+async fn tag_review(
+    State(api): State<Api>,
+    Path((job, version)): Path<(i64, i64)>,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Option<super::store::TagReview>>> {
+    let page = query.page()?;
+    Ok(Json(
+        api.database(move |store| store.tag_review(job, version, page))
+            .await?,
+    ))
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct TagReviewCommand {
+    pub sha256: String,
+}
+
+async fn approve_tags(
+    State(api): State<Api>,
+    Path((job, version)): Path<(i64, i64)>,
+    Json(command): Json<TagReviewCommand>,
+) -> ApiResult<StatusCode> {
+    api.database(move |store| store.approve_tag_review(job, version, &command.sha256))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn resume_tags(
+    State(api): State<Api>,
+    Path((job, version)): Path<(i64, i64)>,
+    Json(command): Json<TagReviewCommand>,
+) -> ApiResult<StatusCode> {
+    api.database(move |store| store.resume_tag_review(job, version, &command.sha256))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize, ts_rs::TS)]

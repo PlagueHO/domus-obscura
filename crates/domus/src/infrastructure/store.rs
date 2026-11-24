@@ -19,6 +19,8 @@ mod native_roots;
 #[cfg(test)]
 mod native_storage_tests;
 mod normalization;
+mod tag_reviews;
+pub use tag_reviews::{TagReview, TagReviewTrack};
 mod planning;
 mod private_roots;
 mod publication;
@@ -96,6 +98,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/029_recovery_cleanup.sql"),
     include_str!("../../migrations/030_artist_images.sql"),
     include_str!("../../migrations/031_certificate_roots.sql"),
+    include_str!("../../migrations/032_tag_policy.sql"),
 ];
 
 pub struct Store {
@@ -988,6 +991,7 @@ impl Store {
                  AND id = (SELECT MAX(id) FROM questions WHERE job_id = jobs.id
                            AND plan_version = jobs.plan_version)
                  AND NOT EXISTS(SELECT 1 FROM artwork_questions a WHERE a.question_id = questions.id)
+                 AND NOT EXISTS(SELECT 1 FROM tag_reviews t WHERE t.question_id = questions.id)
                  AND NOT EXISTS(SELECT 1 FROM job_controls c WHERE c.question_id=questions.id)))
              AND (owner IS NULL OR lease_until <= unixepoch())
              RETURNING plan_version, claim_generation",
@@ -1230,6 +1234,16 @@ impl Store {
             ));
         }
         artwork_questions::resolve(&transaction, id, plan_version, choice)?;
+        let tag_review: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tag_reviews WHERE question_id=?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if tag_review {
+            return Err(Error::Conflict(
+                "use the exact tag-review approval command".into(),
+            ));
+        }
         let changed = transaction.execute(
             "UPDATE questions SET answer = ?3, answered_at = unixepoch()
              WHERE id = ?1 AND plan_version = ?2 AND answer IS NULL
