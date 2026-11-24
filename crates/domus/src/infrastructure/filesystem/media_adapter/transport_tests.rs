@@ -3223,6 +3223,45 @@ async fn media_adapter_tls_pins_both_peers_in_addition_to_ca_validation() -> Tes
 }
 
 #[tokio::test]
+async fn media_adapter_dispatch_bounds_json_before_operation_admission() -> TestResult {
+    let fixture = Fixture::new()?;
+    let state = Arc::new(AdapterState {
+        native: Arc::new(NativeAdapter::new(fixture.selection.clone(), Vec::new())?),
+        host: "localhost:1234".into(),
+        slots: Arc::new(Semaphore::new(0)),
+    });
+    let connection = Connection::connect_info("127.0.0.1:1234".parse::<SocketAddr>()?);
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, "localhost:1234".parse()?);
+    headers.insert(header::CONTENT_TYPE, "application/json".parse()?);
+    headers.insert("x-domus-media-adapter", "1".parse()?);
+    let mut body = encode(&fixture.request()?)?;
+    body.resize(MAX_FRAME, b' ');
+    assert!(matches!(
+        dispatch(
+            State(state.clone()),
+            ConnectInfo(connection.clone()),
+            headers.clone(),
+            Bytes::from(body.clone()),
+        )
+        .await,
+        Err(OperationError(Error::Busy(_)))
+    ));
+    body.push(b' ');
+    assert!(matches!(
+        dispatch(
+            State(state),
+            ConnectInfo(connection),
+            headers,
+            Bytes::from(body),
+        )
+        .await,
+        Err(OperationError(Error::InvalidInput(_)))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn media_adapter_tls_rejects_browsers_wrong_hosts_and_oversized_frames() -> TestResult {
     let fixture = Fixture::new()?;
     let keys = Certificates::new()?;

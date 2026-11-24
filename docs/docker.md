@@ -254,6 +254,8 @@ blocking tasks and live references. A failed enumeration remains incomplete.
 Connection loss never becomes an empty page or a fallback to 9p.
 Each connection permits 32 live references. Pages have at most 64 entries.
 File chunks are at most 16 KiB, and frames are at most 256 KiB.
+The adapter checks request size again immediately before JSON decoding.
+This check does not depend on the HTTP body-limit layer.
 At most eight native operations run at once. Each request has a 10-second
 deadline. A deadline closes the connection; it cannot cancel an OS operation already
 running on a bounded blocking task.

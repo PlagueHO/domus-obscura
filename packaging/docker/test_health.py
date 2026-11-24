@@ -86,6 +86,7 @@ class HealthTests(unittest.TestCase):
                 stderr=subprocess.PIPE, timeout=15,
             )
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(certificate, key)
             with listener(context=context) as (server, url):
                 untrusted = probe(url)

@@ -204,6 +204,9 @@ async fn dispatch(
     {
         return Ok(StatusCode::FORBIDDEN.into_response());
     }
+    if body.len() > MAX_FRAME {
+        return Err(Error::InvalidInput("native media request exceeds its limit".into()).into());
+    }
     let request = serde_json::from_slice::<Request>(&body)
         .map_err(|_| Error::InvalidInput("invalid bounded native media request".into()))?;
     let permit = state
