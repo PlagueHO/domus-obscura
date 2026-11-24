@@ -282,6 +282,33 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(small["max_generated_files"], 4096)
         self.assertEqual(small["max_run_bytes"], 1024**3)
 
+    def test_small_runtime_extension_applies_only_to_windows_actions(self):
+        for system in ("Windows", "Linux"):
+            for actions in ("true", "false"):
+                with self.subTest(system=system, actions=actions), \
+                        mock.patch.object(scale.platform, "system", return_value=system), \
+                        mock.patch.dict(scale.os.environ, {"GITHUB_ACTIONS": actions}), \
+                        mock.patch.object(scale.time, "time", return_value=1000) as clock:
+                    monitor = scale.Monitor(Path.cwd(), scale.admission("small"))
+                    clock.return_value = 1600
+                    if system == "Windows" and actions == "true":
+                        monitor.check()
+                        clock.return_value = 1899
+                        monitor.check()
+                        clock.return_value = 1900
+                    with self.assertRaisesRegex(ValueError, "approved scale runtime expired"):
+                        monitor.check()
+
+    def test_monitor_keeps_an_earlier_explicit_lab_deadline(self):
+        with mock.patch.object(scale.time, "time", return_value=1000) as clock:
+            monitor = scale.Monitor(
+                Path.cwd(), {"max_runtime_seconds": 900, "deadline_unix": 1050})
+            clock.return_value = 1049
+            monitor.check()
+            clock.return_value = 1050
+            with self.assertRaisesRegex(ValueError, "approved scale runtime expired"):
+                monitor.check()
+
     def test_full_profile_requires_current_platform_and_exact_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -3769,10 +3769,12 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "native-file-security",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "winsafe",
 ]
 
 [[package]]

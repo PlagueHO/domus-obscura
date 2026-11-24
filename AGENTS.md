@@ -15,6 +15,8 @@ It accepts the stable Rust alias only when its exact version matches the pin.
 .\dev.ps1 build
 .\dev.ps1 smoke
 .\dev.ps1 scale
+.\dev.ps1 docker-build
+.\dev.ps1 docker-check
 ```
 
 On Linux, use the same tasks:
@@ -28,6 +30,8 @@ cargo task check
 cargo task build
 cargo task smoke
 cargo task scale
+cargo task docker-build
+cargo task docker-check
 ```
 
 For documentation-only changes, use the formatter check:
@@ -89,6 +93,13 @@ for the real development HTTPS setup. Do not treat the harness as a production m
 | Lockfiles                  | Cargo.lock and one pnpm-lock.yaml |
 
 ## Operational boundaries
+
+Read [Docker distribution](docs/docker.md) before changing image or Compose
+behavior. Docker builds can install tools inside build images, not on the host.
+Use fresh generated volumes for checks. Preserve loopback access and native
+bindings across API/worker containers. Engine-only checks are not Windows-host
+evidence. Docker settings, runner setup, and public registry visibility changes
+need separate approval.
 
 Windows distribution tasks are `package-windows`, `package-check`, and
 `installer-windows`. Read [Windows operations](docs/windows-services.md) before

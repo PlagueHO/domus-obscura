@@ -6,16 +6,205 @@
 //! - https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_standard_info
 //! - https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_stream_info
 //! - https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_disposition_info
+//! - https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntcreatefile
+//! - https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+//! - https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile
 
-use std::ffi::c_void;
+use std::ffi::{OsStr, c_void};
 use std::fs::File;
 use std::io;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
 
 const FILE_STANDARD_INFO: i32 = 1;
 const FILE_DISPOSITION_INFO: i32 = 4;
 const FILE_STREAM_INFO: i32 = 7;
+
+#[repr(C)]
+struct UnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[repr(C)]
+struct ObjectAttributes {
+    length: u32,
+    root: *mut c_void,
+    name: *mut UnicodeString,
+    attributes: u32,
+    security_descriptor: *mut c_void,
+    security_qos: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct IoStatus {
+    status: usize,
+    information: usize,
+}
+
+#[repr(C)]
+struct RenameInfo {
+    replace: u32,
+    root: *mut c_void,
+    length: u32,
+    name: [u16; 1],
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateFile(
+        file: *mut *mut c_void,
+        access: u32,
+        attributes: *mut ObjectAttributes,
+        status: *mut IoStatus,
+        allocation: *const i64,
+        file_attributes: u32,
+        share: u32,
+        disposition: u32,
+        options: u32,
+        extended_attributes: *const c_void,
+        extended_bytes: u32,
+    ) -> i32;
+    fn NtSetInformationFile(
+        file: *mut c_void,
+        status: *mut IoStatus,
+        information: *const c_void,
+        bytes: u32,
+        class: i32,
+    ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
+}
+
+fn single_name(name: &OsStr) -> io::Result<Vec<u16>> {
+    let name = name.encode_wide().take(256).collect::<Vec<_>>();
+    if name.is_empty()
+        || name.len() > 255
+        || name == [46]
+        || name == [46, 46]
+        || name.last().is_some_and(|unit| [32, 46].contains(unit))
+        || name
+            .iter()
+            .any(|unit| *unit < 32 || [34, 42, 47, 58, 60, 62, 63, 92, 124].contains(unit))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "one bounded native name is required",
+        ));
+    }
+    Ok(name)
+}
+
+pub(super) fn create_directory(parent: &File, name: &OsStr) -> io::Result<File> {
+    directory_handle(parent, name, true)
+}
+
+pub(super) fn open_directory_for_move(parent: &File, name: &OsStr) -> io::Result<File> {
+    directory_handle(parent, name, false)
+}
+
+fn directory_handle(parent: &File, name: &OsStr, create: bool) -> io::Result<File> {
+    let mut name = single_name(name)?;
+    let length = (name.len() * 2) as u16;
+    let mut text = UnicodeString {
+        length,
+        maximum_length: length,
+        buffer: name.as_mut_ptr(),
+    };
+    let mut attributes = ObjectAttributes {
+        length: std::mem::size_of::<ObjectAttributes>() as u32,
+        root: parent.as_raw_handle(),
+        name: &mut text,
+        attributes: 0x1040, // OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE.
+        security_descriptor: std::ptr::null_mut(),
+        security_qos: std::ptr::null_mut(),
+    };
+    let mut status = IoStatus::default();
+    let mut handle = std::ptr::null_mut();
+    // SAFETY: All ABI structures and the bounded UTF-16 name remain live through
+    // synchronous opening. FILE_CREATE cannot open an existing object.
+    // DIRECTORY_FILE and OPEN_REPARSE_POINT prohibit traversal through a link.
+    let result = unsafe {
+        NtCreateFile(
+            &mut handle,
+            if create { 0x0012_00a7 } else { 0x0013_00a1 },
+            &mut attributes,
+            &mut status,
+            std::ptr::null(),
+            0,
+            if create { 3 } else { 1 },
+            if create { 2 } else { 1 },
+            0x0020_0021,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if result < 0 {
+        // SAFETY: This pure conversion takes no pointers or owned resources.
+        return Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(result) } as i32,
+        ));
+    }
+    if handle.is_null() || handle as isize == -1 {
+        return Err(io::Error::other(
+            "native directory operation returned no handle",
+        ));
+    }
+    // SAFETY: A successful synchronous NtCreateFile transfers one owned handle.
+    let file = unsafe { File::from_raw_handle(handle) };
+    if result != 0 || status.information != if create { 2 } else { 1 } {
+        return Err(io::Error::other(
+            "native directory operation outcome is uncertain",
+        ));
+    }
+    validate(&file, true)?;
+    Ok(file)
+}
+
+pub(super) fn rename_directory_noreplace(
+    source: &File,
+    parent: &File,
+    name: &OsStr,
+) -> io::Result<()> {
+    let name = single_name(name)?;
+    let mut storage = [0u64; 128];
+    let bytes = std::mem::size_of::<RenameInfo>() + name.len() * 2;
+    let mut status = IoStatus::default();
+    // SAFETY: Fixed storage is eight-byte aligned and larger than the maximum
+    // header plus 255 UTF-16 units. All padding and ReplaceIfExists stay zero.
+    // Both handles, the status block and storage outlive the synchronous call.
+    let result = unsafe {
+        let info = storage.as_mut_ptr().cast::<RenameInfo>();
+        std::ptr::addr_of_mut!((*info).root).write(parent.as_raw_handle());
+        std::ptr::addr_of_mut!((*info).length).write((name.len() * 2) as u32);
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!((*info).name).cast::<u16>(),
+            name.len(),
+        );
+        NtSetInformationFile(
+            source.as_raw_handle(),
+            &mut status,
+            info.cast(),
+            bytes as u32,
+            10,
+        )
+    };
+    if result < 0 {
+        // SAFETY: This pure conversion takes no pointers or owned resources.
+        return Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(result) } as i32,
+        ));
+    }
+    if result != 0 {
+        return Err(io::Error::other(
+            "native directory rename outcome is uncertain",
+        ));
+    }
+    Ok(())
+}
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -168,6 +357,18 @@ mod tests {
             bytes.extend_from_slice(&unit.to_ne_bytes());
         }
         bytes
+    }
+
+    #[test]
+    fn nt_create_structures_match_the_documented_pointer_width_layout() {
+        let pointer = std::mem::size_of::<usize>();
+        assert_eq!(std::mem::size_of::<UnicodeString>(), pointer * 2);
+        assert_eq!(std::mem::offset_of!(UnicodeString, buffer), pointer);
+        assert_eq!(std::mem::size_of::<ObjectAttributes>(), pointer * 6);
+        assert_eq!(std::mem::offset_of!(ObjectAttributes, root), pointer);
+        assert_eq!(std::mem::size_of::<IoStatus>(), pointer * 2);
+        assert_eq!(std::mem::offset_of!(RenameInfo, root), pointer);
+        assert_eq!(std::mem::offset_of!(RenameInfo, name), pointer * 2 + 4);
     }
 
     #[test]

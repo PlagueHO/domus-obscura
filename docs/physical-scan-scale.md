@@ -83,6 +83,13 @@ link points to a generated outside sentinel. The share catalog exposes every
 eligible initial file and one separate upload file. Acquisition writes to a
 different generated root. It does not change the scanned input files.
 
+The small-profile runtime limit is 600 seconds locally and on Linux CI.
+Windows GitHub Actions uses 900 seconds so forced recovery can wait for the real
+300-second worker-request lease after the earlier workload. The evidence report
+records the selected limit. The 1 GiB storage limit, 512 MiB memory limit and
+correctness checks do not change. Full-profile runs still require separate
+admission and obey the earlier of their approved runtime and absolute deadline.
+
 The worker uses one scan lane, one acquisition lane and a queue capacity of 64.
 The fixture runs three downloads, one upload and one complete share listing
 through one account login. Local transfer files contain 128 generated MP3 audio

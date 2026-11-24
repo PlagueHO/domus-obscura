@@ -24,6 +24,26 @@ async function control(page: Page, path: string, data = {}) {
   expect(response.ok(), await response.text()).toBe(true);
 }
 
+async function submitCommand(page: Page, path: string, button: string) {
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" && new URL(response.url()).pathname === path,
+    ),
+    page.getByRole("button", { name: button, exact: true }).click(),
+  ]);
+  expect(response.status()).toBe(204);
+}
+
+async function resumePublication(page: Page) {
+  await page.getByRole("button", { name: "Review publication recovery", exact: true }).click();
+  await submitCommand(
+    page,
+    "/api/jobs/1/plans/2/publication/resume",
+    "Confirm publication recovery",
+  );
+}
+
 test.beforeEach(async ({ page, browser }) => {
   test.info().annotations.push({ type: "browser-version", description: browser.version() });
   await control(page, "/__fixture/reset");
@@ -140,7 +160,7 @@ for (const format of ["mp3", "flac"] as const) {
       await selectAlbums(page, 1, backup, format === "mp3" ? "mp3_cbr320" : "flac_lossless");
       await approveAlbum(page);
       if (backup) await control(page, "/__fixture/backup", { offline: true });
-      await page.getByRole("button", { name: "Start Download", exact: true }).click();
+      await submitCommand(page, "/api/jobs/1/plans/2/run", "Start Download");
       if (backup) {
         await expect(
           page.getByText("The primary is verified. The backup is not complete.", { exact: false }),
@@ -149,12 +169,7 @@ for (const format of ["mp3", "flac"] as const) {
         const premature = await page.request.get("/__fixture/verify/1/2");
         expect(premature.status()).toBe(409);
         await control(page, "/__fixture/backup", { offline: false });
-        await page
-          .getByRole("button", { name: "Review publication recovery", exact: true })
-          .click();
-        await page
-          .getByRole("button", { name: "Confirm publication recovery", exact: true })
-          .click();
+        await resumePublication(page);
       }
       await expect(
         page.getByText("The server reports this request complete.", { exact: false }),
@@ -352,8 +367,7 @@ test("backup pending keeps the verified main separate and resumes retained publi
   ).toBeVisible();
   await verifyOutput(page, 1, { backup: true, pending: true });
   await control(page, "/__fixture/backup", { offline: false });
-  await page.getByRole("button", { name: "Review publication recovery", exact: true }).click();
-  await page.getByRole("button", { name: "Confirm publication recovery", exact: true }).click();
+  await resumePublication(page);
   await expect(
     page.getByText("The server reports this request complete.", { exact: false }),
   ).toBeVisible();

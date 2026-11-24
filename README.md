@@ -13,6 +13,11 @@ Local binary execution is the current baseline. Native Windows installer/service
 and Linux systemd deployment remain deferred; their documented commands are not
 installed-service or reboot acceptance.
 
+See [Docker distribution](docs/docker.md) for the local image, proposed container
+layout, and current acceptance limits. Docker uses
+the existing loopback and native binding rules. Both host checks and public
+registry access are required before Docker release acceptance.
+
 Use [issue #1](https://github.com/PlagueHO/domus-obscura/issues/1) as the V1 scope
 tracker and remaining-work checklist. Follow its linked delivery issues rather
 than treating the foundation PR as complete V1. Future tag rules, conversational

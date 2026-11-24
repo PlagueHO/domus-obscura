@@ -100,7 +100,8 @@ same durable scan lane, location target and fenced scan claims. Resume only the
 same scope. A direct-folder refresh lists child directories but never scans them,
 marks descendants absent, or renews whole-location coverage.
 
-Metadata inspection reads MP3 and FLAC through no-follow native handles. Keep the
+Metadata inspection reads MP3 and FLAC through no-follow native handles or exact
+paired retained-file leases. Both use the same bounded parser. Keep the
 8 MiB metadata envelope, 1024 frame/comment limit, 64 KiB MPEG probe, 64 KiB saved
 tag body and 128-entry persistence batches. Unsupported formats and failed tags
 remain indexed files with diagnostics. Do not reuse browsing header evidence as
@@ -124,6 +125,133 @@ image processing; never serve original bytes or open arbitrary asset paths.
 Do not extract embedded covers or infer artwork approval from a preview.
 
 ## Commands
+
+`domus media-adapter-check <absolute-adapter-configuration-file>` validates and
+retains the separate native media configuration without opening SQLite or a
+listener. `domus media-adapter <absolute-adapter-configuration-file>` explicitly
+starts its mutually authenticated loopback listener in the foreground.
+Both use `ConfigurationService`. Keep the document directly in its selected
+private application-role root. All TLS references stay beneath that root.
+Never create or rebind missing roots, generate pairing material automatically,
+install a service, or use these commands to activate production library routing.
+See [native adapter configuration](docker.md#configure-the-native-foreground-adapter).
+Selected media roots default to read-only. Explicit `writable_roots` grants
+enable only the implemented new-output, exact verification, retained-source move
+and removal primitives. They do not approve an
+application operation or connect publication and recovery routing.
+Keep a move's actual source handle through verification and no-replace rename.
+Ordinary read leases and selected roots cannot be move sources. Close child
+leases first. Use the typed checked operations to renew claims and check approval
+between bounded name-check and hash requests. Lost replies remain uncertain;
+never reopen a source pathname and replay a move automatically.
+Existing-file verification never exposes a write lease or repairs bytes.
+Removal requires full verification on the actual DELETE-capable source.
+Commit exact per-file deletion intent before the final request. Ordinary files
+cannot authorize removal. Directory removal requires an empty retained source;
+never recurse or delete a selected root. An occupied or delete-pending name
+is not confirmed absence. Reconcile uncertain effects through the existing
+application journal, not a second adapter journal.
+
+`domus media-client-check --host <absolute-host-file> <absolute-media-client-file>`
+loads the paired read-only client through `ConfigurationService` without
+contacting the peer. Keep the document and its relative TLS inputs in admitted
+private local storage. This command does not select or register a provider.
+`domus media-root-check --host <absolute-host-file> <absolute-media-client-file>
+<root-id>` explicitly opens and closes one selected root. Missing peers, changed
+selections and unselected root IDs fail. Neither command registers a location,
+scans or activates production library routing. Native and paired clients share
+opaque session leases; cancellation or connection loss requires explicit
+recreation. Never fall back to a guest-mounted path. See
+[paired client configuration](docker.md#configure-the-paired-client).
+
+The operator-managed host field `paired_media` selects a private `client_file`
+and exact `topology_assurances`. Keep foreign roots out of the local `storage`
+inventory. Never create dummy native paths or admit foreign identities to local
+filesystem opens. `domus media-storage-digest --host <absolute-host-file>
+<absolute-media-client-file>` prints the combined logical review digest without
+contacting the peer. It does not grant topology approval. Every paired-media to
+local-root pair and adapter-private to local-media pair needs its exact reviewed
+root revisions and digest. Known overlap always fails.
+
+`domus location-add-paired --host <absolute-host-file> <selected-root-id>
+<main|backup>` requires writable system settings and explicitly registers a
+selected paired root. Authenticate and close the root before opening its database
+transaction. Persist only immutable logical meaning. Never save a connection,
+native peer path or credential. `domus location-check --host <absolute-host-file>
+<location-id>` uses that binding for availability without scanning or changing
+coverage. The API's existing availability operation uses the same path on its
+blocking executor. Do not put network I/O in a database transaction.
+Paired scans and direct-folder refreshes use bounded parent-relative listing and
+observed child opens. Renew claims and check stop before network operations and
+metadata reads. Keep network I/O out of persistence transactions. Transport,
+authority and claim failures must not become file-only tag errors or successful
+coverage. Failed paired enumeration, including an unsafe entry, remains
+incomplete. Never replace it with an empty page or a native guest-path open.
+Indexed JPEG input and read-only sharing use retained native or paired objects.
+Keep the exact indexed JPEG evidence and compressed-input limit before strict
+image processing. Sharing persists the complete logical root and directory
+identity chain. Reopens must match that chain without adopting replacements.
+Require an exact single hard link and recheck retained file evidence. Keep
+publication receipts, content hashes and visibility guards active through upload
+completion, including resume. Network I/O stays on blocking use-case threads and
+outside SQLite transactions. Both adapter ends require the hard-link observation
+field; do not add a compatibility default. Mutations still reject paired roots
+through native-only accessors. Do not bypass those refusals.
+Replacement previews use the common operation-owned media I/O boundary and one
+native/paired snapshot implementation. Keep the 1001-file flat-folder bound,
+exact full hashes, single links and unchanged observations. Paired children
+retain their actual parents on the same connection. Never reopen a reviewed
+move source through a second connection. Retained directory status checks and
+listing rewinds must reject changed evidence and failed enumeration. A new
+listing is not permission to clear incomplete coverage. Ordinary named-ancestor
+checks use that same connection and its original native parent handles. Compare
+each exact component and directory identity through no-follow parent-relative
+opens, including the selected root's ancestry. This check allocates no additional
+paired lease and does not enumerate unrelated siblings. Keep typed local claim
+and stop checkpoints before and after the bounded request. Reviewed move sources
+and their descendants cannot use
+ordinary named-ancestor reopens; verify them through the actual source instead.
+Media I/O must remain outside SQLite transactions. These previews grant no write
+or restore approval.
+Publication owns its parent and album through this same I/O boundary. Keep
+the selected connection through creation, copying, manifest verification and
+publication. Namespace checks must not create another paired connection.
+Restore inspection and journalled folder moves also retain a common I/O parent.
+Check its named ancestry before each restore step. Preserve the exact old/new
+identities, complete manifests and sync-before-record boundaries.
+Publication, restore and media recovery enter through selected media admission.
+Private scratch recovery still uses local native admission and its staging lock.
+Media recovery keeps one connection through layout checks and journalled removal.
+Only successful exact lookups can confirm absence. Sync the parent before
+recording removal, including reconciliation after an interrupted effect.
+Publication folder creation, copy and verification use this same I/O
+boundary. Folder creation retains its original Windows handle instead of
+creating and reopening a pathname. Existing names are never adopted by creation.
+Publication and restore moves also use the shared boundary. Close ordinary source
+handles first. Verify the exact identity and complete approved manifest through
+the actual move-capable source, then rename that same handle without replacement.
+Move sources and their descendants remain read-only. Retire a failed operation;
+do not reopen a source pathname to retry an uncertain effect.
+Parent synchronization also uses the shared boundary, including before restore
+reconciliation records after an interrupted rename. Paired synchronization is
+an explicit writable-directory request. Directory status stays passive. Reject
+changed evidence, failed enumeration and reviewed move sources. Preserve the
+native Windows directory-sync no-op; this is not power-loss proof.
+Journalled recovery removal also uses the shared boundary. Verify the complete
+file through its actual removal-capable source. Check the current recovery
+version between bounded reads and before removal. Remove directories only when
+they are exact and empty. Require final absence; an occupied or delete-pending
+name is not success. Keep the existing per-item intent and completion records.
+The paired copy implementation keeps partial files unchanged and verifies exact
+existing bytes without a write stream. Write grants remain required.
+Its checkpoints run while the paired session is locked. Use only local claim,
+approval, stop and staging checks in those callbacks. Never reenter media I/O or
+start another async runtime there. Keep complete namespace checks before and
+after the operation. Publication callbacks keep these local checks separate
+from namespace checks. Production folder selection and recovery inspection still
+use native-only accessors. Do not enable paired publication before those
+operations share the same retained-handle boundary and journal.
+See [selected paired roots](docker.md#select-and-register-a-paired-library-root).
 
 `domus storage-root-inspect <absolute-provider-boundary> <provider-scope>
 <root-id> <binding-revision> <role> <library-relative-path>` prints a complete
@@ -248,7 +376,10 @@ the long-lived scheduler and its bounded operation lanes use dedicated threads.
 
 Use the pinned tools from rust-toolchain.toml, .node-version, and package.json.
 
-On Windows, use the launcher. It finds a complete installed MSVC environment. It accepts the installed stable Rust alias only when its exact version matches the pin.
+On Windows, use the launcher. It finds a complete installed MSVC environment.
+It selects the installed exact release from `rust-toolchain.toml`. It accepts
+the stable alias only when its exact version matches that pin. `rustup run`
+selects the compiler without installing a missing toolchain.
 
 The launcher runs frontend scripts directly in `frontend`. This avoids workspace
 task-state paths that exceed Windows path limits in long worktree paths.

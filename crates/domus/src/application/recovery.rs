@@ -1,5 +1,5 @@
 use crate::domain::{LibraryPath, Page};
-use crate::infrastructure::filesystem::{LibraryDirectory, native_file_identity, sync_directory};
+use crate::infrastructure::filesystem::media_adapter::MediaDirectoryIo;
 use crate::infrastructure::recovery_files;
 use crate::infrastructure::staging::StagingRoot;
 use crate::infrastructure::store::{
@@ -94,8 +94,10 @@ fn retained_evidence(
     };
     let root = open_root(store, &binding)?;
     verify_visible(&root, &binding)?;
-    let directory = root.open_directory(&LibraryPath::parse(&binding.directory)?)?;
-    let (identity, files) = recovery_files::inspect(&directory, &expected)?;
+    let directory = root
+        .open_directory(&LibraryPath::parse(&binding.directory)?)?
+        .ok_or_else(conflict)?;
+    let (identity, files) = directory.inspect_recovery(&expected)?;
     if identity != binding.directory_identity {
         return Err(conflict());
     }
@@ -315,18 +317,24 @@ fn directory_item(ordinal: usize, artifact: i64, path: &str, identity: &str) -> 
     )
 }
 
-fn open_root(store: &Store, binding: &RecoveryBinding) -> Result<LibraryDirectory> {
-    let root = store.open_registered_root(&binding.root, &binding.root_kind)?;
+fn open_root(store: &Store, binding: &RecoveryBinding) -> Result<MediaDirectoryIo> {
+    let root = if binding.root_kind == "media" {
+        store.media_directory_io(&binding.root)?
+    } else {
+        MediaDirectoryIo::native(store.open_registered_root(&binding.root, &binding.root_kind)?)?
+    };
     if store.root_binding_identity(&binding.root, &binding.root_kind)? != binding.root_identity {
         return Err(conflict());
     }
     Ok(root)
 }
 
-fn verify_visible(root: &LibraryDirectory, binding: &RecoveryBinding) -> Result<()> {
+fn verify_visible(root: &MediaDirectoryIo, binding: &RecoveryBinding) -> Result<()> {
     if let Some(path) = &binding.visible_directory {
-        let directory = root.open_directory(&LibraryPath::parse(path)?)?;
-        let (identity, _) = recovery_files::inspect(&directory, &binding.visible_files)?;
+        let directory = root
+            .open_directory(&LibraryPath::parse(path)?)?
+            .ok_or_else(conflict)?;
+        let (identity, _) = directory.inspect_recovery(&binding.visible_files)?;
         if Some(&identity) != binding.visible_identity.as_ref() {
             return Err(conflict());
         }
@@ -361,12 +369,14 @@ fn verify_published_destinations(store: &Store, job: i64, version: i64) -> Resul
             ));
         }
         let expected = store.recovery_publication_files(destination.id)?;
-        let root = store.open_registered_root(&destination.root, "media")?;
+        let root = store.media_directory_io(&destination.root)?;
         if store.root_binding_identity(&destination.root, "media")? != destination.root_identity {
             return Err(conflict());
         }
-        let directory = root.open_directory(&LibraryPath::parse(&destination.relative_folder)?)?;
-        let (identity, _) = recovery_files::inspect(&directory, &expected)?;
+        let directory = root
+            .open_directory(&LibraryPath::parse(&destination.relative_folder)?)?
+            .ok_or_else(conflict)?;
+        let (identity, _) = directory.inspect_recovery(&expected)?;
         if Some(identity) != destination.album_identity {
             return Err(conflict());
         }
@@ -396,7 +406,12 @@ fn run_operation(
         for item in &items {
             store.check_worker_stop()?;
             store.check_recovery_current(&entry)?;
-            let checked_root = open_root(store, &binding)?;
+            if store.root_binding_identity(&binding.root, &binding.root_kind)?
+                != binding.root_identity
+            {
+                return Err(conflict());
+            }
+            root.check_named_directory(&|| Ok(()))?;
             if let Some(staging) = staging {
                 staging.cleanup_directory(store)?;
             }
@@ -404,27 +419,31 @@ fn run_operation(
                 continue;
             }
             let path = LibraryPath::parse(&item.path)?;
-            let parent = checked_root.open_directory(&LibraryPath::parse(path.parent())?)?;
-            if path.parent() == binding.directory
-                && native_file_identity(&parent.directory_file()?)? != binding.directory_identity
+            let parent = root
+                .open_directory(&LibraryPath::parse(path.parent())?)?
+                .ok_or_else(conflict)?;
+            if path.parent() == binding.directory && parent.identity() != binding.directory_identity
             {
                 return Err(conflict());
             }
-            let existing = parent.symlink_metadata(&item.file.name);
+            parent.check_named_directory(&|| Ok(()))?;
+            let existing = parent.recovery_entry(&item.file.name)?;
+            #[cfg(test)]
+            let removed_now = existing.is_some();
             match existing {
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound && item.state == "removing" => {
-                }
-                Err(error) => return Err(error.into()),
-                Ok(_) => {
+                None if item.state == "removing" => {}
+                None => return Err(conflict()),
+                Some(_) => {
                     if item.state == "planned" {
-                        // Verify before intent, then the native adapter verifies again before unlink.
+                        // Verify before intent, then verify again through the actual removal source.
                         if item.directory {
-                            let dir = parent.open_dir_nofollow(&item.file.name)?;
-                            if native_file_identity(&dir.directory_file()?)? != item.file.identity {
+                            let dir = parent
+                                .open_directory(&LibraryPath::parse(&item.file.name)?)?
+                                .ok_or_else(conflict)?;
+                            if dir.identity() != item.file.identity {
                                 return Err(conflict());
                             }
-                        } else if recovery_files::file(&parent, &item.file.name)? != item.file {
+                        } else if parent.recovery_file(&item.file.name)? != item.file {
                             return Err(conflict());
                         }
                         store.recovery_item_state(
@@ -434,25 +453,36 @@ fn run_operation(
                             "removing",
                         )?;
                     }
+                    let checkpoint = || {
+                        store.check_worker_stop().map_err(std::io::Error::other)?;
+                        store
+                            .check_recovery_current(&entry)
+                            .map_err(std::io::Error::other)
+                    };
                     if item.directory {
-                        recovery_files::remove_directory(
-                            &parent,
+                        parent.remove_recovery_directory(
                             &item.file.name,
                             &item.file.identity,
+                            &checkpoint,
                         )?;
                     } else {
-                        recovery_files::delete_file(&parent, &item.file)?;
-                    }
-                    sync_directory(&parent)?;
-                    #[cfg(test)]
-                    if operation.kind != "cleanup" {
-                        crate::crash_tests::checkpoint(if item.directory {
-                            "deletion_directory_removed"
-                        } else {
-                            "deletion_file_removed"
-                        })?;
+                        parent.remove_recovery_file(&item.file, &checkpoint)?;
                     }
                 }
+            }
+            parent.sync_checked(&|| {
+                store.check_worker_stop().map_err(std::io::Error::other)?;
+                store
+                    .check_recovery_current(&entry)
+                    .map_err(std::io::Error::other)
+            })?;
+            #[cfg(test)]
+            if removed_now && operation.kind != "cleanup" {
+                crate::crash_tests::checkpoint(if item.directory {
+                    "deletion_directory_removed"
+                } else {
+                    "deletion_file_removed"
+                })?;
             }
             store.recovery_item_state(operation.id, item.ordinal, "removing", "removed")?;
         }
@@ -477,35 +507,29 @@ fn run_operation(
 }
 
 fn check_layout(
-    root: &LibraryDirectory,
+    root: &MediaDirectoryIo,
     binding: &RecoveryBinding,
     items: &[RecoveryItem],
 ) -> Result<()> {
-    let directory = match root.open_directory(&LibraryPath::parse(&binding.directory)?) {
-        Ok(directory) => Some(directory),
-        Err(Error::Io(error))
-            if error.kind() == std::io::ErrorKind::NotFound
-                && items.iter().any(|i| {
-                    i.directory && i.path == binding.directory && i.state != "planned"
-                })
-                && items
-                    .iter()
-                    .filter(|i| i.path.starts_with(&format!("{}/", binding.directory)))
-                    .all(|i| i.state == "removed") =>
+    let directory = match root.open_directory(&LibraryPath::parse(&binding.directory)?)? {
+        Some(directory) => Some(directory),
+        None if items
+            .iter()
+            .any(|i| i.directory && i.path == binding.directory && i.state != "planned")
+            && items
+                .iter()
+                .filter(|i| i.path.starts_with(&format!("{}/", binding.directory)))
+                .all(|i| i.state == "removed") =>
         {
             None
         }
-        Err(error) => return Err(error),
+        None => return Err(conflict()),
     };
     if let Some(directory) = directory {
-        if native_file_identity(&directory.directory_file()?)? != binding.directory_identity {
+        if directory.identity() != binding.directory_identity {
             return Err(conflict());
         }
-        for (index, child) in directory.entries()?.enumerate() {
-            if index >= 1002 {
-                return Err(conflict());
-            }
-            let name = child?.file_name().into_string().map_err(|_| conflict())?;
+        for name in directory.recovery_names()? {
             let path = format!("{}/{}", binding.directory, name);
             if !items.iter().any(|i| i.path == path && i.state != "removed") {
                 return Err(conflict());
@@ -514,25 +538,22 @@ fn check_layout(
     }
     for item in items.iter().filter(|i| !i.directory) {
         let path = LibraryPath::parse(&item.path)?;
-        let parent = match root.open_directory(&LibraryPath::parse(path.parent())?) {
-            Ok(parent) => parent,
-            Err(Error::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound && item.state == "removed" =>
-            {
+        let parent = match root.open_directory(&LibraryPath::parse(path.parent())?)? {
+            Some(parent) => parent,
+            None if item.state == "removed" => {
                 continue;
             }
-            Err(error) => return Err(error),
+            None => return Err(conflict()),
         };
-        match parent.symlink_metadata(&item.file.name) {
-            Ok(_) if item.state == "removed" => return Err(conflict()),
-            Ok(_) => {
-                if recovery_files::file(&parent, &item.file.name)? != item.file {
+        match parent.recovery_entry(&item.file.name)? {
+            Some(_) if item.state == "removed" => return Err(conflict()),
+            Some(_) => {
+                if parent.recovery_file(&item.file.name)? != item.file {
                     return Err(conflict());
                 }
             }
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound && item.state != "planned" => {}
-            Err(error) => return Err(error.into()),
+            None if item.state != "planned" => {}
+            None => return Err(conflict()),
         }
     }
     Ok(())

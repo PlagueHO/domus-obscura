@@ -7,6 +7,8 @@ mod linux_package;
 mod native_jpeg;
 mod package;
 mod physical_scale;
+#[path = "../../crates/domus/tests/support/private.rs"]
+mod private_fixture;
 use package as windows_package;
 
 fn execute(program: &str, args: &[&str]) -> Result<(), Box<dyn Error>> {
@@ -106,12 +108,29 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             windows_package::verify(root)?;
             windows_package::smoke(root)
         }
-        Some("package-linux") => {
+        Some("package-linux") | Some("package-linux-container") => {
+            let revision = if args[0] == "package-linux-container" {
+                if args.len() != 2 {
+                    return Err("package-linux-container requires the source commit".into());
+                }
+                Some(args[1].as_str())
+            } else {
+                None
+            };
             linux_package::require_host()?;
             toolchains()?;
             contracts(true)?;
             pnpm(&["--dir", "frontend", "run", "build:app"])?;
-            linux_package::build()
+            linux_package::build(revision)
+        }
+        Some("docker-build") | Some("docker-check") => {
+            execute(
+                if cfg!(windows) { "python" } else { "python3" },
+                &[
+                    "packaging/docker/check.py",
+                    if args[0] == "docker-build" { "build" } else { "check" },
+                ],
+            )
         }
         Some("package-check-linux") => {
             linux_package::require_host()?;
@@ -127,13 +146,32 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             pnpm(&["--dir", "frontend", "run", "build:local-test"])?;
             cargo(&["build", "--locked", "--package", "domus", "--example", "local_test"])
         }
-        Some("browser-build") | Some("browser") => {
+        Some("browser-build") => {
             toolchains()?;
             pnpm(&["--dir", "frontend", "run", "build:app"])?;
             cargo(&["build", "--locked", "--package", "domus", "--example", "browser_workflow"])?;
-            if args[0] == "browser" {
-                pnpm(&["--dir", "frontend", "run", "test:browser"])?;
-            }
+            Ok(())
+        }
+        Some("browser") => {
+            toolchains()?;
+            let assets = private_fixture::tempdir()?;
+            let result = (|| {
+                let path = assets.path().to_str().ok_or("browser fixture path is not UTF-8")?;
+                pnpm(&["--dir", "frontend", "run", "build:app", "--outDir", path])?;
+                cargo(&["build", "--locked", "--package", "domus", "--example", "browser_workflow"])?;
+                let program = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
+                println!("> {program} --dir frontend run test:browser");
+                let status = Command::new(program)
+                    .args(["--dir", "frontend", "run", "test:browser"])
+                    .env("DOMUS_BROWSER_WORKFLOW_ASSETS", assets.path())
+                    .status()?;
+                if !status.success() {
+                    return Err(format!("{program} failed with {status}").into());
+                }
+                Ok::<_, Box<dyn Error>>(())
+            })();
+            assets.close()?;
+            result?;
             Ok(())
         }
         Some("fmt") => {
@@ -194,7 +232,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         Some("scale-physical") => physical_scale::run(false),
         Some("scale-physical-full") => physical_scale::run(true),
         _ => Err(
-            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|scale-physical|scale-physical-full|build|smoke|package-windows|installer-windows|package-check|package-linux|package-check-linux|local-test|local-test-build|browser-build|browser>"
+            "Usage: cargo task <bootstrap|contracts|dev|fmt|check|test [filter]|scale|scale-physical|scale-physical-full|build|smoke|package-windows|installer-windows|package-check|package-linux|package-linux-container <commit>|package-check-linux|docker-build|docker-check|local-test|local-test-build|browser-build|browser>"
                 .into(),
         ),
     }

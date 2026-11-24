@@ -41,12 +41,7 @@ pub fn refresh_library_folder(
     location_id: i64,
     folder: &LibraryPath,
 ) -> Result<i64> {
-    if folder.as_str().split('/').any(|part| {
-        let part = part.to_ascii_lowercase();
-        part.starts_with(".domus-pending-")
-            || part.starts_with(".domus-retained-")
-            || part.starts_with(".domus-restore-")
-    }) {
+    if folder.as_str().split('/').any(recovery_folder) {
         return Err(Error::InvalidInput(
             "publication recovery folders cannot be scanned".into(),
         ));
@@ -71,19 +66,19 @@ fn run_scan(store: &mut Store, claim: ScanClaim) -> Result<i64> {
     Ok(claim.id)
 }
 
-/// Open only the configured root and verify its saved native binding. This is
+/// Open only the configured root and verify its saved selected binding. This is
 /// a point-in-time availability check, not a scan or authority for later I/O.
 /// Keep cached coverage and entries unchanged when the root is unavailable.
+/// Run this synchronous native/network operation outside the async executor.
 pub fn check_location_availability(store: &Store, location_id: i64) -> Result<()> {
     let location = store.location(location_id)?;
-    store.open_registered_root(&location.root, "media")?;
+    store.check_registered_media(&location.root)?;
     Ok(())
 }
 
 /// Read a saved JPEG asset by entry identity. No raw bytes are served until the
 /// caller passes them through the bounded image service.
 pub fn library_jpeg_input(store: &Store, location: i64, entry: i64) -> Result<Vec<u8>> {
-    use crate::infrastructure::{filesystem::native_file_identity, library_metadata::modified_ns};
     use std::io::Read;
     let saved = store.library_file(location, entry)?;
     let path = LibraryPath::parse(&saved.relative_path)?;
@@ -102,20 +97,19 @@ pub fn library_jpeg_input(store: &Store, location: i64, entry: i64) -> Result<Ve
         ));
     }
     let location = store.location(location)?;
-    let root = store.open_registered_root(&location.root, "media")?;
-    let parent = root.open_directory(&LibraryPath::parse(path.parent())?)?;
+    let parent =
+        store.read_registered_directory(&location.root, &LibraryPath::parse(path.parent())?)?;
     let name = path
         .as_str()
         .rsplit('/')
         .next()
         .ok_or_else(|| Error::InvalidInput("missing asset name".into()))?;
     let mut file = parent.open_file(std::ffi::OsStr::new(name))?;
-    let matches = |file: &std::fs::File| -> Result<bool> {
-        Ok(
-            Some(native_file_identity(file)?) == saved.metadata.native_identity
-                && modified_ns(file)? == saved.metadata.modified_ns
-                && i64::try_from(file.metadata()?.len()).ok() == saved.metadata.size,
-        )
+    let matches = |file: &crate::infrastructure::filesystem::ReadFile| -> Result<bool> {
+        let evidence = file.evidence()?;
+        Ok(Some(evidence.identity) == saved.metadata.native_identity
+            && Some(evidence.modified) == saved.metadata.modified_ns
+            && i64::try_from(evidence.bytes).ok() == saved.metadata.size)
     };
     if !matches(&file)? {
         return Err(Error::Conflict(
@@ -175,6 +169,9 @@ fn flush(store: &mut Store, claim: &ScanClaim, batch: &mut Vec<OwnedObservation>
 /// short transactions; no transaction spans filesystem I/O.
 fn observe(store: &mut Store, claim: &ScanClaim) -> Result<()> {
     let location = store.location(claim.location)?;
+    if let Some(mut media) = store.paired_media_session(&location.root)? {
+        return observe_paired(store, claim, &mut media);
+    }
     let root = store.open_registered_root(&location.root, "media")?;
     let mut batch = Vec::with_capacity(128);
     while let Some(directory) = store.next_directory(claim)? {
@@ -194,6 +191,83 @@ fn observe(store: &mut Store, claim: &ScanClaim) -> Result<()> {
     Ok(())
 }
 
+fn observe_paired(
+    store: &mut Store,
+    claim: &ScanClaim,
+    media: &mut crate::infrastructure::filesystem::media_adapter::BlockingMedia,
+) -> Result<()> {
+    use crate::infrastructure::filesystem::media_adapter::Kind;
+    let mut batch = Vec::with_capacity(128);
+    while let Some(directory) = store.next_directory(claim)? {
+        let mut chain = media.open_directory(&directory, &mut || {
+            store.check_worker_stop()?;
+            store.renew_scan(claim)
+        })?;
+        let opened = chain
+            .last()
+            .ok_or(Error::Internal("media ancestry is empty"))?;
+        loop {
+            store.check_worker_stop()?;
+            store.renew_scan(claim)?;
+            let page = media.page(opened)?;
+            for entry in page.entries {
+                if recovery_folder(&entry.name) {
+                    continue;
+                }
+                let relative = if directory.as_str().is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{}/{}", directory.as_str(), entry.name)
+                };
+                let path = LibraryPath::parse(&relative)?;
+                let metadata = if entry.observed.kind == Kind::File {
+                    Some(media.inspect_file(opened, &entry, &mut || {
+                        store.check_worker_stop()?;
+                        store.renew_scan(claim)
+                    })?)
+                } else {
+                    None
+                };
+                batch.push(OwnedObservation {
+                    path,
+                    kind: if entry.observed.kind == Kind::File {
+                        "file"
+                    } else {
+                        "directory"
+                    },
+                    size: if entry.observed.kind == Kind::File {
+                        Some(i64::try_from(entry.observed.length).map_err(|_| {
+                            Error::InvalidInput("file size exceeds SQLite range".into())
+                        })?)
+                    } else {
+                        None
+                    },
+                    modified_at: Some(i64::try_from(entry.observed.modified_seconds).map_err(
+                        |_| Error::InvalidInput("file timestamp exceeds SQLite range".into()),
+                    )?),
+                    metadata,
+                });
+            }
+            flush(store, claim, &mut batch)?;
+            if page.complete {
+                break;
+            }
+        }
+        media.close_directory(chain.remove(0))?;
+        store.complete_directory(claim, &directory)?;
+        #[cfg(test)]
+        crate::scale_tests::directory_completed(claim)?;
+    }
+    Ok(())
+}
+
+fn recovery_folder(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with(".domus-pending-")
+        || name.starts_with(".domus-retained-")
+        || name.starts_with(".domus-restore-")
+}
+
 fn observe_directory(
     store: &mut Store,
     claim: &ScanClaim,
@@ -208,11 +282,7 @@ fn observe_directory(
         let name = name
             .to_str()
             .ok_or_else(|| Error::InvalidInput("file path is not valid Unicode".into()))?;
-        let folded_name = name.to_ascii_lowercase();
-        if folded_name.starts_with(".domus-pending-")
-            || folded_name.starts_with(".domus-retained-")
-            || folded_name.starts_with(".domus-restore-")
-        {
+        if recovery_folder(name) {
             continue;
         }
         let relative = if directory.as_str().is_empty() {

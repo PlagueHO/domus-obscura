@@ -26,7 +26,7 @@ pub fn initialize_crypto() -> Result<()> {
 /// The supplied chain anchors this local check; HTTPS clients independently
 /// decide whether the certificate is trusted by their configured trust store.
 pub fn configuration(host: &str, certificate: &[u8], private_key: &[u8]) -> Result<RustlsConfig> {
-    checked_configuration(host, certificate, private_key, false)
+    checked_configuration(host, certificate, private_key, false, None)
 }
 
 /// Managed production candidates use independent public trust anchors, not a
@@ -36,7 +36,16 @@ pub fn managed_configuration(
     certificate: &[u8],
     private_key: &[u8],
 ) -> Result<RustlsConfig> {
-    checked_configuration(host, certificate, private_key, true)
+    checked_configuration(host, certificate, private_key, true, None)
+}
+
+pub(crate) fn authenticated_configuration(
+    host: &str,
+    certificate: &[u8],
+    private_key: &[u8],
+    verifier: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+) -> Result<RustlsConfig> {
+    checked_configuration(host, certificate, private_key, false, Some(verifier))
 }
 
 fn checked_configuration(
@@ -44,6 +53,7 @@ fn checked_configuration(
     certificate: &[u8],
     private_key: &[u8],
     public_trust: bool,
+    client_verifier: Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>,
 ) -> Result<RustlsConfig> {
     if certificate.len() > 262144 || private_key.len() > 16384 {
         return Err(Error::InvalidInput(
@@ -94,10 +104,14 @@ fn checked_configuration(
                 "TLS certificate is invalid, expired, or has the wrong hostname".into(),
             )
         })?;
-    let mut server = ServerConfig::builder_with_provider(provider)
+    let builder = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .map_err(|_| Error::InvalidInput("TLS protocol configuration failed".into()))?
-        .with_no_client_auth()
+        .map_err(|_| Error::InvalidInput("TLS protocol configuration failed".into()))?;
+    let builder = match client_verifier {
+        Some(verifier) => builder.with_client_cert_verifier(verifier),
+        None => builder.with_no_client_auth(),
+    };
+    let mut server = builder
         .with_single_cert(certificates, key)
         .map_err(|_| Error::InvalidInput("TLS certificate and private key do not match".into()))?;
     server.alpn_protocols = vec![b"http/1.1".to_vec()];

@@ -17,6 +17,11 @@ const USAGE: &str = "Usage:
   domus windows-service <api|worker> <absolute-configuration-file>
   domus windows-service-policy <api|worker> <enable|disable>
   domus configuration-check <absolute-configuration-file>
+  domus media-adapter-check <absolute-adapter-configuration-file>
+  domus media-adapter <absolute-adapter-configuration-file>
+  domus media-client-check --host <absolute-host-configuration-file> <absolute-media-client-file>
+  domus media-root-check --host <absolute-host-configuration-file> <absolute-media-client-file> <root-id>
+  domus media-storage-digest --host <absolute-host-configuration-file> <absolute-media-client-file>
   domus certificate-status <absolute-configuration-file>
   domus certificate-bootstrap <absolute-configuration-file>
   domus certificate-recover <absolute-configuration-file> <resume|pending|bindings|cleanup|cleanup-owned|archive|generation|restart>
@@ -57,6 +62,8 @@ const USAGE: &str = "Usage:
   domus question-answer --host <absolute-host-configuration-file> <question-id> <plan-version> <offered-choice>
   domus artwork-approve --host <absolute-host-configuration-file> <job-id> <plan-version> <candidate-id> <preview-sha256>
   domus location-add --host <absolute-host-configuration-file> <absolute-root> <main|backup>
+  domus location-add-paired --host <absolute-host-configuration-file> <selected-root-id> <main|backup>
+  domus location-check --host <absolute-host-configuration-file> <location-id>
   domus location --host <absolute-host-configuration-file> <location-id>
   domus root-identity <absolute-root>
   domus storage-root-inspect <absolute-provider-boundary> <provider-scope> <root-id> <binding-revision> <application|state|cache|staging|certificate|media> <library-relative-path>
@@ -83,7 +90,8 @@ service-call runs catalog discovery, metadata, artwork listing or image caching 
 It cannot approve plans, download audio or publish media.
 publish-new-once explicitly copies verified staging into new primary/backup album folders.
 It never replaces existing albums. Partial folders remain visible after failure.
-No command enables media sharing or media serving.
+media-adapter explicitly serves read-only selected media to its paired native client.
+It does not enable public media sharing or connect production library operations.
 The database must be outside every configured media root.";
 
 fn run(args: &[String]) -> Result<()> {
@@ -91,6 +99,56 @@ fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     match args {
+        [command, flag, host, configuration]
+            if command == "media-storage-digest" && flag == "--host" =>
+        {
+            let source = domus::infrastructure::server::configuration::ConfigurationService::open(
+                Path::new(host),
+            )?;
+            println!("{}", source.media_storage_digest(Path::new(configuration))?);
+        }
+        [command, flag, host, configuration]
+            if command == "media-client-check" && flag == "--host" =>
+        {
+            let source = domus::infrastructure::server::configuration::ConfigurationService::open(
+                Path::new(host),
+            )?;
+            source.prepare_media_client(Path::new(configuration))?;
+            println!("Media client configuration is valid; no peer connection opened.");
+        }
+        [command, flag, host, configuration, root]
+            if command == "media-root-check" && flag == "--host" =>
+        {
+            let source = domus::infrastructure::server::configuration::ConfigurationService::open(
+                Path::new(host),
+            )?;
+            let mut client = source.prepare_media_client(Path::new(configuration))?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(async {
+                    let directory = client.open_root(root).await?;
+                    client.close_directory(directory).await
+                })?;
+            println!("Selected media root is available; no scan or registration performed.");
+        }
+        [command, configuration]
+            if matches!(command.as_str(), "media-adapter" | "media-adapter-check") =>
+        {
+            let prepared = domus::infrastructure::server::configuration::ConfigurationService::prepare_media_adapter(
+                Path::new(configuration),
+            )?;
+            if command == "media-adapter-check" {
+                println!("Native media adapter configuration is valid; no listener started.");
+            } else {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .max_blocking_threads(8)
+                    .enable_all()
+                    .build()?
+                    .block_on(prepared.run())?;
+            }
+        }
         [command, configuration] if command == "configuration-check" => {
             let source = domus::infrastructure::server::configuration::ConfigurationService::open(
                 Path::new(configuration),

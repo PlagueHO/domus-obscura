@@ -119,8 +119,13 @@ The [V1 acceptance matrix](../../docs/v1-acceptance.md) separates these generate
 workflows from production-router, live-provider, and native service evidence.
 
 Use `.\dev.ps1 browser` on Windows or `cargo task browser` on Linux.
+This task builds the real UI in a fresh private temporary directory and keeps
+that directory until the checks finish. The fixture host receives this generated
+asset path through `DOMUS_BROWSER_WORKFLOW_ASSETS`. It still checks the actual
+opened files. No permission rule is disabled and no workspace ACL is changed.
 `browser-build` builds the connected app and the separate Rust example.
 `pnpm --dir frontend run test:browser` runs only the browser checks after that build.
+Direct checks require the workspace assets to pass the normal permission policy.
 Playwright configuration follows the
 [official test configuration reference](https://playwright.dev/docs/test-configuration).
 

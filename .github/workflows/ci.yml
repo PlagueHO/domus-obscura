@@ -100,6 +100,8 @@ jobs:
           }
           powershell.exe -NoProfile -File packaging\windows\service-helper-tests.ps1 -NsisCompiler $env:MAKENSIS
           if ($LASTEXITCODE -ne 0) { throw 'Service helper regressions failed.' }
+          powershell.exe -NoProfile -File scripts\dev-launcher-tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned launcher regressions failed.' }
       - name: Build Windows package and installer
         if: runner.os == 'Windows'
         shell: pwsh
