@@ -96,6 +96,8 @@ A failed secure configuration never falls back to anonymous HTTP.
 
 Use the same task names with `cargo task` on Linux. Run status, logs, stop, or
 restart in a second terminal. `dev-run` and `dev-restart` remain in the foreground.
+Stop requests are accepted during readiness checks and drain any children already
+started.
 Copilot opens the URL only after the launcher emits `Domus ready: <actual-origin>`.
 Readiness checks the exact built index bytes, anonymous session, active API
 configuration revision, and configured worker heartbeat. A running process is

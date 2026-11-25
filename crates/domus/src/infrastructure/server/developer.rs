@@ -6,6 +6,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -445,6 +446,7 @@ pub async fn run(path: &Path) -> Result<()> {
     let mut children = Vec::new();
     let mut logs = VecDeque::new();
     let stop = crate::infrastructure::lifecycle::Lifecycle::foreground();
+    let mut stop_connection = None;
     let startup = async {
         children.push(ManagedChild::start("api", path, source.active_revision())?);
         children
@@ -466,21 +468,27 @@ pub async fn run(path: &Path) -> Result<()> {
         }
         verify_browser(&source).await
     };
-    let startup = tokio::select! {
-        result = startup => result,
-        result = stop.stopped() => {
-            result?;
-            Err(Error::Conflict("developer startup stopped before readiness".into()))
-        }
-    };
+    let startup = await_startup(startup, &mut listener, &stop, &mut stop_connection).await;
     if let Err(error) = startup {
-        eprintln!("Developer startup failed: {error}");
-        drain(&mut children, &mut logs).await?;
+        if stop_connection.is_none() {
+            eprintln!("Developer startup failed: {error}");
+        }
+        let result = drain(&mut children, &mut logs).await;
+        tokio::task::block_in_place(|| drop(listener));
+        drop(_lock);
+        if let Some(mut connection) = stop_connection {
+            let response = match &result {
+                Ok(()) => json!({"state": "stopped"}),
+                Err(error) => json!({"state": "failed", "error": error.to_string()}),
+            };
+            write_response(&mut connection, response).await?;
+            return result;
+        }
+        result?;
         return Err(error);
     }
     println!("Domus ready: {}", source.active.origin);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
-    let mut stop_connection = None;
     let outcome = async { loop {
         tokio::select! {
             stopped = stop.stopped() => break stopped.map_err(Error::from),
@@ -539,6 +547,38 @@ pub async fn run(path: &Path) -> Result<()> {
         write_response(&mut connection, response).await?;
     }
     result
+}
+
+async fn await_startup(
+    startup: impl Future<Output = Result<()>>,
+    listener: &mut ControlListener,
+    stop: &crate::infrastructure::lifecycle::Lifecycle,
+    stop_connection: &mut Option<ControlConnection>,
+) -> Result<()> {
+    tokio::pin!(startup);
+    loop {
+        tokio::select! {
+            result = &mut startup => return result,
+            result = stop.stopped() => {
+                result?;
+                return Err(Error::Conflict("developer startup stopped before readiness".into()));
+            }
+            accepted = listener.accept() => match accepted {
+                Ok(mut connection) => {
+                    let request = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        read_command(&mut connection),
+                    ).await;
+                    if matches!(request, Ok(Ok(command)) if command == "stop") {
+                        *stop_connection = Some(connection);
+                        return Err(Error::Conflict("developer startup stopped before readiness".into()));
+                    }
+                    reply_to_control(&mut connection, json!({"state": "starting"})).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
 fn endpoint(path: &Path) -> Result<PathBuf> {
@@ -646,6 +686,9 @@ async fn read_response(stream: impl AsyncRead + Unpin) -> Result<Value> {
 }
 
 #[cfg(windows)]
+type ControlConnection = tokio::net::windows::named_pipe::NamedPipeServer;
+
+#[cfg(windows)]
 struct ControlListener {
     server: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
     path: PathBuf,
@@ -683,6 +726,9 @@ impl ControlListener {
             .ok_or(Error::Internal("local pipe listener missing"))
     }
 }
+
+#[cfg(unix)]
+type ControlConnection = tokio::net::UnixStream;
 
 #[cfg(unix)]
 struct ControlListener {
@@ -842,6 +888,35 @@ mod tests {
             assert!(read_command(&mut reader).await.is_err());
         }
         assert_eq!(read_command(&mut b"status\n".as_slice()).await?, "status");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn developer_control_stop_interrupts_pending_startup() -> Result<()> {
+        let fixture = crate::infrastructure::permissions::private_test_directory()?;
+        let configuration = fixture.path().join("config.json");
+        let mut listener = ControlListener::bind(&endpoint(&configuration)?)?;
+        let stop = crate::infrastructure::lifecycle::Lifecycle::controlled(|| Ok(()));
+        let mut stop_connection = None;
+        let client_configuration = configuration.clone();
+        let client = tokio::spawn(async move { control(&client_configuration, "stop").await });
+        let startup = await_startup(
+            std::future::pending::<Result<()>>(),
+            &mut listener,
+            &stop,
+            &mut stop_connection,
+        )
+        .await;
+        assert!(startup.is_err());
+        let mut connection = stop_connection
+            .take()
+            .ok_or(Error::Internal("startup stop connection missing"))?;
+        write_response(&mut connection, json!({"state": "stopped"})).await?;
+        drop(connection);
+        let response = client
+            .await
+            .map_err(|_| Error::Internal("startup stop client failed"))??;
+        assert_eq!(response["state"], "stopped");
         Ok(())
     }
 

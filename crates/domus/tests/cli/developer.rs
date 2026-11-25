@@ -1,5 +1,6 @@
 use super::*;
 use std::io::{BufRead, BufReader};
+use std::ops::{Deref, DerefMut};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,91 @@ fn checked(args: &[&str]) -> Result<serde_json::Value, Box<dyn std::error::Error
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn run_with(
+    executable: &std::path::Path,
+    args: &[&str],
+) -> Result<std::process::Output, std::io::Error> {
+    Command::new(executable).args(args).output()
+}
+
+struct SupervisorGuard {
+    process: std::process::Child,
+    configuration: std::path::PathBuf,
+}
+
+impl SupervisorGuard {
+    fn start(configuration: &str) -> Result<Self, std::io::Error> {
+        let process = Command::new(env!("CARGO_BIN_EXE_domus"))
+            .args(["developer-run", configuration])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        Ok(Self {
+            process,
+            configuration: configuration.into(),
+        })
+    }
+}
+
+impl Deref for SupervisorGuard {
+    type Target = std::process::Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.process
+    }
+}
+
+impl DerefMut for SupervisorGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.process
+    }
+}
+
+impl Drop for SupervisorGuard {
+    fn drop(&mut self) {
+        if matches!(self.process.try_wait(), Ok(Some(_))) {
+            return;
+        }
+
+        let stop = Command::new(env!("CARGO_BIN_EXE_domus"))
+            .args([
+                "developer-control",
+                self.configuration.to_string_lossy().as_ref(),
+                "stop",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Err(error) = stop {
+            eprintln!("Could not request supervisor shutdown during test cleanup: {error}");
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match self.process.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => {
+                    eprintln!(
+                        "Supervisor did not stop during test cleanup; terminating its process."
+                    );
+                    if let Err(error) = self.process.kill() {
+                        eprintln!("Could not terminate the test supervisor: {error}");
+                    }
+                    let _ = self.process.wait();
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("Could not wait for the test supervisor: {error}");
+                    return;
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -27,25 +113,34 @@ fn developer_https_processes_validate_tls_and_retain_state()
 
 fn real_processes(https: bool) -> Result<(), Box<dyn std::error::Error>> {
     let fixture = tempdir()?;
+    let binary_directory = fixture.path().join("bin");
+    let assets = binary_directory.join("browser");
+    std::fs::create_dir_all(assets.join("assets"))?;
+    std::fs::write(
+        assets.join("index.html"),
+        b"<!doctype html><title>real developer fixture</title>",
+    )?;
+    let executable = binary_directory.join(
+        std::path::Path::new(env!("CARGO_BIN_EXE_domus"))
+            .file_name()
+            .ok_or("binary name missing")?,
+    );
+    std::fs::copy(env!("CARGO_BIN_EXE_domus"), &executable)?;
     let application = fixture.path().join("application");
-    let output = run(&[
-        "developer-init",
-        "--confirm-fresh",
-        application.to_str().ok_or("path")?,
-    ])?;
+    let output = run_with(
+        &executable,
+        &[
+            "developer-init",
+            "--confirm-fresh",
+            application.to_str().ok_or("path")?,
+        ],
+    )?;
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let path = application.join("config.json");
-    let assets = fixture.path().join("browser");
-    std::fs::create_dir(&assets)?;
-    std::fs::create_dir(assets.join("assets"))?;
-    std::fs::write(
-        assets.join("index.html"),
-        b"<!doctype html><title>real developer fixture</title>",
-    )?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     drop(listener);
@@ -135,11 +230,7 @@ fn real_processes(https: bool) -> Result<(), Box<dyn std::error::Error>> {
     drop(worker_lock);
 
     for iteration in 0..2 {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_domus"))
-            .args(["developer-run", configuration])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+        let mut child = SupervisorGuard::start(configuration)?;
         let stdout = child.stdout.take().ok_or("stdout")?;
         let (sender, receiver) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
