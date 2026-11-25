@@ -3,6 +3,7 @@ use std::error::Error;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
+mod developer;
 mod linux_package;
 mod native_jpeg;
 mod package;
@@ -87,6 +88,7 @@ fn toolchains() -> Result<(), Box<dyn Error>> {
 fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     env::set_current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))?;
     match args.first().map(String::as_str) {
+        Some(task) if task.starts_with("dev-") => developer::run(args),
         Some("bootstrap") => {
             toolchains()?;
             pnpm(&["install", "--frozen-lockfile"])
@@ -124,12 +126,9 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             linux_package::build(revision)
         }
         Some("docker-build") | Some("docker-check") => {
-            execute(
-                if cfg!(windows) { "python" } else { "python3" },
-                &[
-                    "packaging/docker/check.py",
-                    if args[0] == "docker-build" { "build" } else { "check" },
-                ],
+            developer::package(
+                if args[0] == "docker-build" { "build" } else { "check" },
+                &args[1..],
             )
         }
         Some("package-check-linux") => {

@@ -17,6 +17,10 @@ const USAGE: &str = "Usage:
   domus windows-service <api|worker> <absolute-configuration-file>
   domus windows-service-policy <api|worker> <enable|disable>
   domus configuration-check <absolute-configuration-file>
+  domus developer-init --confirm-fresh <absolute-new-storage-root>
+  domus developer-inspect <absolute-configuration-file>
+  domus developer-run <absolute-configuration-file>
+  domus developer-control <absolute-configuration-file> <stop|status|logs>
   domus media-adapter-check <absolute-adapter-configuration-file>
   domus media-adapter <absolute-adapter-configuration-file>
   domus media-client-check --host <absolute-host-configuration-file> <absolute-media-client-file>
@@ -102,6 +106,80 @@ fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     match args {
+        [command, path] if command == "developer-inspect" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&domus::infrastructure::server::developer::inspect(
+                    Path::new(path)
+                )?)?
+            );
+        }
+        [command, flag, root] if command == "developer-init" && flag == "--confirm-fresh" => {
+            println!(
+                "{}",
+                domus::infrastructure::server::developer::setup(Path::new(root))?.display()
+            );
+        }
+        [command, path] if command == "developer-run" => {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?
+                .block_on(domus::infrastructure::server::developer::run(Path::new(
+                    path,
+                )))?;
+        }
+        [command, path] if command == "developer-probe-info" => {
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &domus::infrastructure::server::developer::remote_probe_info(Path::new(path))?
+                )?
+            );
+        }
+        [command] if command == "developer-probe-remote" => {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .take(2 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 2 * 1024 * 1024 {
+                return Err(Error::InvalidInput(
+                    "developer probe input exceeded its bound".into(),
+                ));
+            }
+            let probe = serde_json::from_slice(&bytes)?;
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?
+                .block_on(domus::infrastructure::server::developer::verify_probe(
+                    probe,
+                ))?;
+            println!("Host application and selected runtime revision verified.");
+        }
+        [command, path, operation] if command == "developer-control" => {
+            let value = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?
+                .block_on(domus::infrastructure::server::developer::control(
+                    Path::new(path),
+                    operation,
+                ))?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        [command, role, path, revision] if command == "developer-child" => {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?
+                .block_on(domus::infrastructure::server::developer::child(
+                    role,
+                    Path::new(path),
+                    revision,
+                ))?;
+        }
         [command, flag, host, configuration]
             if command == "media-storage-digest" && flag == "--host" =>
         {

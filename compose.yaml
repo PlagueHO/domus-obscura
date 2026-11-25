@@ -19,6 +19,9 @@ services:
   api:
     <<: *runtime
     command: [serve, --storage-root, /storage/application]
+    environment:
+      DOMUS_HEALTH_URL: ${DOMUS_HEALTH_URL:-http://127.0.0.1:8080/}
+      DOMUS_HEALTH_CA: ${DOMUS_HEALTH_CA:-}
   worker:
     <<: *runtime
     profiles: [worker]

@@ -15,11 +15,11 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-    SE_FILE_OBJECT, SetSecurityInfo,
+    SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, OBJECT_SECURITY_INFORMATION,
-    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -28,6 +28,62 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 const MAX_SDDL_UNITS: usize = 131_072;
+
+pub(super) struct PipeSecurity {
+    _descriptor: LocalAllocation,
+    attributes: SECURITY_ATTRIBUTES,
+}
+
+impl PipeSecurity {
+    pub(super) fn new(sddl: &str) -> io::Result<Self> {
+        if sddl.len() > MAX_SDDL_UNITS || sddl.contains('\0') {
+            return Err(invalid("invalid pipe security descriptor"));
+        }
+        let text: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: the bounded NUL-terminated input and SDK output remain live.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let descriptor = LocalAllocation::from_sdk(descriptor)?;
+        Ok(Self {
+            attributes: SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor.0.as_ptr(),
+                bInheritHandle: 0,
+            },
+            _descriptor: descriptor,
+        })
+    }
+
+    pub(super) fn attributes(&mut self) -> *mut c_void {
+        ptr::from_mut(&mut self.attributes).cast()
+    }
+}
+
+pub(super) fn create_named_pipe(
+    path: &std::path::Path,
+    sddl: &str,
+    first: bool,
+) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    let mut security = PipeSecurity::new(sddl)?;
+    // SAFETY: the initialized native attributes and descriptor remain owned
+    // through synchronous creation. Child handle inheritance is disabled.
+    unsafe {
+        tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(first)
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(path, security.attributes())
+    }
+}
 
 #[repr(C)]
 struct DeviceInformation {
@@ -180,14 +236,18 @@ fn status(code: u32) -> io::Result<()> {
     }
 }
 
-fn read(file: &File, information: OBJECT_SECURITY_INFORMATION) -> io::Result<LocalAllocation> {
+fn read_kind(
+    file: &impl AsRawHandle,
+    information: OBJECT_SECURITY_INFORMATION,
+    kind: SE_OBJECT_TYPE,
+) -> io::Result<LocalAllocation> {
     let mut descriptor = ptr::null_mut();
     // SAFETY: the File borrow retains the handle. All optional outputs are null;
     // the SDK initializes the descriptor allocation on success.
     status(unsafe {
         GetSecurityInfo(
             file.as_raw_handle(),
-            SE_FILE_OBJECT,
+            kind,
             information,
             ptr::null_mut(),
             ptr::null_mut(),
@@ -199,9 +259,21 @@ fn read(file: &File, information: OBJECT_SECURITY_INFORMATION) -> io::Result<Loc
     LocalAllocation::from_sdk(descriptor)
 }
 
-pub(super) fn descriptor(file: &File) -> io::Result<String> {
+pub(super) fn descriptor(file: &impl AsRawHandle) -> io::Result<String> {
+    descriptor_kind(file, SE_FILE_OBJECT)
+}
+
+pub(super) fn pipe_descriptor(file: &impl AsRawHandle) -> io::Result<String> {
+    descriptor_kind(file, SE_KERNEL_OBJECT)
+}
+
+fn read(file: &File, information: OBJECT_SECURITY_INFORMATION) -> io::Result<LocalAllocation> {
+    read_kind(file, information, SE_FILE_OBJECT)
+}
+
+fn descriptor_kind(file: &impl AsRawHandle, kind: SE_OBJECT_TYPE) -> io::Result<String> {
     let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
-    let descriptor = read(file, information)?;
+    let descriptor = read_kind(file, information, kind)?;
     let mut text = ptr::null_mut();
     // SAFETY: the descriptor is SDK-owned and remains live through conversion.
     // The SDK supplies a NUL-terminated UTF-16 allocation. Its optional buffer

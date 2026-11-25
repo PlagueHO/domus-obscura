@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Directory,
     [ValidateRange(1024, 65535)]
-    [int] $Port = 8443
+    [int] $Port = 8443,
+    [switch] $UseExistingParent,
+    [switch] $SingleUserHttp
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,21 +23,41 @@ if (-not [IO.Path]::IsPathFullyQualified($Directory)) {
     throw 'Directory must be an absolute path to a new folder.'
 }
 $root = [IO.Path]::GetFullPath($Directory)
-if (Test-Path -LiteralPath $root) {
+if ((Test-Path -LiteralPath $root) -and -not $UseExistingParent) {
     throw 'The setup folder already exists. Choose a new folder. Nothing was changed.'
 }
 $parent = Split-Path -Parent $root
 if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
     throw 'The parent folder must already exist.'
 }
-New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+$checkedParent = if ($UseExistingParent) { $root } else { $parent }
+& $executable root-identity $checkedParent | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw 'The setup parent failed native no-follow inspection. Nothing was changed.'
+}
+$application = Join-Path $root 'application'
+$library = Join-Path $root $(if ($UseExistingParent) { 'developer-library' } else { 'library' })
+foreach ($target in @($application, $library)) {
+    if (Test-Path -LiteralPath $target) {
+        throw "Fresh setup target exists: $target. Nothing was changed."
+    }
+}
+if ($UseExistingParent) {
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        throw 'The selected existing parent must be a directory.'
+    }
+} else {
+    New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+}
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
 $acl = [Security.AccessControl.DirectorySecurity]::new()
 $acl.SetOwner($identity)
 $acl.SetAccessRuleProtection($true, $false)
 $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
     $identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-Set-Acl -LiteralPath $root -AclObject $acl
+if (-not $UseExistingParent) { Set-Acl -LiteralPath $root -AclObject $acl }
+New-Item -ItemType Directory -Path $application -ErrorAction Stop | Out-Null
+Set-Acl -LiteralPath $application -AclObject $acl
 
 function Invoke-Domus([string[]] $Arguments) {
     & $executable @Arguments
@@ -44,13 +66,13 @@ function Invoke-Domus([string[]] $Arguments) {
     }
 }
 
-$application = Join-Path $root 'application'
 Invoke-Domus -Arguments @('init', '--storage-root', $application)
 $configurationFile = Join-Path $application 'config.json'
-foreach ($directory in @((Join-Path $root 'library'), (Join-Path $application 'staging'), (Join-Path $application 'secrets'))) {
+foreach ($directory in @($library, (Join-Path $application 'staging'), (Join-Path $application 'secrets'))) {
     New-Item -ItemType Directory -Path $directory | Out-Null
 }
 
+if (-not $SingleUserHttp) {
 $key = [Security.Cryptography.ECDsa]::Create([Security.Cryptography.ECCurve+NamedCurves]::nistP256)
 try {
     $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
@@ -78,16 +100,19 @@ try {
 } finally {
     $key.Dispose()
 }
+}
 
 $configuration = Get-Content -LiteralPath $configurationFile -Raw | ConvertFrom-Json -AsHashtable
-$configuration.environment = 'development'
+$configuration.environment = if ($SingleUserHttp) { 'single_user' } else { 'development' }
 $configuration.system_settings_read_only = $false
 $configuration.listen = "127.0.0.1:$Port"
-$configuration.origin = "https://localhost:$Port"
-$configuration.certificate_file = Join-Path $application 'secrets\certificate.pem'
-$configuration.private_key_file = Join-Path $application 'secrets\private-key.pem'
+$configuration.origin = if ($SingleUserHttp) { "http://127.0.0.1:$Port" } else { "https://localhost:$Port" }
+if (-not $SingleUserHttp) {
+    $configuration.certificate_file = Join-Path $application 'secrets\certificate.pem'
+    $configuration.private_key_file = Join-Path $application 'secrets\private-key.pem'
+}
+$configuration.production_worker = @{ queue_capacity = 64; acquisition = $null }
 $configuration.browser_assets = $assets
-$library = Join-Path $root 'library'
 $mediaRoot = Invoke-Domus -Arguments @(
     'storage-root-inspect', $library, 'library', 'main', '1', 'media', ''
 ) | ConvertFrom-Json -AsHashtable
@@ -146,7 +171,7 @@ if ($null -eq $settings) {
     Invoke-Domus -Arguments @('settings-save', '--host', $configurationFile, '0', $settingsFile)
 }
 Write-Host "Created anonymous development setup: $root"
-Write-Host "Certificate trust was NOT changed. Certificate valid for 90 days."
-Write-Host "Open https://localhost:$Port after starting:"
-Write-Host "& '$executable' api-preview '$configurationFile'"
+Write-Host "Certificate trust was NOT changed."
+Write-Host "Open $($configuration.origin) after starting:"
+Write-Host "& '$executable' developer-run '$configurationFile'"
 Write-Host 'Live acquisition is NOT enabled. See docs/local-development.md.'
