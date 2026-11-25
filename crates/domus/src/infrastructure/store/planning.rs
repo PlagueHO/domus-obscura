@@ -120,7 +120,7 @@ impl Store {
         settings: &OutputSettings,
     ) -> Result<i64> {
         settings.validate()?;
-        let body = bounded_json(settings, 16384)?;
+        let body = bounded_json(settings, OutputSettings::MAXIMUM_JSON_BYTES)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -289,6 +289,7 @@ impl Store {
             ));
         }
         let mut effective = settings.settings.clone();
+        effective.tag_policy.get_or_insert_default();
         effective.format = profile.format();
         let outputs = request.edition.preview(&effective)?;
         let destinations = locations
@@ -314,7 +315,11 @@ impl Store {
         }
         Ok(PreparedPlan {
             edition: request.edition.clone(),
-            settings: settings.settings,
+            settings: {
+                let mut frozen = settings.settings;
+                frozen.tag_policy = effective.tag_policy;
+                frozen
+            },
             format: effective.format,
             audio: Some(AudioSelection::new(profile)),
             outputs,

@@ -1084,7 +1084,10 @@ fn local_json_input_is_bounded_before_parsing() -> Result<(), Box<dyn std::error
         .ok_or("application directory")?
         .join("large-settings.json");
     let host = host.to_str().ok_or("host path")?;
-    std::fs::write(&file, vec![b' '; 16385])?;
+    std::fs::write(
+        &file,
+        vec![b' '; domus::domain::OutputSettings::MAXIMUM_JSON_BYTES + 1],
+    )?;
     let output = run(&[
         "settings-save",
         "--host",
@@ -1094,6 +1097,19 @@ fn local_json_input_is_bounded_before_parsing() -> Result<(), Box<dyn std::error
     ])?;
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)?.contains("exceeds its size limit"));
+    std::fs::write(
+        &file,
+        vec![b' '; domus::domain::OutputSettings::MAXIMUM_JSON_BYTES],
+    )?;
+    let output = run(&[
+        "settings-save",
+        "--host",
+        host,
+        "0",
+        file.to_str().ok_or("non-Unicode file")?,
+    ])?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("invalid JSON input"));
     std::fs::write(&file, br#""never-echo-private-input""#)?;
     let output = run(&[
         "settings-save",

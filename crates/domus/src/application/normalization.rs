@@ -35,6 +35,7 @@ pub fn normalize_album(
     staging.check_store(store)?;
     store.renew_claim(claim, 300)?;
     store.job_work_boundary(claim)?;
+    prepare_tag_review(store, claim, staging)?;
     let run = match store.normalization_run(claim)? {
         Some(run) => run,
         None => store.begin_normalization(claim, cover)?,
@@ -110,6 +111,73 @@ pub fn normalize_album(
     crate::crash_tests::checkpoint("normalization_handoff")?;
     store.finish_normalization(claim, run.id)?;
     Ok(run.id)
+}
+
+fn prepare_tag_review(store: &mut Store, claim: &JobClaim, staging: &StagingRoot) -> Result<()> {
+    let plan = store.plan(claim.job(), claim.plan_version())?;
+    let Some(policy) = &plan.plan.settings.tag_policy else {
+        return Ok(());
+    };
+    if !policy.needs_review() {
+        return Ok(());
+    }
+    if let Some(review) = store.tag_review(claim.job(), claim.plan_version(), Page::new(0, 1)?)? {
+        return if review.approved && review.resumed {
+            Ok(())
+        } else {
+            Err(Error::WorkerWaiting)
+        };
+    }
+    let cover = store.approved_artwork(claim.job(), claim.plan_version())?;
+    let mut tracks = Vec::new();
+    for transfer in store.tag_review_inputs(claim)? {
+        store.renew_claim(claim, 300)?;
+        store.job_work_boundary(claim)?;
+        let (source, output, input_sha256) = {
+            let heartbeat = ClaimHeartbeat {
+                store,
+                claim,
+                renewed: Cell::new(Instant::now()),
+            };
+            let tick = || heartbeat.tick();
+            let mut input = staging
+                .retained_input(&transfer, &tick)?
+                .ok_or_else(|| Error::Conflict("received tag review input is missing".into()))?;
+            let source =
+                crate::infrastructure::media::source_tags(&mut input, plan.plan.format, policy)?;
+            let output = policy.resolve_for_format(&source, plan.plan.format)?;
+            let verified = staging
+                .retained_input(&transfer, &tick)?
+                .ok_or_else(|| Error::Conflict("received tag review input is missing".into()))?;
+            if input.sha256() != verified.sha256() {
+                return Err(Error::Conflict("tag review source changed".into()));
+            }
+            (
+                source,
+                output,
+                input
+                    .sha256()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            )
+        };
+        tracks.push(crate::infrastructure::store::TagReviewTrack {
+            track_number: transfer.track_number,
+            transfer_id: transfer.id,
+            input_bytes: transfer.expected_bytes,
+            input_sha256,
+            source,
+            output,
+        });
+    }
+    let cover_hash = cover
+        .sha256()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    store.save_tag_review(claim, &cover_hash, &tracks)?;
+    Err(Error::WorkerWaiting)
 }
 
 #[cfg(test)]

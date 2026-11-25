@@ -12,6 +12,7 @@ mod questions;
 mod replacement;
 pub mod sharing;
 pub mod sources;
+pub mod tag_policy;
 mod templates;
 
 pub use audio::{
@@ -30,4 +31,5 @@ pub use paths::{LibraryPath, Page};
 pub use planning::{ArtworkSize, EditionSelection, OutputSettings, PlannedTrack};
 pub use questions::{ArtworkIssue, Question};
 pub use replacement::ReplacementAction;
+pub use tag_policy::{OptionalTags, TagMode, TagPolicy, TagRule};
 pub use templates::{AudioFormat, OutputPreview, OutputTemplate, TrackMetadata};

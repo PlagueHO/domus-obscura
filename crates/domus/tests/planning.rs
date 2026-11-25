@@ -1,7 +1,7 @@
 use domus::application::{add_location, scan_location};
 use domus::domain::{
     ArtworkSize, AudioFormat, EditionSelection, JobState, LibraryPath, OutputSettings,
-    PlannedTrack, Question,
+    PlannedTrack, Question, TagMode, TagPolicy, TagRule,
 };
 use domus::infrastructure::store::{Observation, PlanRequest, Store};
 use std::path::PathBuf;
@@ -570,6 +570,47 @@ fn revised_plans_invalidate_approval_and_questions_without_losing_history() -> T
         vec![initial.version, initial.version, revised.version]
     );
     assert!(fixture.store.question(question)?.answer.is_none());
+    Ok(())
+}
+
+#[test]
+fn settings_accept_combined_maximum_tag_updates() -> TestResult {
+    let value = "\\".repeat(4096);
+    let settings = OutputSettings {
+        tag_policy: Some(TagPolicy {
+            genre: TagRule::Update {
+                value: value.clone(),
+                mode: TagMode::Automatic,
+            },
+            composer: TagRule::Update {
+                value: value.clone(),
+                mode: TagMode::Review,
+            },
+            comment: TagRule::Update {
+                value: value.clone(),
+                mode: TagMode::Automatic,
+            },
+            copyright: TagRule::Update {
+                value: format!("2026 {}", "\\".repeat(4091)),
+                mode: TagMode::Automatic,
+            },
+        }),
+        ..OutputSettings::default()
+    };
+    let serialized = serde_json::to_vec(&settings)?;
+    assert!(serialized.len() > 16_384);
+    assert!(serialized.len() <= OutputSettings::MAXIMUM_JSON_BYTES);
+
+    let mut fixture = Fixture::new()?;
+    assert_eq!(fixture.store.save_settings(Some(1), &settings)?, 2);
+    assert_eq!(
+        fixture
+            .store
+            .settings()?
+            .ok_or("missing settings")?
+            .settings,
+        settings
+    );
     Ok(())
 }
 

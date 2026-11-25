@@ -22,6 +22,7 @@ import { BackendConfiguration, ConfigurationCard } from "./BackendConfiguration"
 import { LocalMatches } from "./LocalMatches";
 import { AudioProfileSelect, audioProfileLabel, outputWithAudioPolicy } from "./audio-profiles";
 import { SelectAlbum } from "./AlbumSelection";
+import { defaultTagPolicy, FrozenTagPolicy, TagPolicyFields } from "./TagPolicy";
 
 export function ReleaseCard({ release }: { release: CatalogReleaseSummary }) {
   return <AlbumCard release={release} />;
@@ -552,6 +553,7 @@ export function Settings({
                         <code>{settings.settings.template.filename}</code>
                       </dd>
                     </dl>
+                    <FrozenTagPolicy policy={settings.settings.tag_policy ?? defaultTagPolicy()} />
                   </>
                 ) : (
                   <SystemOutputForm
@@ -737,6 +739,11 @@ function SystemOutputForm({
           }
         />
       </label>
+      <TagPolicyFields
+        policy={draft.tag_policy ?? defaultTagPolicy()}
+        disabled={saving}
+        onChange={(tag_policy) => setDraft((current) => ({ ...current, tag_policy }))}
+      />
       <label>
         Track filename template
         <input

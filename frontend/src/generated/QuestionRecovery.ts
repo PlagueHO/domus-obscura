@@ -2,4 +2,4 @@
 import type { ArtworkDecision } from "./ArtworkDecision";
 import type { JobControl } from "./JobControl";
 
-export type QuestionRecovery = { "kind": "artwork", decision: ArtworkDecision, } | { "kind": "job_control", control: JobControl, } | { "kind": "album_restore", destination_id: number, location_id: number, state: string, } | { "kind": "manual" };
+export type QuestionRecovery = { "kind": "tags", job_id: number, plan_version: number, } | { "kind": "artwork", decision: ArtworkDecision, } | { "kind": "job_control", control: JobControl, } | { "kind": "album_restore", destination_id: number, location_id: number, state: string, } | { "kind": "manual" };

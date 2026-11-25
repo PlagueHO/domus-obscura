@@ -15,12 +15,14 @@ mod publication;
 mod service_acceptance;
 #[path = "staging.rs"]
 mod staging;
+mod tag_policy;
 
 #[test]
 fn normalization_profiles_legacy_plan_and_receipt_recover_without_new_fields() -> TestResult {
     let mut fixture = Fixture::build(AudioFormat::Mp3, true)?;
     let mut legacy = fixture.store.plan(fixture.job, fixture.version)?;
     legacy.plan.audio = None;
+    legacy.plan.settings.tag_policy = None;
     let body = serde_json::to_string(&legacy.plan)?;
     let raw = Connection::open(&fixture.database)?;
     // Reproduce a pre-upgrade immutable record, not an application mutation.
@@ -381,7 +383,7 @@ fn normalization_resumes_and_schema_nine_and_ten_upgrades_preserve_file_proofs()
     fixture.store = Store::open_existing(&fixture.database)?;
     fixture.bind_roots()?;
     let version: i64 = raw.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 31);
+    assert_eq!(version, 33);
     let selected = fixture.store.prepare_artwork(
         fixture.job,
         fixture.version,

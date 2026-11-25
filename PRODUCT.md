@@ -343,17 +343,47 @@ required by an approved plan or recovery. Preserve existing evidence bindings,
 freshness checks and provider limits when moving current caches to this service.
 Test cache behavior independently of React and live providers.
 
-## Planned Tag Update, Retention and Removal Rules
+## Tag Update, Retention and Removal Rules
 
-The user requires future configurable rules for tags to update, tags to retain
-unchanged and tags to remove. This policy is not implemented. Current
-normalization writes a fresh supported tag set from the frozen exact release
-and approved cover; it does not retain other source tags.
+Shared output settings configure Genre, Composer, Comment and Copyright for MP3
+and FLAC. Each tag has an explicit Update, Retain or Remove action. Update uses
+one fixed administrator-supplied value. Update and Remove can use Automatic or
+Review mode. Retain always requires Review. All four default to Automatic Remove.
+The existing release-derived tags and approved artwork stay locked.
 
-Keep these three actions explicit. Freeze the effective policy with the plan,
-show its effects before approval and verify the written tags against that policy.
-Retained tags must not bypass metadata validation or required output rules.
-Do not change current tag behavior until the supported rules are agreed.
+Each new plan freezes its effective policy. Show fixed values, removal rules and
+the review requirement before plan approval. Automatic rules execute under this
+approval; they do not approve downloads, source selection, artwork or replacement.
+Settings changes cannot alter saved plans or receipts. Legacy plans without tag
+policy retain their original release-only behavior.
+
+When any rule requires review, finish the sealed input transfers, then save an
+exact per-track source/output snapshot and pause before normalization. One album
+approval binds the complete manifest, plan, policy, source hashes and approved
+cover. Applying that approval restores the validating state. Starting the worker
+remains separate. Generic question answers cannot approve or resume tag work.
+Automatic rules do not inspect discarded source text. The review labels these
+source fields as not inspected, not absent.
+
+Retain preserves decoded text without trimming, not original metadata bytes.
+Accept one non-empty value per field within 4,096 UTF-8 bytes. Reject duplicates,
+control characters, invalid encodings, unsupported variants and exceeded limits.
+Missing fields remain absent. MP3 retention reads supported ID3v2.3/v2.4 fields;
+it never falls back to ID3v1 or APE. Comment retention requires one comment with
+an empty description and preserves its supported language code. FLAC uses
+case-insensitive GENRE, COMPOSER, COMMENT and COPYRIGHT Vorbis field names.
+Update comments use language `eng` and an empty description for MP3. Copyright
+text must start with a four-digit year and a space.
+The first release accepts unflagged ID3v2.3/v2.4 headers and frames, with Latin-1,
+UTF-8 where permitted, or supported strict UTF-16 text. Flagged, compressed,
+encrypted or ambiguous source metadata produces an explicit error when review
+needs it. Metadata inspection is limited to 8 MiB and 1,024 entries.
+
+Normalization still builds fresh metadata in private staging. It verifies the
+resolved optional tags, required release metadata, exact cover and unchanged
+encoded audio. Other source tags, ReplayGain, lyrics, ratings, arbitrary custom
+fields, extra artwork and legacy containers are removed. Rule expressions,
+per-track edits, extra formats and existing-library tag editing are not included.
 
 ## Image Size Setting and Cached Variants
 

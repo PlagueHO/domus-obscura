@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
+mod tag_input;
+pub use tag_input::source_tags;
 
 const MAX_METADATA: usize = 8 * 1024 * 1024;
 pub const NORMALIZATION_PROFILE: u8 = 1;
@@ -137,6 +139,34 @@ fn id3_metadata(tags: &TrackTags, cover: &CoverJpeg) -> Result<Vec<u8>> {
         }
         extended(&mut tag, "DATE", date);
     }
+    if let Some(optional) = &tags.optional_tags {
+        for (name, value) in [
+            ("TCON", &optional.genre),
+            ("TCOM", &optional.composer),
+            ("TCOP", &optional.copyright),
+        ] {
+            if let Some(value) = value {
+                text(&mut tag, name, value);
+            }
+        }
+        if let Some(value) = &optional.comment {
+            tag.add_frame(
+                Frame::with_content(
+                    "COMM",
+                    Content::Comment(id3::frame::Comment {
+                        lang: optional.comment_language.clone().ok_or_else(|| {
+                            Error::InvalidInput(
+                                "MP3 comment needs its validated language code".into(),
+                            )
+                        })?,
+                        description: String::new(),
+                        text: value.clone(),
+                    }),
+                )
+                .set_encoding(Some(Encoding::UTF16)),
+            );
+        }
+    }
     for (name, value) in [
         ("MusicBrainz Album Id", tags.release_id.clone()),
         (
@@ -222,6 +252,18 @@ fn flac_metadata(tags: &TrackTags, cover: &CoverJpeg, stream_info: &[u8; 34]) ->
     ];
     if let Some(date) = &tags.date {
         entries.push(("DATE", date.clone()));
+    }
+    if let Some(optional) = &tags.optional_tags {
+        for (key, value) in [
+            ("GENRE", &optional.genre),
+            ("COMPOSER", &optional.composer),
+            ("COMMENT", &optional.comment),
+            ("COPYRIGHT", &optional.copyright),
+        ] {
+            if let Some(value) = value {
+                entries.push((key, value.clone()));
+            }
+        }
     }
     for (key, values) in [
         ("MUSICBRAINZ_ARTISTID", &tags.artist_ids),
@@ -350,6 +392,24 @@ pub fn normalize_audio_with_profile(
         return Err(Error::Conflict(
             "normalized audio differs from the validated source".into(),
         ));
+    }
+    if let Some(expected) = &tags.optional_tags {
+        let retention = crate::domain::TagPolicy {
+            genre: crate::domain::TagRule::Retain {},
+            composer: crate::domain::TagRule::Retain {},
+            comment: crate::domain::TagRule::Retain {},
+            copyright: crate::domain::TagRule::Retain {},
+        };
+        let actual = source_tags(destination, format, &retention)?;
+        let mut expected = expected.clone();
+        if format == AudioFormat::Flac {
+            expected.comment_language = None;
+        }
+        if actual != expected {
+            return Err(Error::Conflict(
+                "written optional tags differ from the frozen recipe".into(),
+            ));
+        }
     }
     let expected_hash = format!("{:x}", complete_hash.finalize());
     destination.seek(SeekFrom::Start(0))?;

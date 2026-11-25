@@ -3,11 +3,14 @@ import type { ArtworkSize } from "./ArtworkSize";
 import type { AudioFormat } from "./AudioFormat";
 import type { AudioPolicy } from "./AudioPolicy";
 import type { OutputTemplate } from "./OutputTemplate";
+import type { TagPolicy } from "./TagPolicy";
 
 /**
  * Administrator-controlled policy for the shared library, not per-user preferences.
  * Plans freeze a settings version so later system changes cannot alter approved work.
  * `format` is preferred; MP3 means verified 320 kbps CBR and FLAC is lossless.
  * A missing accepted set preserves both legacy formats.
+ * A missing `tag_policy` preserves legacy release-only recipes. New plans
+ * freeze the explicit default without rewriting a saved settings version.
  */
-export type OutputSettings = { format: AudioFormat, accepted_formats: Array<AudioFormat> | null, audio_policy?: AudioPolicy | null, template: OutputTemplate, artwork_size: ArtworkSize | null, };
+export type OutputSettings = { tag_policy?: TagPolicy | null, format: AudioFormat, accepted_formats: Array<AudioFormat> | null, audio_policy?: AudioPolicy | null, template: OutputTemplate, artwork_size: ArtworkSize | null, };

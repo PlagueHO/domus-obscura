@@ -33,6 +33,7 @@ struct Fixture {
 
 #[derive(Default)]
 struct FixtureInputs {
+    tag_policy: Option<domus::domain::TagPolicy>,
     profile: Option<domus::domain::AudioProfile>,
     directories: Option<[TempDir; 3]>,
     source: Option<Vec<u8>>,
@@ -283,7 +284,7 @@ impl Fixture {
             scan_location(&mut store, id)?;
             locations.push(id);
         }
-        let settings = if let Some(profile) = profile {
+        let mut settings = if let Some(profile) = profile {
             OutputSettings {
                 format,
                 accepted_formats: Some(vec![format]),
@@ -297,6 +298,7 @@ impl Fixture {
         } else {
             OutputSettings::default()
         };
+        settings.tag_policy = inputs.tag_policy;
         store.save_settings(None, &settings)?;
         let job = store.enqueue(1)?;
         let body = release_body(Some("2024-02"))?;

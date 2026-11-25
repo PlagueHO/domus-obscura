@@ -59,6 +59,9 @@ const USAGE: &str = "Usage:
   domus artwork-check --host <absolute-host-configuration-file> <job-id> <plan-version>
   domus artwork-question --host <absolute-host-configuration-file> <question-id>
   domus artwork-resume --host <absolute-host-configuration-file> <question-id> <plan-version>
+  domus tag-review --host <absolute-host-configuration-file> <job-id> <plan-version> <after> <limit>
+  domus tag-review-approve --host <absolute-host-configuration-file> <job-id> <plan-version> <sha256>
+  domus tag-review-resume --host <absolute-host-configuration-file> <job-id> <plan-version> <sha256>
   domus question-answer --host <absolute-host-configuration-file> <question-id> <plan-version> <offered-choice>
   domus artwork-approve --host <absolute-host-configuration-file> <job-id> <plan-version> <candidate-id> <preview-sha256>
   domus location-add --host <absolute-host-configuration-file> <absolute-root> <main|backup>
@@ -600,6 +603,13 @@ fn run(args: &[String]) -> Result<()> {
                     OutputSettings::export_to_string(&config),
                 ),
                 ("PlannedTrack.ts", PlannedTrack::export_to_string(&config)),
+                ("TagPolicy.ts", domus::domain::TagPolicy::export_to_string(&config)),
+                ("TagRule.ts", domus::domain::TagRule::export_to_string(&config)),
+                ("TagMode.ts", domus::domain::TagMode::export_to_string(&config)),
+                ("OptionalTags.ts", domus::domain::OptionalTags::export_to_string(&config)),
+                ("TagReview.ts", domus::infrastructure::store::TagReview::export_to_string(&config)),
+                ("TagReviewTrack.ts", domus::infrastructure::store::TagReviewTrack::export_to_string(&config)),
+                ("TagReviewCommand.ts", domus::infrastructure::api::TagReviewCommand::export_to_string(&config)),
                 (
                     "EditionSelection.ts",
                     EditionSelection::export_to_string(&config),

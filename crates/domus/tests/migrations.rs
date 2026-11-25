@@ -21,7 +21,78 @@ fn schema_one_upgrades_without_losing_existing_jobs() -> Result<(), Box<dyn std:
     drop(store);
     let current = rusqlite::Connection::open(&database)?;
     let version: i64 = current.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 31);
+    assert_eq!(version, 33);
+    Ok(())
+}
+
+#[test]
+fn settings_limit_upgrade_preserves_immutable_versions_and_plan_references()
+-> Result<(), Box<dyn std::error::Error>> {
+    use domus::domain::OutputSettings;
+
+    let data = tempdir()?;
+    let database = data.path().join("settings-upgrade.db");
+    let old = rusqlite::Connection::open(&database)?;
+    let mut migrations =
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+    migrations.sort();
+    for migration in migrations.iter().take(32) {
+        old.execute_batch(&std::fs::read_to_string(migration)?)?;
+    }
+    let old_settings = serde_json::to_string(&OutputSettings::default())?;
+    old.execute_batch("PRAGMA foreign_keys=ON; PRAGMA user_version=32;")?;
+    old.execute(
+        "INSERT INTO settings_versions(id,body,created_at) VALUES (17,?1,123)",
+        [&old_settings],
+    )?;
+    old.execute(
+        "INSERT INTO jobs(id,plan_version,state) VALUES (8,1,'queued')",
+        [],
+    )?;
+    old.execute(
+        "INSERT INTO job_plans(job_id,version,settings_version,body)
+         VALUES (8,1,17,'{}')",
+        [],
+    )?;
+    drop(old);
+
+    drop(Store::open(&database)?);
+
+    let current = rusqlite::Connection::open(&database)?;
+    current.pragma_update(None, "foreign_keys", "ON")?;
+    let version: i64 = current.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    assert_eq!(version, 33);
+    let preserved: (String, i64) = current.query_row(
+        "SELECT body,created_at FROM settings_versions WHERE id=17",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(preserved, (old_settings, 123));
+    assert!(
+        current
+            .execute(
+                "INSERT INTO settings_versions(body) VALUES (?1)",
+                [format!("\"{}\"", "x".repeat(20_000))],
+            )
+            .is_ok()
+    );
+    assert!(
+        current
+            .execute("UPDATE settings_versions SET body='{}' WHERE id=17", [])
+            .is_err()
+    );
+    assert!(
+        current
+            .execute("DELETE FROM settings_versions WHERE id=17", [])
+            .is_err()
+    );
+    let violations: i64 =
+        current.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    assert_eq!(violations, 0);
     Ok(())
 }
 

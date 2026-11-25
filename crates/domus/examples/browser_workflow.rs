@@ -241,39 +241,48 @@ impl Fixture {
         Ok((plan, catalog))
     }
 
-    fn run(&mut self, job: i64, version: i64, candidate: i64) -> Result<()> {
+    fn run(&mut self, job: i64, version: i64, candidate: Option<i64>) -> Result<()> {
         let claimed = self
             .store
             .claim_approved_plan(job, version, "browser-fixture", 300)?
             .ok_or_else(|| Error::Conflict("generated job is already owned".into()))?;
         let claim = claimed.claim;
         self.store.approved_artwork(job, version)?;
-        self.store
-            .advance(&claim, JobState::Queued, JobState::Searching)?;
-        self.store.begin_reviewed_acquisition(&claim, candidate)?;
-        for file in self.store.transfers(job, version, Page::new(0, 100)?)? {
-            self.store.start_transfer(&claim, file.id)?;
+        if self.store.job_state(job)?.as_deref() == Some("queued") {
             self.store
-                .accept_transfer(&claim, file.id, 100 + file.track_number as u32)?;
-            let active = self
-                .store
-                .transfers(job, version, Page::new(file.id - 1, 1)?)?
-                .pop()
-                .ok_or(Error::Internal("generated active transfer missing"))?;
-            let received = self
-                .staging
-                .receive(&active, &mut Cursor::new(&self.source))?;
-            self.store.receive_transfer(
+                .advance(&claim, JobState::Queued, JobState::Searching)?;
+            self.store.begin_reviewed_acquisition(
                 &claim,
-                file.id,
-                received.byte_length() as i64,
-                received.sha256(),
+                candidate.ok_or_else(|| Error::InvalidInput("select a generated source".into()))?,
             )?;
+            for file in self.store.transfers(job, version, Page::new(0, 100)?)? {
+                self.store.start_transfer(&claim, file.id)?;
+                self.store
+                    .accept_transfer(&claim, file.id, 100 + file.track_number as u32)?;
+                let active = self
+                    .store
+                    .transfers(job, version, Page::new(file.id - 1, 1)?)?
+                    .pop()
+                    .ok_or(Error::Internal("generated active transfer missing"))?;
+                let received = self
+                    .staging
+                    .receive(&active, &mut Cursor::new(&self.source))?;
+                self.store.receive_transfer(
+                    &claim,
+                    file.id,
+                    received.byte_length() as i64,
+                    received.sha256(),
+                )?;
+            }
+            self.store
+                .advance(&claim, JobState::Downloading, JobState::Validating)?;
         }
-        self.store
-            .advance(&claim, JobState::Downloading, JobState::Validating)?;
         let cover = self.store.approved_artwork(job, version)?;
-        let run = normalize_album(&mut self.store, &claim, &self.staging, &cover)?;
+        let run = match normalize_album(&mut self.store, &claim, &self.staging, &cover) {
+            Ok(run) => run,
+            Err(Error::WorkerWaiting) => return Ok(()),
+            Err(error) => return Err(error),
+        };
         publish_new_album(&mut self.store, &claim, &self.staging, run)?;
         self.runs.insert(job, (run, version));
         Ok(())
@@ -1059,6 +1068,17 @@ impl Fixture {
                 empty()
             }
             ["decision"] if !command => json_response(self.store.job_decision(job, version)?),
+            ["tags"] if !command => json_response(self.store.tag_review(job, version, page)?),
+            ["tags", "approve"] if command => {
+                let value: domus::infrastructure::api::TagReviewCommand = decode(body)?;
+                self.store.approve_tag_review(job, version, &value.sha256)?;
+                empty()
+            }
+            ["tags", "resume"] if command => {
+                let value: domus::infrastructure::api::TagReviewCommand = decode(body)?;
+                self.store.resume_tag_review(job, version, &value.sha256)?;
+                empty()
+            }
             ["events"] if !command => json_response(self.store.plan_events(job, version, page)?),
             ["run"] if command => {
                 let request: domus::infrastructure::worker::StartLocalDownload = decode(body)?;
@@ -1067,13 +1087,7 @@ impl Fixture {
                         "publication acknowledgement required".into(),
                     ));
                 }
-                self.run(
-                    job,
-                    version,
-                    request
-                        .source_candidate
-                        .ok_or_else(|| Error::InvalidInput("select a generated source".into()))?,
-                )?;
+                self.run(job, version, request.source_candidate)?;
                 empty()
             }
             _ => Err(Error::InvalidInput(
@@ -1292,7 +1306,7 @@ mod tests {
                 br#"{"offline":true}"#,
             )?;
         }
-        fixture.run(job, plan.version, source.id)?;
+        fixture.run(job, plan.version, Some(source.id))?;
         Ok(fixture)
     }
 

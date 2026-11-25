@@ -221,8 +221,7 @@ impl Store {
             cover.dimensions(),
         )?;
         transfers::check_received(&transaction, claim.job, claim.plan_version)?;
-        let catalog = plan.plan.catalog.as_ref().ok_or_else(conflict)?;
-        let tags = catalog.data.audio_tags()?;
+        let tags = super::tag_reviews::resolved_tags(&transaction, claim.job, claim.plan_version)?;
         let mut statement = transaction.prepare(
             "SELECT id, track_number, expected_bytes, lower(hex(payload_sha256))
              FROM transfer_files WHERE job_id = ?1 AND plan_version = ?2 ORDER BY track_number",
@@ -262,6 +261,10 @@ impl Store {
         recipe.update(b"domus-audio-normalization\0");
         recipe.update([NORMALIZATION_PROFILE]);
         recipe.update(plan.plan.format.extension().as_bytes());
+        if let Some(policy) = &plan.plan.settings.tag_policy {
+            recipe.update(b"\0tag-policy-v1\0");
+            recipe.update(serde_json::to_vec(policy)?);
+        }
         if let Some(audio) = plan.plan.audio {
             audio.validate(plan.plan.format)?;
             recipe.update(b"\0audio-policy\0");
@@ -422,13 +425,8 @@ impl Store {
         let plan = planning::acquisition_plan(&self.connection, claim.job, claim.plan_version)?;
         plan.plan.audio_profile()?;
         let attempt = read_run(&self.connection, run)?;
-        let tags = plan
-            .plan
-            .catalog
-            .as_ref()
-            .ok_or_else(conflict)?
-            .data
-            .audio_tags()?;
+        let tags =
+            super::tag_reviews::resolved_tags(&self.connection, claim.job, claim.plan_version)?;
         let mut statement = self.connection.prepare(
             "SELECT f.track_number, f.transfer_id, f.input_bytes, f.input_sha256, f.tags_sha256,
                     f.staging_name, r.body

@@ -93,6 +93,40 @@ or lost response is not evidence of activation. Managed certificate renewal and
 validated manual TLS material refresh remain separate from host JSON activation.
 Never delete configuration, old locks or pending files as automatic recovery.
 
+## Acquisition tag reviews
+
+Optional music tag rules belong to immutable shared output settings in SQLite,
+not host JSON. Keep settings-write restrictions active. Plans freeze their rules.
+Required release metadata and the approved cover cannot be overridden.
+Automatic Update and Remove use initial plan approval. Retain always requires an
+exact review after every input has a sealed receipt.
+
+The worker saves one complete album snapshot and pauses in `awaiting_input`
+before creating normalized output. Read its bounded pages with:
+
+```powershell
+domus tag-review --host <absolute-host-configuration-file> <job-id> <plan-version> <after> <limit>
+```
+
+Review every track. Approve only the exact manifest hash shown by that read:
+
+```powershell
+domus tag-review-approve --host <absolute-host-configuration-file> <job-id> <plan-version> <sha256>
+domus tag-review-resume --host <absolute-host-configuration-file> <job-id> <plan-version> <sha256>
+```
+
+Approval saves the decision. Resume restores only the safe validating state.
+Neither command starts a worker, transfer or publication. Continue the existing
+local acquisition separately. The browser request and Decisions inbox expose the
+same commands. Generic question answers and claims cannot bypass this gate.
+Local MCP remains read-only and does not gain mutation tools.
+
+Recheck the exact plan, source receipts, approved cover and review binding before
+normalization. A changed input is an error, not permission to refresh an approval.
+Keep existing output unchanged during interrupted-output verification. Retained
+text must pass bounded field validation; never retain arbitrary metadata frames
+or use the read-only library index as full-stream acquisition evidence.
+
 ## Indexed Library
 
 Keep browsing passive. Explicit full scans and direct-folder refreshes use the
