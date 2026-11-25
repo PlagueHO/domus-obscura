@@ -6,6 +6,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Invoke-PinnedTask {
+    param([string] $Toolchain, [string[]] $Arguments)
+    & rustup run $Toolchain cargo task @Arguments
+}
+
 function Get-PinnedRustToolchain {
     param([string] $Pin)
     if ($Pin -notmatch '^\d+\.\d+\.\d+$') {
@@ -24,11 +29,7 @@ function Get-PinnedRustToolchain {
 }
 
 Set-Location -LiteralPath $PSScriptRoot
-foreach ($argument in $TaskArgs) {
-    if ($argument -notmatch '^[A-Za-z0-9_.:-]+$') {
-        throw "Unsupported task argument: $argument"
-    }
-}
+if ($TaskArgs.Count -eq 0) { throw 'Select a developer task.' }
 $pin = [regex]::Match(
     (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'rust-toolchain.toml') -Raw),
     '(?m)^channel\s*=\s*"(\d+\.\d+\.\d+)"\s*$'
@@ -57,8 +58,13 @@ if ($IsWindows -or $PSVersionTable.PSEdition -eq 'Desktop') {
     }
     if (-not $vcvars) { throw 'A complete x64 MSVC build environment was not found.' }
     $env:Path = $installer + ';' + $env:Path
-    & $env:ComSpec /d /c "call `"$vcvars`" >nul && rustup run $toolchain cargo task $($TaskArgs -join ' ')"
-} else {
-    & rustup run $toolchain cargo task @TaskArgs
+    $environment = & $env:ComSpec /d /c "call `"$vcvars`" >nul && set"
+    if ($LASTEXITCODE -ne 0) { throw 'MSVC environment setup failed.' }
+    foreach ($entry in $environment) {
+        if ($entry -match '^([^=]+)=(.*)$') {
+            [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+        }
+    }
 }
+Invoke-PinnedTask -Toolchain $toolchain -Arguments $TaskArgs
 exit $LASTEXITCODE

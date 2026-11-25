@@ -1,5 +1,10 @@
 # Docker distribution
 
+Use [developer lifecycle commands](developer-workflow.md#separate-docker-persistent-state)
+for a separately selected persistent test deployment. These commands preserve
+volumes and verify host browser access; they do not change Docker settings or
+configure native media pairing automatically.
+
 ## Scope
 
 The image contains the current Rust API and worker, the real connected React
@@ -31,6 +36,14 @@ and its final native setup fixes. The earlier exact-dependency integration
 remains historical evidence, not proof for the current rebased source.
 The current image and Docker workflows need their own checks.
 Native storage checks are not whole-image Docker acceptance.
+
+The #73 local developer image passes build verification and all 14
+private-volume Windows HTTP diagnostic checks. Its developer commands pass
+startup, status, logs, retained restart, ordered stop, and stopped-container
+recreation. The Unix supervisor also passes retained runs inside the Linux guest.
+See [the developer evidence and limits](developer-workflow.md#verified-local-scope-for-73).
+This uncommitted local image does not replace clean-source release evidence,
+native Linux-host checks, or external Windows-media acceptance.
 
 The previously built `f497e7e` image passes generated-volume browser-byte and API-guard
 checks, worker scanning, selected bindings, overlap refusal, recreation, graceful

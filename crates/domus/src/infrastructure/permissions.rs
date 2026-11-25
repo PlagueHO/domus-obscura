@@ -78,6 +78,21 @@ impl FilePermissions {
     }
 }
 
+#[cfg(windows)]
+impl FilePermissions {
+    pub(crate) fn pipe_security(&self) -> String {
+        format!("O:{}D:P(A;;FA;;;{})", self.user, self.user)
+    }
+
+    pub(crate) fn check_pipe(&self, pipe: &impl std::os::windows::io::AsRawHandle) -> Result<()> {
+        check_sddl(
+            &native_file_security::pipe_descriptor(pipe)?,
+            &self.user,
+            true,
+        )
+    }
+}
+
 #[cfg(test)]
 #[path = "../../tests/support/private.rs"]
 pub(crate) mod private_fixture;

@@ -186,6 +186,7 @@ impl Drop for ShutdownOnDrop {
 
 mod bootstrap;
 pub mod configuration;
+pub mod developer;
 use configuration::{Configuration, Environment};
 
 /// Plaintext credentials exist only in memory after bounded, local-file reads.

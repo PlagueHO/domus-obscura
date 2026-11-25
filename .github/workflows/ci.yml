@@ -84,7 +84,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install nsis --version=3.13 --yes --no-progress
+          winget install --id NSIS.NSIS --exact --version 3.13 --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity
           if ($LASTEXITCODE -ne 0) { throw 'Pinned NSIS installation failed.' }
           'MAKENSIS=C:\Program Files (x86)\NSIS\makensis.exe' >> $env:GITHUB_ENV
       - name: Check Windows packaging helpers

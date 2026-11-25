@@ -52,6 +52,12 @@ provider, worker, publication, recovery or MCP operation. It preserves the origi
 command-specific safety rules. See [local development](docs/local-development.md)
 for the real development HTTPS setup. Do not treat the harness as a production mode.
 
+For repeatable real-application startup, stop, restart, status, logs, and manual
+Copilot shortcuts, read [developer commands](docs/developer-workflow.md).
+Use `dev-*` tasks with explicit local selectors. Native and Docker SQLite state
+remain separate. Fresh persistent setup and live startup effects need separate
+approval. `local-test` remains the generated browser harness.
+
 ## Layout
 
 | Path                            | Purpose                                                |

@@ -67,6 +67,24 @@ pub fn descriptor(file: &std::fs::File) -> std::io::Result<String> {
     windows::descriptor(file)
 }
 
+/// Read bounded owner/DACL information from a borrowed Windows pipe handle.
+/// This does not close the handle or change its access policy.
+#[cfg(windows)]
+pub fn pipe_descriptor(pipe: &impl std::os::windows::io::AsRawHandle) -> std::io::Result<String> {
+    windows::pipe_descriptor(pipe)
+}
+
+/// Create a remote-refusing asynchronous pipe with the caller's explicit ACL.
+/// The native descriptor remains owned through synchronous handle creation.
+#[cfg(windows)]
+pub fn create_named_pipe(
+    path: &std::path::Path,
+    sddl: &str,
+    first: bool,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    windows::create_named_pipe(path, sddl, first)
+}
+
 /// Copy only the DACL between these exact borrowed handles and protect it.
 ///
 /// The caller must validate source policy and authorize the target mutation.

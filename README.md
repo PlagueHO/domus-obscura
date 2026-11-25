@@ -2,6 +2,9 @@
 
 Personal home-media management with Rust, React, and SQLite.
 
+See [real application developer commands](docs/developer-workflow.md) for native
+and Docker lifecycle tasks, persistent test state, and manual Copilot app shortcuts.
+
 **Status: foundation implementation only.** This is not the complete V1 application and is not ready for public exposure. The approved scope is in [issue #1](https://github.com/PlagueHO/domus-obscura/issues/1).
 
 See the [backend services and domains](docs/backend-architecture.md) for architecture

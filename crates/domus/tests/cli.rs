@@ -5,6 +5,8 @@ use private::tempdir;
 
 #[path = "cli/cache.rs"]
 mod cache_tests;
+#[path = "cli/developer.rs"]
+mod developer_tests;
 #[path = "cli/sources.rs"]
 mod source_tests;
 #[path = "support/storage.rs"]
@@ -174,6 +176,33 @@ fn local_setup_script_selects_generated_media_and_staging_before_registration()
     assert_eq!(
         std::fs::read(&sentinel)?,
         b"preserve generated existing media"
+    );
+    let existing = fixture.path().join("existing parent");
+    std::fs::create_dir(&existing)?;
+    std::fs::create_dir(existing.join("library"))?;
+    std::fs::write(existing.join("library").join("keep.txt"), b"legacy media")?;
+    std::fs::write(existing.join("service.local.json"), b"legacy configuration")?;
+    let output = Command::new("pwsh")
+        .args(["-NoProfile", "-NonInteractive", "-File"])
+        .arg(&script)
+        .arg("-Directory")
+        .arg(&existing)
+        .args(["-UseExistingParent", "-SingleUserHttp", "-Port", "18444"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(existing.join("application").join("config.json").is_file());
+    assert!(existing.join("developer-library").is_dir());
+    assert_eq!(
+        std::fs::read(existing.join("library").join("keep.txt"))?,
+        b"legacy media"
+    );
+    assert_eq!(
+        std::fs::read(existing.join("service.local.json"))?,
+        b"legacy configuration"
     );
     Ok(())
 }

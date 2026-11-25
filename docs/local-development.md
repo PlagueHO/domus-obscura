@@ -1,5 +1,9 @@
 # Local album download with developer HTTPS
 
+For repeatable native and Docker developer lifecycle commands, start with
+[the developer workflow](developer-workflow.md). It preserves existing state
+and separates fresh setup from retained-state startup.
+
 This is an explicit local development workflow, not a complete V1 deployment.
 It uses the fixed `_anonymous` identity. It needs no Entra registration.
 An explicit configuration defaults to production and requires Entra.
@@ -69,13 +73,15 @@ Use the pinned tools. Run these commands from the repository in PowerShell 7:
 ```powershell
 .\dev.ps1 build
 .\scripts\local-setup.ps1 -Directory C:\DomusDev
-.\target\debug\domus.exe api-preview C:\DomusDev\application\config.json
+.\dev.ps1 dev-run C:\DomusDev\application\config.json
 ```
 
 Choose a new directory whose parent already exists. The script refuses an existing
 directory. It creates an empty library, private staging, a local SQLite database,
 default output settings and a 90-day ECDSA developer certificate for `localhost`
 and `127.0.0.1`. Its directories inherit access for the current Windows user only.
+It selects a separate scan-only worker. The developer supervisor starts and drains
+both the API and worker.
 It does not install software, change certificate trust or create provider credentials.
 If setup fails, it retains the partial setup for inspection.
 The private application directory is `C:\DomusDev\application`. Its generated
@@ -238,8 +244,10 @@ The generated setup directory is private. A file created there inherits its
 restricted access. On Unix, set the credential file mode to `0600`.
 Never put these values into the service JSON, browser, URL or logs.
 
-With all components stopped, add `local_acquisition` to `application\config.json`.
-Validate the file before restarting all components:
+With all components stopped, remove the generated `production_worker` section
+before adding `local_acquisition` to `application\config.json`.
+These runtimes are mutually exclusive. Validate the file before restarting all
+components:
 
 ```json
 {

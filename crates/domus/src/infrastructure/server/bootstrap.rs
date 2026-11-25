@@ -161,6 +161,36 @@ fn initialize_root(
     assets: &Path,
     fresh_only: bool,
 ) -> Result<(PathBuf, LibraryDirectory)> {
+    initialize_root_options(root, assets, fresh_only, false)
+}
+
+pub(super) fn initialize_developer_at(root: &Path) -> Result<PathBuf> {
+    crate::infrastructure::local_file::validate_reference(root)?;
+    let parent = root
+        .parent()
+        .ok_or(Error::InvalidInput("setup parent missing".into()))?;
+    let directory = LibraryDirectory::open(parent)?;
+    let name = root
+        .file_name()
+        .ok_or(Error::InvalidInput("setup name missing".into()))?;
+    match directory.symlink_metadata(name) {
+        Ok(_) => {
+            return Err(Error::Conflict(
+                "fresh developer target exists; nothing was changed".into(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(initialize_root_options(root, &browser_assets()?, true, true)?.0)
+}
+
+fn initialize_root_options(
+    root: &Path,
+    assets: &Path,
+    fresh_only: bool,
+    developer: bool,
+) -> Result<(PathBuf, LibraryDirectory)> {
     let parent = root
         .parent()
         .ok_or_else(|| Error::InvalidInput("application storage parent is missing".into()))?;
@@ -230,9 +260,9 @@ fn initialize_root(
         Path::new("."),
         &crate::domain::LibraryPath::parse("state")?,
     )?;
-    let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+    let mut document = serde_json::json!({
         "environment": "single_user",
-        "system_settings_read_only": true,
+        "system_settings_read_only": !developer,
         "services": {
             "discovery": [], "metadata": [], "artwork": [], "acquisition": [], "artist_images": []
         },
@@ -241,7 +271,12 @@ fn initialize_root(
         "listen": "127.0.0.1:8080",
         "origin": "http://127.0.0.1:8080",
         "browser_assets": assets
-    }))?;
+    });
+    if developer {
+        document["production_worker"] =
+            serde_json::json!({"queue_capacity": 64, "acquisition": null});
+    }
+    let mut bytes = serde_json::to_vec_pretty(&document)?;
     bytes.push(b'\n');
     pending.write_all(&bytes)?;
     pending.sync_all()?;

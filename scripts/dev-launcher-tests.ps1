@@ -75,4 +75,22 @@ foreach ($case in @(
     }
 }
 $global:LASTEXITCODE = 0
+function rustup {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]] $CommandArgs)
+    $script:forwarded = $CommandArgs
+    $global:LASTEXITCODE = 0
+}
+$forwarding = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Invoke-PinnedTask'
+}, $false)
+if (-not $forwarding) { throw 'Native argument forwarding function is missing.' }
+. ([scriptblock]::Create($forwarding.Extent.Text))
+$arguments = @('dev-inspect', 'C:\Developer data\A&B;quoted%name\config.json', '--', '"literal quote"')
+Invoke-PinnedTask -Toolchain '1.99.1' -Arguments $arguments
+$expected = @('run', '1.99.1', 'cargo', 'task') + $arguments
+if (($script:forwarded | ConvertTo-Json -Compress) -cne ($expected | ConvertTo-Json -Compress)) {
+    throw 'Native task argument boundaries were changed.'
+}
 Write-Output 'Pinned launcher toolchain tests passed without host changes.'

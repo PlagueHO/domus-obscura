@@ -1,0 +1,43 @@
+scripts:
+  - name: Native prerequisites
+    command: node scripts/developer-command.mjs dev-doctor
+  - name: Inspect native configuration
+    command: node scripts/developer-command.mjs dev-inspect
+  - name: Create fresh native setup (review targets first)
+    command: node scripts/developer-command.mjs dev-setup --confirm-fresh
+  - name: Build real application
+    command: node scripts/developer-command.mjs dev-build
+  - name: Run real native application
+    command: node scripts/developer-command.mjs dev-run
+  - name: Stop native application safely
+    command: node scripts/developer-command.mjs dev-stop
+  - name: Restart native application safely
+    command: node scripts/developer-command.mjs dev-restart
+  - name: Native application status
+    command: node scripts/developer-command.mjs dev-status
+  - name: Native application logs
+    command: node scripts/developer-command.mjs dev-logs
+  - name: Docker prerequisites
+    command: node scripts/developer-command.mjs dev-docker-doctor
+  - name: Create fresh Docker setup (review volume first)
+    command: node scripts/developer-command.mjs dev-docker-setup --confirm-fresh
+  - name: Build Docker image
+    command: node scripts/developer-command.mjs docker-build
+  - name: Run real Docker application
+    command: node scripts/developer-command.mjs dev-docker-run
+  - name: Stop Docker application safely
+    command: node scripts/developer-command.mjs dev-docker-stop
+  - name: Restart Docker application safely
+    command: node scripts/developer-command.mjs dev-docker-restart
+  - name: Docker application status
+    command: node scripts/developer-command.mjs dev-docker-status
+  - name: Docker application logs
+    command: node scripts/developer-command.mjs dev-docker-logs
+  - name: Check repository
+    command: node scripts/developer-command.mjs check
+  - name: Test developer lifecycle
+    command: node scripts/developer-command.mjs test developer
+  - name: Check isolated Docker workflows
+    command: node scripts/developer-command.mjs docker-check
+server_ready_pattern: '^Domus ready:\s+(https?://\S+)\s*$'
+auto_open_in_browser: true
