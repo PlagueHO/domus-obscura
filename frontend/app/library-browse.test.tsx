@@ -136,7 +136,7 @@ describe("indexed Library evidence", () => {
     expect(markup).not.toMatch(/<button[^>]*disabled[^>]*>Refresh folder from disk/);
   });
 
-  it("reloads album members, assets and folder coverage with the index revision", () => {
+  it("reloads album members and assets without offering a separate folder scan", () => {
     vi.mocked(useState)
       .mockReturnValueOnce([[0], vi.fn()])
       .mockReturnValueOnce([3, vi.fn()]);
@@ -147,7 +147,7 @@ describe("indexed Library evidence", () => {
         resource({ id: 10, title: "Album", artist: "Artist", folder: "selected", file_count: 1 }),
       )
       .mockReturnValueOnce(resource(coverage));
-    renderToStaticMarkup(
+    const markup = renderToStaticMarkup(
       <LibraryBrowser
         locations={[root]}
         location={1}
@@ -161,7 +161,9 @@ describe("indexed Library evidence", () => {
     const keys = vi.mocked(useResource).mock.calls.map((call) => call[1]);
     expect(keys).toContain("1:10:false:0:3");
     expect(keys).toContain("1:10:true:0:3");
-    expect(keys).toContain("1:selected:3");
+    expect(keys).not.toContain("1:selected:3");
+    expect(markup).toContain('href="#/library-scans"');
+    expect(markup).not.toContain("Refresh folder from disk");
   });
 
   it.each([true, false])(

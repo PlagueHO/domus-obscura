@@ -439,7 +439,14 @@ fn replacement_restore_is_state_bound_and_recovers_after_displacing_the_current_
     )?;
     std::fs::rename(&current, &temporary)?;
     raw.execute_batch(
-        "DROP TABLE tag_review_tracks;
+        "DROP TABLE soulseek_account_changes;
+         DROP TABLE primary_library_changes;
+         DROP INDEX one_main_location;
+         ALTER TABLE locations DROP COLUMN retired;
+         CREATE UNIQUE INDEX one_main_location ON locations(kind) WHERE kind='main';
+         DROP TABLE library_scan_schedule;
+         DROP TABLE library_scan_settings;
+         DROP TABLE tag_review_tracks;
          DROP TABLE tag_reviews;
          DROP TABLE artist_photo_bindings;
          DROP TABLE commons_gate;
@@ -2155,7 +2162,7 @@ fn schema_fifteen_upgrade_preserves_completed_normalization_and_approval() -> Te
     fixture.store = Store::open(&fixture.database)?;
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        33
+        36
     );
     assert_eq!(
         raw.query_row(

@@ -6,7 +6,7 @@ import type { CatalogResult } from "../src/generated/CatalogResult";
 import { query, request } from "./api";
 import { useMetadataResource } from "./hooks";
 import { AlbumCard, ArtistCard } from "./components/Media";
-import { Alert, Button, Check, Empty, Pager } from "./components/ui";
+import { Alert, Button, Check, EmptyState, LoadingState, Pager } from "./components/ui";
 import type { Location } from "../src/generated/Location";
 import { LocalMatches } from "./LocalMatches";
 
@@ -53,7 +53,7 @@ function SearchAlbums({ term, locations }: { term: string; locations: Location[]
         Include singles, live, compilations and unofficial editions
       </Check>
       <Alert error={albums.error} />
-      {albums.loading && <p role="status">Searching albums on MusicBrainz…</p>}
+      {albums.loading && <LoadingState label="Searching albums on MusicBrainz…" />}
       {albums.data && (
         <p className="muted">
           {albums.data.cached ? "Cached provider result" : "Provider result"} · {page?.count}{" "}
@@ -66,7 +66,9 @@ function SearchAlbums({ term, locations }: { term: string; locations: Location[]
         ))}
       </div>
       {page?.items.length === 0 && (
-        <Empty>No albums on this page. A filtered page can still have a next page.</Empty>
+        <EmptyState title="No albums on this page">
+          A filtered page can still have a next page.
+        </EmptyState>
       )}
       <Pager
         busy={albums.loading}
@@ -116,7 +118,7 @@ function SearchResults({ term, locations }: { term: string; locations: Location[
           </Button>
         </header>
         <Alert error={artists.error} />
-        {artists.loading && <p role="status">Searching artists on MusicBrainz…</p>}
+        {artists.loading && <LoadingState label="Searching artists on MusicBrainz…" />}
         {artists.data && (
           <p className="muted">
             {artists.data.cached ? "Cached provider result" : "Provider result"} · {page?.count}{" "}
@@ -128,7 +130,7 @@ function SearchResults({ term, locations }: { term: string; locations: Location[
             <ArtistCard key={artist.id} artist={artist} />
           ))}
         </div>
-        {page?.items.length === 0 && <Empty>No artists on this page.</Empty>}
+        {page?.items.length === 0 && <EmptyState title="No artists on this page" />}
         <Pager
           busy={artists.loading}
           previous={pages.length > 1 ? () => setPages(pages.slice(0, -1)) : undefined}
@@ -154,6 +156,6 @@ function SearchResults({ term, locations }: { term: string; locations: Location[
 }
 
 export function Search({ term, locations = [] }: { term: string; locations?: Location[] }) {
-  if (!term.trim()) return <Empty>Enter an artist or album in the search field.</Empty>;
+  if (!term.trim()) return <EmptyState title="Enter an artist or album in the search field" />;
   return <SearchResults key={term} term={term} locations={locations} />;
 }

@@ -1,7 +1,7 @@
 use super::api::Api;
 use super::entra::EntraBroker;
 use super::http::EntraHttpClient;
-use super::store::Store;
+use super::store::{Store, StoreOpenMode};
 use super::tls;
 use crate::{Error, Result};
 use axum::Router;
@@ -222,28 +222,6 @@ impl PreparedServer {
     pub fn load(path: &Path) -> Result<Self> {
         let (configuration_source, configuration, hostname) =
             configuration::ConfigurationService::load(path)?;
-        #[cfg(target_os = "linux")]
-        {
-            // Hold the worker's stable process lock through schema preparation.
-            // A live worker permits a current-schema restart, never migration.
-            match configuration_source.state_lock("worker") {
-                Ok(_migration_guard) => {
-                    Self::from_source(Arc::new(configuration_source), configuration, hostname)
-                }
-                Err(Error::Busy(_)) => {
-                    let store =
-                        configuration_source.open_store(super::store::StoreOpenMode::Current)?;
-                    Self::from_source_with_store(
-                        Arc::new(configuration_source),
-                        configuration,
-                        hostname,
-                        store,
-                    )
-                }
-                Err(error) => Err(error),
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
         Self::from_source(Arc::new(configuration_source), configuration, hostname)
     }
 
@@ -253,7 +231,7 @@ impl PreparedServer {
         if super::windows_service::worker_stopped()? {
             Self::from_source(Arc::new(source), configuration, hostname)
         } else {
-            let store = source.open_store(super::store::StoreOpenMode::Current)?;
+            let store = source.open_store(StoreOpenMode::Current)?;
             Self::from_source_with_store(Arc::new(source), configuration, hostname, store)
         }
     }
@@ -263,7 +241,13 @@ impl PreparedServer {
         configuration: Configuration,
         hostname: String,
     ) -> Result<Self> {
-        let store = configuration_source.open_store(super::store::StoreOpenMode::Existing)?;
+        // Hold the stable worker lock through schema preparation.
+        let (mode, _migration_guard) = match configuration_source.state_lock("worker") {
+            Ok(guard) => (StoreOpenMode::Migrate, Some(guard)),
+            Err(Error::Busy(_)) => (StoreOpenMode::Current, None),
+            Err(error) => return Err(error),
+        };
+        let store = configuration_source.open_store(mode)?;
         Self::from_source_with_store(configuration_source, configuration, hostname, store)
     }
 
@@ -273,6 +257,8 @@ impl PreparedServer {
         hostname: String,
         mut store: Store,
     ) -> Result<Self> {
+        configuration_source.activate_configured_primary(&mut store)?;
+        configuration_source.activate_configured_soulseek_account(&store)?;
         let protected = configuration_source.protected(&configuration);
         let (secret, tls) = configuration_source.startup_material(&store, &hostname)?;
         if let Some(cache) = &configuration.cache {
@@ -736,9 +722,8 @@ mod tests {
         Ok((PreparedServer::load(&file)?, origin))
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn linux_api_restart_under_worker_requires_current_schema_without_migration()
+    fn api_restart_under_worker_requires_current_schema_without_migration()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let directory = crate::infrastructure::permissions::private_test_directory()?;
         let (server, _) = lifecycle_server(directory.path())?;

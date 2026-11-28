@@ -84,7 +84,6 @@ pub(super) fn prepare(
     use crate::application::sharing::{
         BindShareFolder, InspectShareFolder, bind_share_folder, inspect_share_folder,
     };
-    use crate::domain::sources::{SourceFileMetadata, SourceFolder};
     use crate::domain::{AudioFormat, OutputSettings};
     use crate::infrastructure::catalog::{CatalogQuery, CatalogResult};
     use crate::infrastructure::store::PlanRequest;
@@ -179,18 +178,38 @@ pub(super) fn prepare(
         },
         catalog,
     )?;
+    let candidate = approve_generated_album(store, job, plan.version, audio.len() as i64)?;
+    let album = Album {
+        job,
+        version: plan.version,
+        candidate,
+        destination,
+        file_bytes: audio.len() as u64,
+        file_sha256: format!("{:x}", Sha256::digest(audio)),
+    };
+    serde_json::to_writer(new_file(&root.join("integration.json"))?, &album)?;
+    Ok(())
+}
+
+fn approve_generated_album(
+    store: &mut Store,
+    job: i64,
+    version: i64,
+    file_bytes: i64,
+) -> TestResult<i64> {
+    use crate::domain::sources::{SourceFileMetadata, SourceFolder};
     let artwork = store.prepare_artwork(
         job,
-        plan.version,
+        version,
         "123456789",
         &crate::media_fixtures::cover_source()?,
         None,
     )?;
-    store.approve_artwork(job, plan.version, artwork.id, &artwork.sha256)?;
-    store.approve_plan(job, plan.version)?;
+    store.approve_artwork(job, version, artwork.id, &artwork.sha256)?;
+    store.approve_plan(job, version)?;
     let candidate = store.prepare_source_candidate(
         job,
-        plan.version,
+        version,
         SourceFolder {
             peer: "scale-download".into(),
             folder: "Peer\\Album".into(),
@@ -198,7 +217,7 @@ pub(super) fn prepare(
             files: (1..=3)
                 .map(|track| SourceFileMetadata {
                     remote_path: format!("Peer\\Album\\{track:02} Scale track {track}.mp3"),
-                    expected_bytes: audio.len() as i64,
+                    expected_bytes: file_bytes,
                     extension: "mp3".into(),
                     bitrate_kbps: Some(320),
                     duration_seconds: None,
@@ -209,17 +228,49 @@ pub(super) fn prepare(
                 .collect(),
         },
     )?;
-    store.approve_source_candidate(candidate.id, plan.version, &candidate.review_sha256, true)?;
-    let album = Album {
-        job,
-        version: plan.version,
-        candidate: candidate.id,
-        destination,
-        file_bytes: audio.len() as u64,
-        file_sha256: format!("{:x}", Sha256::digest(audio)),
+    store.approve_source_candidate(candidate.id, version, &candidate.review_sha256, true)?;
+    Ok(candidate.id)
+}
+
+// Only generated fixtures can repeat approval after a primary scan. Real saved
+// plans must still fail closed when their library observations change.
+fn refresh_generated_album(root: &Path, mut album: Album) -> TestResult<Album> {
+    use crate::infrastructure::catalog::{CatalogQuery, CatalogResult};
+    use crate::infrastructure::store::PlanRequest;
+    let mut store = selected_store(root, StoreOpenMode::Current)?;
+    let previous = store.plan(album.job, album.version)?;
+    let query = CatalogQuery::release("20000000-0000-4000-8000-000000000001")?;
+    let cached = store
+        .catalog_cache(&query)?
+        .ok_or("generated catalog cache is missing")?;
+    let catalog = CatalogResult {
+        source: query.source().into(),
+        fetched_at: cached.fetched_at,
+        cached: true,
+        payload_sha256: cached.payload_sha256,
+        data: query.parse_release(&cached.body)?,
     };
-    serde_json::to_writer(new_file(&root.join("integration.json"))?, &album)?;
-    Ok(())
+    let plan = store.prepare_catalog_plan(
+        PlanRequest {
+            audio_profile: None,
+            job_id: album.job,
+            expected_version: album.version,
+            settings_version: previous.settings_version,
+            format: Some(crate::domain::AudioFormat::Mp3),
+            edition: catalog.data.selection(None)?,
+            locations: vec![album.destination],
+            accepts_incomplete_coverage: false,
+        },
+        catalog,
+    )?;
+    album.version = plan.version;
+    album.candidate = approve_generated_album(
+        &mut store,
+        album.job,
+        album.version,
+        i64::try_from(album.file_bytes)?,
+    )?;
+    Ok(album)
 }
 
 pub(crate) fn album(root: &Path) -> TestResult<Album> {
@@ -337,8 +388,22 @@ pub(super) fn exercise_with_budget(
     let album = album(root)?;
     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
         let client=reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(30)).build()?;
-        let scan=admit_scan(&client,&fixture,fixture.location_id).await?;
+        let scan=admit_scan(&client,&fixture).await?;
         channel.send(&json!({"event":"scan_admitted","location_id":fixture.location_id,"request_id":scan}))?;
+        let primary_deadline=tokio::time::Instant::now()+budget;
+        loop {
+            let observed=http_json(client.get(format!("{}/api/locations/{}",fixture.origin,fixture.location_id)),200).await?;
+            if matches!(observed["coverage"].as_str(),Some("scanning"|"complete")) {break;}
+            let state=http_json(client.get(format!("{}/api/worker/requests/{scan}",fixture.origin)),200).await?;
+            if matches!(state["state"].as_str(),Some("failed"|"waiting")) {
+                return Err(format!("primary-led scan stopped before the media phase: {state}").into());
+            }
+            if tokio::time::Instant::now()>=primary_deadline {return Err("primary scan phase exceeded its deadline".into());}
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let approval_root=root.to_owned();
+        let album=tokio::task::spawn_blocking(move||refresh_generated_album(&approval_root,album)
+            .map_err(|error|std::io::Error::other(error.to_string()))).await??;
         let response=http_json(client.post(format!("{}/api/jobs/{}/plans/{}/run",fixture.origin,album.job,album.version))
             .header("origin",&fixture.origin).header("x-domus-csrf","1")
             .json(&json!({"source_candidate":album.candidate,"acknowledge_new_only_publication":true})),202).await?;

@@ -1,4 +1,4 @@
-use super::{Client, MediaClient, MediaSelection};
+use super::{Client, MediaClient, MediaSelection, NetworkAccess};
 use crate::infrastructure::filesystem::{
     StorageConfiguration, StorageRole, StorageRoot, TopologyAssurance,
 };
@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 /// capability table; a reqwest pool must never be shared between media sessions.
 pub(crate) struct MediaPairing {
     pub address: SocketAddr,
+    pub access: NetworkAccess,
     pub server_ca: Vec<u8>,
     pub paired_server: Vec<u8>,
     pub certificate: Vec<u8>,
@@ -21,12 +22,13 @@ impl MediaPairing {
     pub(crate) fn client(&self, selection: &MediaSelection) -> Result<MediaClient> {
         MediaClient::remote(
             selection.clone(),
-            Client::new(
+            Client::with_network_access(
                 self.address,
                 &self.server_ca,
                 &self.paired_server,
                 &self.certificate,
                 &self.private_key,
+                self.access.clone(),
             )?,
         )
     }
@@ -71,6 +73,13 @@ pub(crate) struct SelectedMedia {
 }
 
 impl SelectedMedia {
+    pub(crate) fn root_ids(&self) -> impl Iterator<Item = &str> {
+        self.selection
+            .media
+            .iter()
+            .map(|root| root.root_id.as_str())
+    }
+
     pub(crate) fn new(
         selection: MediaSelection,
         pairing: MediaPairing,

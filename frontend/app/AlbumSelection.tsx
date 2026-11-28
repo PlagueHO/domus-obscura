@@ -397,6 +397,7 @@ export function AlbumSelection({
                   >
                     <input
                       type="checkbox"
+                      disabled={location.scan_only}
                       checked={destinations.includes(location.id)}
                       onChange={(event) =>
                         setDestinations((current) =>
@@ -408,9 +409,11 @@ export function AlbumSelection({
                     />
                     <strong>{location.kind}</strong>
                     <small data-coverage={location.coverage}>
-                      {location.coverage === "complete"
-                        ? "Index complete"
-                        : `Index ${location.coverage}`}
+                      {location.scan_only
+                        ? "Scan only"
+                        : location.coverage === "complete"
+                          ? "Index complete"
+                          : `Index ${location.coverage}`}
                       {location.last_error ? ` · ${location.last_error}` : ""}
                     </small>
                   </label>
@@ -431,6 +434,7 @@ export function AlbumSelection({
                   disabled={
                     selection.busy ||
                     blocked ||
+                    locations.some((location) => location.kind === "main" && location.scan_only) ||
                     !settings ||
                     !destinations.length ||
                     items.some((item) => Boolean(item.creationUnknown))

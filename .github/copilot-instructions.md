@@ -90,6 +90,8 @@ Build a personal home-media application with Rust, React, and SQLite. V1 acquire
 - Do not treat neutral scaffold components as an approved final theme.
 - Keep resource keys bound to the exact selected entity. Never show retained data as a new entity or current evidence after a failed refresh.
 
+- Follow docs/ui-guide.md for every screen: shared type and spacing variables, blocks from components/ui.tsx, designed empty, loading and error states, no CSS override blocks, no dashed outlines, no all-caps text.
+
 ## Testing
 
 - Use fresh temporary directories and SQLite databases in workflow tests.

@@ -2,8 +2,11 @@ use super::*;
 use serde_json::{Value, json};
 
 mod artist_images;
+mod folder_browser;
 mod managed_tls;
+mod primary_library;
 mod sharing;
+mod soulseek_account;
 mod tls_crash;
 mod worker;
 

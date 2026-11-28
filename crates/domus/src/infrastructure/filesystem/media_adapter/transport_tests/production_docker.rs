@@ -70,6 +70,7 @@ async fn media_adapter_production_docker_workflow() -> TestResult {
             root_id: "backup".into(),
             binding_revision: 1,
             role: StorageRole::Media,
+            scan_only: false,
             provider_scope: fixture.selection.provider.scope.clone(),
             relative: "parent/backup".into(),
             expected,

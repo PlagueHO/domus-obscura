@@ -1,5 +1,6 @@
 import { defineConfig } from "@playwright/test";
 import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 
 export default defineConfig({
   testDir: "./browser",
@@ -33,10 +34,13 @@ export default defineConfig({
     { name: "narrow", use: { viewport: { width: 390, height: 844 }, reducedMotion: "reduce" } },
   ],
   webServer: {
-    command:
-      process.platform === "win32"
-        ? "..\\target\\debug\\examples\\browser_workflow.exe"
-        : "../target/debug/examples/browser_workflow",
+    command: `"${resolve(
+      "..",
+      process.env.CARGO_TARGET_DIR ?? "target",
+      "debug",
+      "examples",
+      process.platform === "win32" ? "browser_workflow.exe" : "browser_workflow",
+    )}"`,
     url: "http://127.0.0.1:4174/api/session",
     reuseExistingServer: false,
     timeout: 30000,

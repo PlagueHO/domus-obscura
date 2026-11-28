@@ -98,6 +98,13 @@ approval. `local-test` remains the generated browser harness.
 | Text files                 | UTF-8; LF; final newline          |
 | Lockfiles                  | Cargo.lock and one pnpm-lock.yaml |
 
+## Frontend UI
+
+Read [UI guide](docs/ui-guide.md) before changing any screen. Use the shared
+type and spacing variables and the blocks in `components/ui.tsx`. Fix source
+rules instead of appending CSS overrides. Record decisions in
+[UI decisions](docs/ui-decisions.md).
+
 ## Operational boundaries
 
 Read [Docker distribution](docs/docker.md) before changing image or Compose

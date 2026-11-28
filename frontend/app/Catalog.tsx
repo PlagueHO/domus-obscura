@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { CatalogArtist } from "../src/generated/CatalogArtist";
 import type { CatalogRelease } from "../src/generated/CatalogRelease";
 import type { CatalogReleasePage } from "../src/generated/CatalogReleasePage";
@@ -12,17 +12,34 @@ import type { OutputSettings } from "../src/generated/OutputSettings";
 import type { Location } from "../src/generated/Location";
 import type { StoredPlan } from "../src/generated/StoredPlan";
 import type { AudioProfile } from "../src/generated/AudioProfile";
-import type { RegisterLocation } from "../src/generated/RegisterLocation";
+import type { LibrarySetup } from "../src/generated/LibrarySetup";
 import { query, request } from "./api";
 import { useCommand, useMetadataResource } from "./hooks";
-import { Alert, Badge, Button, Check, Cover, Empty, Pager } from "./components/ui";
-import { AlbumCard } from "./components/Media";
+import {
+  Alert,
+  Button,
+  Check,
+  Cover,
+  Empty,
+  EmptyState,
+  HeaderCard,
+  HeaderIconAction,
+  LoadingState,
+  Pager,
+  SettingsRow,
+  Subcard,
+  Switch,
+  SettingsSaveButton,
+} from "./components/ui";
+import { AlbumCard, Icon } from "./components/Media";
 import { ArtistPhoto } from "./ArtistPhoto";
 import { BackendConfiguration, ConfigurationCard } from "./BackendConfiguration";
 import { LocalMatches } from "./LocalMatches";
 import { AudioProfileSelect, audioProfileLabel, outputWithAudioPolicy } from "./audio-profiles";
 import { SelectAlbum } from "./AlbumSelection";
-import { defaultTagPolicy, FrozenTagPolicy, TagPolicyFields } from "./TagPolicy";
+import { defaultTagPolicy, FrozenTagPolicy, sameTagPolicy, TagPolicyFields } from "./TagPolicy";
+import { LibraryFolderRegistration, LibraryFolderTable } from "./LibrarySetup";
+import { LibraryFolderChange, useLibraryFolderControl } from "./PrimaryLibrary";
 
 export function ReleaseCard({ release }: { release: CatalogReleaseSummary }) {
   return <AlbumCard release={release} />;
@@ -275,8 +292,11 @@ export function Album({
   const [editionsOpen, setEditionsOpen] = useState(false);
   const command = useCommand();
   const album = release.data?.data;
+  const primaryScanOnly = locations.some(
+    (location) => location.kind === "main" && location.scan_only,
+  );
   async function prepare() {
-    if (!settings || !album || !profile || !accepted.includes(profile)) return;
+    if (!settings || !album || !profile || !accepted.includes(profile) || primaryScanOnly) return;
     const job = created ?? (await request<CreatedJob>("/api/jobs", { body: {} }));
     setCreated(job);
     const body: CatalogPlanRequest = {
@@ -405,6 +425,11 @@ export function Album({
                 {locations.length === 0 && (
                   <p className="warning">No library roots are configured. Run local setup first.</p>
                 )}
+                {primaryScanOnly && (
+                  <p className="warning">
+                    Acquisition requires a primary library that allows writes.
+                  </p>
+                )}
                 <label>
                   Output audio profile
                   <AudioProfileSelect
@@ -421,6 +446,7 @@ export function Album({
                     <Check
                       key={location.id}
                       checked={selected.includes(location.id)}
+                      disabled={Boolean(location.scan_only)}
                       onChange={(value) =>
                         setSelected((current) =>
                           value
@@ -431,7 +457,7 @@ export function Album({
                     >
                       <strong>{location.kind}</strong> · {location.root}
                       <small>
-                        Coverage: {location.coverage}
+                        {location.scan_only ? "Scan only" : `Coverage: ${location.coverage}`}
                         {location.last_error ? ` · ${location.last_error}` : ""}
                       </small>
                     </Check>
@@ -458,6 +484,7 @@ export function Album({
                     !settings ||
                     !profile ||
                     !accepted.includes(profile) ||
+                    primaryScanOnly ||
                     selected.length === 0 ||
                     !album
                   }
@@ -482,6 +509,8 @@ export function Settings({
   error,
   loading = false,
   onReload,
+  librarySetup,
+  onDismiss,
 }: {
   settings: SettingsVersion | null | undefined;
   locations: Location[];
@@ -490,18 +519,26 @@ export function Settings({
   error?: unknown;
   loading?: boolean;
   onReload: () => void;
+  librarySetup?: LibrarySetup | undefined;
+  onDismiss?: () => void;
 }) {
   const [savedVersion, setSavedVersion] = useState<number>();
   const readOnly = policy?.read_only ?? true;
 
   return (
     <>
-      <header className="page-heading">
-        <div>
-          <h1>System settings</h1>
-          <p className="muted">Manage the application and shared Music library.</p>
-        </div>
+      <header className="settings-title">
+        <h1 id="system-settings-title">System Settings</h1>
+        {onDismiss && (
+          <HeaderIconAction label="Close settings" onClick={onDismiss}>
+            <Icon name="close" />
+          </HeaderIconAction>
+        )}
       </header>
+      <div className="settings-intro">
+        <p className="muted">Manage the application and shared Music library.</p>
+        <a href="#/setup">Open setup wizard</a>
+      </div>
       <BackendConfiguration
         onRefreshRelated={onReload}
         relatedLoading={loading}
@@ -574,51 +611,171 @@ export function Settings({
                 System output settings could not be loaded. Reload system settings to try again.
               </Empty>
             ) : (
-              <Empty>Output settings are missing. Run local setup.</Empty>
+              <Empty>
+                Output settings are missing. Open the setup wizard to save the initial policy.
+              </Empty>
             )}
           </ConfigurationCard>
         }
         roots={
-          <ConfigurationCard title="Library roots">
-            <Alert error={error} />
-            {locations.length ? (
-              locations.map((location) => (
-                <div className="list-row" key={location.id}>
-                  <div>
-                    <strong>{location.root}</strong>
-                    <p>
-                      {location.kind} · Coverage: {location.coverage}
-                    </p>
-                    {location.last_error && <p className="warning">{location.last_error}</p>}
-                  </div>
-                  <Badge>{location.native_identity ? "Bound root" : "Binding required"}</Badge>
-                </div>
-              ))
-            ) : loading ? (
-              <p role="status">Loading library roots…</p>
-            ) : error ? (
-              <Empty>Library roots could not be loaded. Reload system settings to try again.</Empty>
+          <LibraryFoldersCard
+            error={error}
+            loading={loading}
+            locations={locations}
+            librarySetup={librarySetup}
+            readOnly={readOnly}
+            onReload={onReload}
+          />
+        }
+      />
+    </>
+  );
+}
+
+function LibraryFoldersCard({
+  error,
+  loading,
+  locations,
+  librarySetup,
+  readOnly,
+  onReload,
+}: {
+  error: unknown;
+  loading: boolean;
+  locations: Location[];
+  librarySetup: LibrarySetup | undefined;
+  readOnly: boolean;
+  onReload: () => void;
+}) {
+  const hasPrimary = locations.some((location) => location.kind === "main");
+  const [adding, setAdding] = useState(false);
+  const [changing, setChanging] = useState(false);
+  const control = useLibraryFolderControl();
+  const primaries = locations.filter((location) => location.kind === "main");
+  const backups = locations.filter((location) => location.kind !== "main");
+  return (
+    <HeaderCard
+      title="Library folders"
+      className="configuration-section"
+      actions={
+        <HeaderIconAction href="#/library-scans" label="Open Library scans">
+          <Icon name="scan" />
+        </HeaderIconAction>
+      }
+    >
+      <Alert error={error} />
+      {loading && !locations.length ? (
+        <LoadingState label="Loading library folders…" />
+      ) : error && !locations.length ? (
+        <EmptyState title="Library folders could not be loaded">
+          Reload system settings to try again.
+        </EmptyState>
+      ) : (
+        <div className="subcard-stack">
+          <Subcard
+            title="Primary library"
+            actions={
+              !readOnly &&
+              hasPrimary && (
+                <Button
+                  variant="secondary"
+                  width="medium"
+                  icon={<Icon name={changing ? "close" : "folder"} />}
+                  disabled={loading || Boolean(error)}
+                  aria-expanded={changing}
+                  onClick={() => {
+                    setAdding(false);
+                    setChanging((open) => !open);
+                  }}
+                >
+                  {changing ? "Close" : "Change…"}
+                </Button>
+              )
+            }
+          >
+            {hasPrimary ? (
+              <LibraryFolderTable label="Current primary folder" locations={primaries} />
             ) : (
-              <Empty>No library roots are configured.</Empty>
+              <p className="subcard-note">No primary library selected.</p>
             )}
             {!readOnly && (
-              <LibraryRootControls
+              <LibraryFolderChange
+                hasPrimary={hasPrimary}
+                control={control}
+                open={changing}
+                onOpenChange={setChanging}
+                disabled={loading || Boolean(error)}
+                onChanged={onReload}
+              />
+            )}
+            {!readOnly && !hasPrimary && (
+              <LibraryFolderRegistration
                 key={locations.map((location) => location.id).join(":")}
+                setup={librarySetup}
                 locations={locations}
                 disabled={loading || Boolean(error)}
                 onChanged={onReload}
               />
             )}
-            <p className="muted">
-              Roots are folders on the server, not on this browser device. Register existing folders
-              before using them. Registration binds their filesystem identity and does not move
-              media or start a scan. Existing roots cannot be edited, removed or rebound here
-              because saved plans and receipts depend on them.
-            </p>
-          </ConfigurationCard>
-        }
-      />
-    </>
+          </Subcard>
+          <Subcard
+            title="Backup libraries"
+            actions={
+              !readOnly &&
+              hasPrimary && (
+                <Button
+                  variant="secondary"
+                  width="medium"
+                  icon={<Icon name={adding ? "close" : "plus"} />}
+                  disabled={loading || Boolean(error)}
+                  aria-expanded={adding}
+                  onClick={() => {
+                    setChanging(false);
+                    setAdding((open) => !open);
+                  }}
+                >
+                  {adding ? "Close form" : "Add backup"}
+                </Button>
+              )
+            }
+          >
+            {backups.length ? (
+              <LibraryFolderTable label="Backup folders" locations={backups} />
+            ) : (
+              <p className="subcard-note">No backup libraries.</p>
+            )}
+            {!readOnly && hasPrimary && (
+              <LibraryFolderChange
+                backup
+                hasPrimary
+                control={control}
+                open={adding}
+                disabled={loading || Boolean(error)}
+                onChanged={onReload}
+              />
+            )}
+            {!readOnly &&
+              hasPrimary &&
+              adding &&
+              control.data?.pending_change_id == null &&
+              librarySetup?.folders.some((folder) => folder.location_id === null) && (
+                <LibraryFolderRegistration
+                  embedded
+                  key={locations.map((location) => location.id).join(":")}
+                  setup={librarySetup}
+                  locations={locations}
+                  disabled={loading || Boolean(error)}
+                  onChanged={() => {
+                    setAdding(false);
+                    onReload();
+                  }}
+                />
+              )}
+          </Subcard>
+        </div>
+      )}
+      <p className="muted">Changes never move media or start a scan.</p>
+    </HeaderCard>
   );
 }
 
@@ -631,12 +788,22 @@ function SystemOutputForm({
   disabled: boolean;
   onSaved: (version: number) => void;
 }) {
+  const formId = useId();
   const [draft, setDraft] = useState<OutputSettings>(settings.settings);
   const [audioPolicy, setAudioPolicy] = useState(settings.policy);
   const [submitted, setSubmitted] = useState(false);
   const command = useCommand();
   const saving = disabled || command.busy || submitted;
   const accepted = audioPolicy.accepted;
+  const saved = settings.settings;
+  const dirty =
+    draft.artwork_size !== saved.artwork_size ||
+    draft.template.folder !== saved.template.folder ||
+    draft.template.filename !== saved.template.filename ||
+    audioPolicy.preferred !== settings.policy.preferred ||
+    accepted.length !== settings.policy.accepted.length ||
+    accepted.some((profile) => !settings.policy.accepted.includes(profile)) ||
+    !sameTagPolicy(draft.tag_policy ?? defaultTagPolicy(), saved.tag_policy ?? defaultTagPolicy());
   const validAudio =
     accepted.length > 0 &&
     accepted.includes(audioPolicy.preferred) &&
@@ -644,7 +811,7 @@ function SystemOutputForm({
       settings.audio_profiles.some((descriptor) => descriptor.profile === profile),
     );
   async function save() {
-    if (saving || !validAudio) return;
+    if (saving || !dirty || !validAudio) return;
     const version = await request<number>("/api/settings", {
       method: "PUT",
       body: {
@@ -658,109 +825,123 @@ function SystemOutputForm({
 
   return (
     <form
+      id={formId}
       onSubmit={(event) => {
         event.preventDefault();
         void command.run(save);
       }}
     >
-      <fieldset disabled={saving}>
+      <fieldset className="audio-profile-options" disabled={saving}>
         <legend>Accepted audio profiles</legend>
         <p>Select every profile the shared library accepts.</p>
         {settings.audio_profiles.map((choice) => (
-          <Check
-            key={choice.profile}
-            checked={accepted.includes(choice.profile)}
-            onChange={(checked) =>
-              setAudioPolicy((current) => ({
-                ...current,
-                accepted: checked
-                  ? [...current.accepted, choice.profile]
-                  : current.accepted.filter((profile) => profile !== choice.profile),
-              }))
-            }
-          >
-            {choice.label}
-          </Check>
+          <SettingsRow key={choice.profile} label={choice.label}>
+            {(control) => (
+              <Switch
+                {...control}
+                checked={accepted.includes(choice.profile)}
+                onChange={(checked) => {
+                  setAudioPolicy((current) => ({
+                    ...current,
+                    accepted: checked
+                      ? [...current.accepted, choice.profile]
+                      : current.accepted.filter((profile) => profile !== choice.profile),
+                  }));
+                }}
+              />
+            )}
+          </SettingsRow>
         ))}
         <p className="muted">
           MP3 VBR requires actual bitrate variation. It has no preset or average-bitrate target.
           FLAC is lossless and has no fixed bitrate. M4A is not supported.
         </p>
       </fieldset>
-      <label>
-        Preferred audio profile
-        <AudioProfileSelect
-          value={audioPolicy.preferred}
-          accepted={accepted}
-          descriptors={settings.audio_profiles}
-          disabled={saving}
-          onChange={(preferred) => setAudioPolicy((current) => ({ ...current, preferred }))}
-        />
-        <small>
-          New album requests start with this choice. Other accepted choices remain available. No
-          download or fallback starts automatically.
-        </small>
-      </label>
+      <SettingsRow
+        label="Preferred audio profile"
+        hint="New album requests start with this choice. Other accepted choices remain available. No download or fallback starts automatically."
+      >
+        {(control) => (
+          <AudioProfileSelect
+            {...control}
+            value={audioPolicy.preferred}
+            accepted={accepted}
+            descriptors={settings.audio_profiles}
+            disabled={saving}
+            onChange={(preferred) => setAudioPolicy((current) => ({ ...current, preferred }))}
+          />
+        )}
+      </SettingsRow>
       {!validAudio && (
         <p role="alert">
           Select at least one accepted profile, then select a preferred profile from that selection.
         </p>
       )}
-      <label>
-        Artwork size
-        <select
-          value={draft.artwork_size ?? "legacy"}
-          disabled={saving}
-          onChange={(event) => {
-            const value = event.target.value;
-            if (value === "small" || value === "recommended" || value === "large")
-              setDraft((current) => ({ ...current, artwork_size: value }));
-          }}
-        >
-          <option value="small">200 × 200 px</option>
-          <option value="recommended">400 × 400 px · Recommended</option>
-          <option value="large">800 × 800 px</option>
-          {draft.artwork_size === null && (
-            <option value="legacy">Legacy · up to 1200 × 1200 px</option>
-          )}
-        </select>
-        <small>This is a maximum size. The image keeps its shape and is never enlarged.</small>
-      </label>
-      <label>
-        Album folder template
-        <input
-          value={draft.template.folder}
-          disabled={saving}
-          onChange={(event) =>
-            setDraft((current) => ({
-              ...current,
-              template: { ...current.template, folder: event.target.value },
-            }))
-          }
-        />
-      </label>
+      <SettingsRow
+        label="Artwork size"
+        hint="This is a maximum size. The image keeps its shape and is never enlarged."
+      >
+        {(control) => (
+          <select
+            {...control}
+            value={draft.artwork_size ?? "legacy"}
+            disabled={saving}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value === "small" || value === "recommended" || value === "large")
+                setDraft((current) => ({ ...current, artwork_size: value }));
+              else if (value === "legacy" && saved.artwork_size === null)
+                setDraft((current) => ({ ...current, artwork_size: null }));
+            }}
+          >
+            <option value="small">200 × 200 px</option>
+            <option value="recommended">400 × 400 px · Recommended</option>
+            <option value="large">800 × 800 px</option>
+            {saved.artwork_size === null && (
+              <option value="legacy">Legacy · up to 1200 × 1200 px</option>
+            )}
+          </select>
+        )}
+      </SettingsRow>
+      <SettingsRow label="Album folder template" hint="Sets the folder name for new albums." wide>
+        {(control) => (
+          <input
+            {...control}
+            value={draft.template.folder}
+            disabled={saving}
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                template: { ...current.template, folder: event.target.value },
+              }))
+            }
+          />
+        )}
+      </SettingsRow>
       <TagPolicyFields
         policy={draft.tag_policy ?? defaultTagPolicy()}
         disabled={saving}
         onChange={(tag_policy) => setDraft((current) => ({ ...current, tag_policy }))}
       />
-      <label>
-        Track filename template
-        <input
-          value={draft.template.filename}
-          disabled={saving}
-          onChange={(event) =>
-            setDraft((current) => ({
-              ...current,
-              template: { ...current.template, filename: event.target.value },
-            }))
-          }
-        />
-      </label>
-      <p>
-        Template changes are validated by the server. They do not change saved plans or rename
-        existing files.
-      </p>
+      <SettingsRow
+        label="Track filename template"
+        hint="Sets the file names for new tracks. The server validates templates without changing saved plans or renaming files."
+        wide
+      >
+        {(control) => (
+          <input
+            {...control}
+            value={draft.template.filename}
+            disabled={saving}
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                template: { ...current.template, filename: event.target.value },
+              }))
+            }
+          />
+        )}
+      </SettingsRow>
       <Alert error={command.error} />
       {Boolean(command.error) && (
         <p>
@@ -768,111 +949,14 @@ function SystemOutputForm({
           again.
         </p>
       )}
-      <Button type="submit" disabled={saving || !validAudio}>
-        {command.busy ? "Saving…" : "Save system output settings"}
-      </Button>
-    </form>
-  );
-}
-
-function LibraryRootControls({
-  locations,
-  disabled,
-  onChanged,
-}: {
-  locations: Location[];
-  disabled: boolean;
-  onChanged: () => void;
-}) {
-  const hasMain = locations.some((location) => location.kind === "main");
-  const [root, setRoot] = useState("");
-  const [kind, setKind] = useState<"main" | "backup">(hasMain ? "backup" : "main");
-  const [submitted, setSubmitted] = useState(false);
-  const [message, setMessage] = useState("");
-  const command = useCommand();
-  const busy = disabled || command.busy;
-  async function register() {
-    if (busy || submitted) return;
-    const body: RegisterLocation = { root, kind };
-    await request<Location>("/api/locations", { body });
-    setSubmitted(true);
-    onChanged();
-  }
-
-  async function scan(id: number) {
-    if (busy) return;
-    setMessage("");
-    await request<Location>(`/api/locations/${id}/scan`, { body: {} });
-    setMessage(
-      "The server accepted the scan request. Refresh the saved index to check progress. No media files were changed.",
-    );
-    onChanged();
-  }
-
-  return (
-    <>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          void command.run(register);
-        }}
+      <SettingsSaveButton
+        form={formId}
+        type="submit"
+        disabled={saving || !dirty || !validAudio}
+        busy={command.busy}
       >
-        <h3>Add a library root</h3>
-        <label>
-          Server folder path
-          <input
-            value={root}
-            onChange={(event) => setRoot(event.target.value)}
-            required
-            maxLength={4096}
-            disabled={busy || submitted}
-            placeholder="Absolute folder path on the server"
-          />
-        </label>
-        <label>
-          Library role
-          <select
-            value={kind}
-            disabled={busy || submitted}
-            onChange={(event) => {
-              const value = event.target.value;
-              if (value === "main" || value === "backup") setKind(value);
-            }}
-          >
-            {!hasMain && <option value="main">Main library</option>}
-            <option value="backup">Backup library</option>
-          </select>
-        </label>
-        <Button
-          type="submit"
-          disabled={busy || submitted || !root.trim() || locations.length >= 100}
-        >
-          Register library root
-        </Button>
-        {submitted && (
-          <p role="status">Library root registered. Refresh Music policy and roots to view it.</p>
-        )}
-      </form>
-      {locations.length > 0 && (
-        <fieldset disabled={busy}>
-          <legend>Read-only library indexing</legend>
-          <p>
-            Scan registered folders to update index coverage. A scan does not change media files.
-          </p>
-          {locations.map((location) => (
-            <Button
-              key={location.id}
-              variant="secondary"
-              onClick={() => void command.run(() => scan(location.id))}
-            >
-              Scan {location.kind} root #{location.id}
-            </Button>
-          ))}
-        </fieldset>
-      )}
-      {command.busy && <p role="status">Updating library configuration or index…</p>}
-      {message && <p role="status">{message}</p>}
-      <Alert error={command.error} />
-    </>
+        Save system output settings
+      </SettingsSaveButton>
+    </form>
   );
 }

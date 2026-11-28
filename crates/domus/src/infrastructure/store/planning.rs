@@ -296,6 +296,9 @@ impl Store {
             .iter()
             .map(|id| destination(&self.connection, *id))
             .collect::<Result<Vec<_>>>()?;
+        for item in &destinations {
+            self.require_media_write_binding(&item.root)?;
+        }
         if destinations
             .iter()
             .filter(|item| item.kind == "main")
@@ -562,7 +565,7 @@ fn destination(connection: &Connection, id: i64) -> Result<PlanDestination> {
                 s.id, s.observed_count, s.error_count
          FROM locations l LEFT JOIN scans s ON s.id =
              (SELECT MAX(id) FROM scans WHERE location_id = l.id)
-         WHERE l.id = ?1",
+         WHERE l.id = ?1 AND l.retired=0",
             [id],
             |row| {
                 Ok(PlanDestination {

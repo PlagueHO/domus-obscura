@@ -91,6 +91,9 @@ correctness checks do not change. Full-profile runs still require separate
 admission and obey the earlier of their approved runtime and absolute deadline.
 
 The worker uses one scan lane, one acquisition lane and a queue capacity of 64.
+Scan admission uses the primary-led library operation and includes every
+registered backup. A selected exercise location controls browsing and evidence
+checks; it does not request a separate backup scan.
 The fixture runs three downloads, one upload and one complete share listing
 through one account login. Local transfer files contain 128 generated MP3 audio
 frames. Full-profile transfer files contain 1,024 frames. This is not a network

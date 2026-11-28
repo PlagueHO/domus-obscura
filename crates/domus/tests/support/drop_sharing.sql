@@ -1,4 +1,11 @@
 -- Remove newer layers before rebuilding a legacy upgrade fixture.
+DROP TABLE soulseek_account_changes;
+DROP TABLE primary_library_changes;
+DROP INDEX one_main_location;
+ALTER TABLE locations DROP COLUMN retired;
+CREATE UNIQUE INDEX one_main_location ON locations(kind) WHERE kind='main';
+DROP TABLE library_scan_schedule;
+DROP TABLE library_scan_settings;
 DROP TABLE tag_review_tracks;
 DROP TABLE tag_reviews;
 DROP TABLE artist_photo_bindings;

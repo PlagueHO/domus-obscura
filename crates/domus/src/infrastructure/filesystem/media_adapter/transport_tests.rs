@@ -24,6 +24,10 @@ struct Certificates {
 
 impl Certificates {
     fn new() -> TestResult<Self> {
+        Self::for_server_name("localhost")
+    }
+
+    fn for_server_name(server_name: &str) -> TestResult<Self> {
         let mut ca = CertificateParams::default();
         ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca.distinguished_name
@@ -32,7 +36,7 @@ impl Certificates {
         let ca = CertifiedIssuer::self_signed(ca, KeyPair::generate()?)?;
         let issue = |purpose| -> TestResult<(String, String)> {
             let key = KeyPair::generate()?;
-            let mut params = CertificateParams::new(vec!["localhost".into()])?;
+            let mut params = CertificateParams::new(vec![server_name.into()])?;
             params.extended_key_usages = vec![purpose];
             params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
             params.not_before = rcgen::date_time_ymd(2020, 1, 1);
@@ -75,13 +79,22 @@ struct Running {
 
 impl Running {
     fn start(fixture: &Fixture, keys: &Certificates) -> TestResult<Self> {
-        let adapter = PreparedAdapter::new(
+        Self::with_network_access(fixture, keys, NetworkAccess::Loopback)
+    }
+
+    fn with_network_access(
+        fixture: &Fixture,
+        keys: &Certificates,
+        access: NetworkAccess,
+    ) -> TestResult<Self> {
+        let adapter = PreparedAdapter::with_network_access(
             fixture.selection.clone(),
             Vec::new(),
             keys.server.as_bytes(),
             keys.server_key.as_bytes(),
             keys.ca.as_bytes(),
             keys.client.as_bytes(),
+            access,
         )?;
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let address = listener.local_addr()?;
@@ -93,7 +106,80 @@ impl Running {
             task,
         })
     }
+}
 
+#[tokio::test]
+async fn media_adapter_private_network_keeps_exact_tls_name_pin_and_peer() -> TestResult {
+    let fixture = Fixture::new()?;
+    let keys = Certificates::for_server_name("media.internal")?;
+    let access = NetworkAccess::PrivateLan {
+        server_name: "media.internal".into(),
+        peer_ip: "127.0.0.1".parse()?,
+    };
+    let running = Running::with_network_access(&fixture, &keys, access.clone())?;
+    let make_client = |access, server: &str| {
+        Client::with_network_access(
+            running.address,
+            keys.ca.as_bytes(),
+            server.as_bytes(),
+            keys.client.as_bytes(),
+            keys.client_key.as_bytes(),
+            access,
+        )
+    };
+    assert!(keys.client(running.address).is_err());
+    assert!(
+        make_client(
+            NetworkAccess::PrivateLan {
+                server_name: "other.internal".into(),
+                peer_ip: running.address.ip(),
+            },
+            &keys.server
+        )
+        .is_err()
+    );
+    let mut client = MediaClient::remote(
+        fixture.selection.logical(),
+        make_client(access.clone(), &keys.server)?,
+    )?;
+    let root = client.open_root("library").await?;
+    client.close_directory(root).await?;
+    // A second CA-trusted leaf is not the paired server.
+    let mut wrong_pin = MediaClient::remote(
+        fixture.selection.logical(),
+        make_client(access, &keys.other_server)?,
+    )?;
+    assert!(wrong_pin.open_root("library").await.is_err());
+    drop(client);
+    drop(wrong_pin);
+    running.stop().await?;
+
+    let denied = Running::with_network_access(
+        &fixture,
+        &keys,
+        NetworkAccess::PrivateLan {
+            server_name: "media.internal".into(),
+            peer_ip: "127.0.0.2".parse()?,
+        },
+    )?;
+    let client = Client::with_network_access(
+        denied.address,
+        keys.ca.as_bytes(),
+        keys.server.as_bytes(),
+        keys.client.as_bytes(),
+        keys.client_key.as_bytes(),
+        NetworkAccess::PrivateLan {
+            server_name: "media.internal".into(),
+            peer_ip: denied.address.ip(),
+        },
+    )?;
+    let mut client = MediaClient::remote(fixture.selection.logical(), client)?;
+    assert!(client.open_root("library").await.is_err());
+    drop(client);
+    denied.stop().await
+}
+
+impl Running {
     async fn stop(mut self) -> TestResult {
         self.handle.graceful_shutdown(Some(Duration::from_secs(1)));
         tokio::time::timeout(Duration::from_secs(3), &mut self.task).await???;
@@ -3228,6 +3314,7 @@ async fn media_adapter_dispatch_bounds_json_before_operation_admission() -> Test
     let state = Arc::new(AdapterState {
         native: Arc::new(NativeAdapter::new(fixture.selection.clone(), Vec::new())?),
         host: "localhost:1234".into(),
+        access: NetworkAccess::Loopback,
         slots: Arc::new(Semaphore::new(0)),
     });
     let connection = Connection::connect_info("127.0.0.1:1234".parse::<SocketAddr>()?);

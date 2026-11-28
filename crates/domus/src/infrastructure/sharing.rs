@@ -18,6 +18,10 @@ pub struct SharingConfiguration {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharingAccount {
+    #[serde(
+        default,
+        deserialize_with = "super::local_file::deserialize_credential_reference"
+    )]
     pub credentials_file: PathBuf,
     pub server: SocketAddrV4,
     pub acknowledge_plaintext_login: bool,

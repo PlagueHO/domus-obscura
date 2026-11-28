@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { BackendConfigurationState } from "../src/generated/BackendConfigurationState";
 import type { BackendCertificateStatus } from "../src/generated/BackendCertificateStatus";
 import type { ConfigurationSection } from "../src/generated/ConfigurationSection";
@@ -6,9 +6,10 @@ import type { WorkerStatus } from "../src/generated/WorkerStatus";
 import type { LocalStatus } from "../src/generated/LocalStatus";
 import { request } from "./api";
 import { useResource } from "./hooks";
-import { Alert, Button } from "./components/ui";
+import { Alert, Button, HeaderIconAction, HeaderCard, SettingsSaveTarget } from "./components/ui";
 import { Icon } from "./components/Media";
 import { ArtistPhotoBindings } from "./ArtistPhotoBindings";
+import { SoulseekAccount } from "./SoulseekAccount";
 import { configurationSections } from "./backend-configuration-state";
 
 type Section = ConfigurationSection | "music_output" | "music_roots";
@@ -18,24 +19,23 @@ const RefreshContext = createContext<{ busy: boolean; refresh: () => void } | un
 export function ConfigurationCard({ title, children }: { title: string; children: ReactNode }) {
   const refresh = useContext(RefreshContext);
   return (
-    <section className="design-card configuration-section">
-      <header className="design-card-header">
-        <h2>{title}</h2>
-        {refresh && (
-          <Button
-            variant="ghost"
-            className="icon-button"
-            aria-label="Refresh settings"
-            title="Refresh settings"
+    <HeaderCard
+      title={title}
+      className="configuration-section"
+      actions={
+        refresh && (
+          <HeaderIconAction
+            label="Refresh settings"
             disabled={refresh.busy}
             onClick={refresh.refresh}
           >
             <Icon name="refresh" />
-          </Button>
-        )}
-      </header>
-      <div className="design-card-body">{children}</div>
-    </section>
+          </HeaderIconAction>
+        )
+      }
+    >
+      {children}
+    </HeaderCard>
   );
 }
 
@@ -59,8 +59,16 @@ export function BackendConfiguration({
       typeof location === "undefined"
         ? null
         : new URLSearchParams(location.hash.split("?")[1]).get("section");
-    return configurationSections.find(({ id }) => id === requested)?.id ?? "general";
+    if (requested === "music_soulseek") return "music_acquisition";
+    return requested === "music_roots" || requested === "music_output"
+      ? requested
+      : (configurationSections.find(({ id }) => id === requested)?.id ?? "general");
   });
+  const content = useRef<HTMLDivElement>(null);
+  const [saveTarget, setSaveTarget] = useState<HTMLDivElement | null>(null);
+  useEffect(() => {
+    content.current?.scrollTo(0, 0);
+  }, [section]);
   const state = resource.data;
   const fresh = !resource.error && !resource.loading;
   const policyReadOnly =
@@ -94,32 +102,6 @@ export function BackendConfiguration({
         },
       }}
     >
-      <div className="configuration-messages">
-        <Alert error={resource.error} />
-        <p role="status">
-          Host configuration is read-only. Stop the API and all workers before editing the
-          configuration file. Validate the file, then restart all components.
-        </p>
-        {state?.restart_required && (
-          <div className="configuration-notice" role="status">
-            <div>
-              <strong>Saved host settings are not active</strong>
-              <p>
-                A coordinated restart is required. Refresh only reads the file; it does not apply
-                changes.
-              </p>
-            </div>
-          </div>
-        )}
-        {Boolean(resource.error) && state && (
-          <p role="status">
-            The saved settings could not be checked. The last loaded values are shown.
-          </p>
-        )}
-        {resource.loading && state && (
-          <p role="status">Refreshing settings. The last loaded values are shown.</p>
-        )}
-      </div>
       <div className="configuration-layout">
         <label className="configuration-section-picker">
           Settings section
@@ -137,7 +119,7 @@ export function BackendConfiguration({
                   <option value="music_output">Output policy</option>
                 )}
                 {group === "Media · Music" && roots && (
-                  <option value="music_roots">Library roots</option>
+                  <option value="music_roots">Library folders</option>
                 )}
               </optgroup>
             ))}
@@ -159,72 +141,132 @@ export function BackendConfiguration({
               Media
             </div>
             <div className="configuration-subgroup">Music</div>
-            {configurationSections
-              .filter(({ group }) => group === "Media · Music")
-              .map(({ id, title }) => navigation(id, title))}
-            {output && navigation("music_output", "Output policy")}
-            {roots && navigation("music_roots", "Library roots")}
+            <div className="configuration-subgroup-items">
+              {configurationSections
+                .filter(({ group }) => group === "Media · Music")
+                .map(({ id, title }) => navigation(id, title))}
+              {output && navigation("music_output", "Output policy")}
+              {roots && navigation("music_roots", "Library folders")}
+            </div>
           </div>
         </nav>
-        <div className="configuration-content">
-          <div hidden={!backendSection}>
-            <ConfigurationCard title={currentSection?.title ?? "Settings"}>
-              <p className="muted">{currentSection?.description}</p>
-              {!state && !resource.error && <p role="status">Loading settings…</p>}
-              {state &&
-                fresh &&
-                backendSection === "tls" &&
-                state.active.environment !== "single_user" &&
-                state.active.tls_mode === "azure_dns" && (
-                  <ManagedCertificateStatus revision={state.active_revision} />
+        <div className="configuration-pane">
+          <SettingsSaveTarget.Provider value={saveTarget}>
+            <div
+              ref={content}
+              className="configuration-content"
+              role="region"
+              aria-label="Settings content"
+              tabIndex={0}
+            >
+              <div className="configuration-messages">
+                <Alert error={resource.error} />
+                <p className="muted">
+                  Primary library and Soulseek account changes restart the API and worker. Other
+                  host settings are managed by the operator.
+                </p>
+                {state?.restart_required && (
+                  <div className="configuration-notice" role="status">
+                    <div>
+                      <strong>Saved host settings are not active</strong>
+                      <p>
+                        A coordinated restart is required. Refresh only reads the file; it does not
+                        apply changes.
+                      </p>
+                    </div>
+                  </div>
                 )}
-              {state && backendSection === "music_sharing" && (
-                <>
-                  <SharingWorkerStatus revision={state.saved_revision} />
-                  <h3>Saved sharing configuration</h3>
-                  <p>These are saved worker settings, not a live sharing status report.</p>
-                </>
-              )}
-              {state && backendSection && (
-                <SectionSummary configuration={state.saved} section={backendSection} />
-              )}
-              {state && backendSection === "music_providers" && (
-                <ArtistPhotoBindings
-                  readOnly={policyReadOnly || !fresh}
-                  enabled={state.active.services.artist_images.includes("wikimedia-commons")}
-                />
-              )}
-              {state && backendSection && (
-                <details className="configuration-details">
-                  <summary>Advanced</summary>
-                  {state.saved_requires_validation && (
-                    <p>Saved settings need full validation before all components restart.</p>
+                {Boolean(resource.error) && state && (
+                  <p role="status">
+                    The saved settings could not be checked. The last loaded values are shown.
+                  </p>
+                )}
+                {resource.loading && state && (
+                  <p role="status">Refreshing settings. The last loaded values are shown.</p>
+                )}
+              </div>
+              <div hidden={!backendSection}>
+                <ConfigurationCard title={currentSection?.title ?? "Settings"}>
+                  <p className="muted">{currentSection?.description}</p>
+                  {!state && !resource.error && <p role="status">Loading settings…</p>}
+                  {state &&
+                    fresh &&
+                    backendSection === "tls" &&
+                    state.active.environment !== "single_user" &&
+                    state.active.tls_mode === "azure_dns" && (
+                      <ManagedCertificateStatus revision={state.active_revision} />
+                    )}
+                  {state && backendSection === "music_sharing" && (
+                    <>
+                      <SharingWorkerStatus revision={state.saved_revision} />
+                      <h3>Saved sharing configuration</h3>
+                      <p>These are saved worker settings, not a live sharing status report.</p>
+                    </>
                   )}
-                  <h3>
-                    {backendSection === "music_sharing"
-                      ? "API configuration snapshot"
-                      : "Currently running"}
-                  </h3>
-                  {backendSection === "music_sharing" && (
-                    <p>The API snapshot does not report the separate worker configuration.</p>
+                  {state && backendSection && (
+                    <SectionSummary configuration={state.saved} section={backendSection} />
                   )}
-                  <SectionSummary configuration={state.active} section={backendSection} />
-                  <dl className="properties">
-                    <dt>Active revision</dt>
-                    <dd>
-                      <code>{state.active_revision}</code>
-                    </dd>
-                    <dt>Saved revision</dt>
-                    <dd>
-                      <code>{state.saved_revision}</code>
-                    </dd>
-                  </dl>
-                </details>
+                  {state && backendSection === "music_providers" && (
+                    <ArtistPhotoBindings
+                      readOnly={policyReadOnly || !fresh}
+                      enabled={state.active.services.artist_images.includes("wikimedia-commons")}
+                    />
+                  )}
+                  {state && backendSection && (
+                    <details className="configuration-details">
+                      <summary>Advanced</summary>
+                      {state.saved_requires_validation && (
+                        <p>Saved settings need full validation before all components restart.</p>
+                      )}
+                      <h3>
+                        {backendSection === "music_sharing"
+                          ? "API configuration snapshot"
+                          : "Currently running"}
+                      </h3>
+                      {backendSection === "music_sharing" && (
+                        <p>The API snapshot does not report the separate worker configuration.</p>
+                      )}
+                      <SectionSummary configuration={state.active} section={backendSection} />
+                      <dl className="properties">
+                        <dt>Active revision</dt>
+                        <dd>
+                          <code>{state.active_revision}</code>
+                        </dd>
+                        <dt>Saved revision</dt>
+                        <dd>
+                          <code>{state.saved_revision}</code>
+                        </dd>
+                      </dl>
+                    </details>
+                  )}
+                </ConfigurationCard>
+              </div>
+              {backendSection === "music_acquisition" && (
+                <ConfigurationCard title="Soulseek account">
+                  <SoulseekAccount
+                    disabled={policyReadOnly || !fresh}
+                    onChanged={resource.refresh}
+                  />
+                </ConfigurationCard>
               )}
-            </ConfigurationCard>
-          </div>
-          <div hidden={section !== "music_output"}>{output}</div>
-          <div hidden={section !== "music_roots"}>{roots}</div>
+              <div hidden={section !== "music_output"}>
+                <SettingsSaveTarget.Provider value={section === "music_output" ? saveTarget : null}>
+                  {output}
+                </SettingsSaveTarget.Provider>
+              </div>
+              <div hidden={section !== "music_roots"}>
+                <SettingsSaveTarget.Provider value={section === "music_roots" ? saveTarget : null}>
+                  {roots}
+                </SettingsSaveTarget.Provider>
+              </div>
+            </div>
+          </SettingsSaveTarget.Provider>
+          <div
+            ref={setSaveTarget}
+            className="settings-save-footer"
+            role="group"
+            aria-label="Settings save actions"
+          />
         </div>
       </div>
     </RefreshContext.Provider>

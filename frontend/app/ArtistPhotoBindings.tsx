@@ -5,7 +5,7 @@ import type { CheckArtistPhoto } from "../src/generated/CheckArtistPhoto";
 import type { SaveArtistPhoto } from "../src/generated/SaveArtistPhoto";
 import { request, query } from "./api";
 import { useCommand, useMetadataResource } from "./hooks";
-import { Alert, Button, Check, Pager } from "./components/ui";
+import { Alert, Button, Pager, SettingsRow, SettingsSaveButton } from "./components/ui";
 import { PhotoCredit } from "./ArtistPhoto";
 
 export function ArtistPhotoBindings({
@@ -122,31 +122,36 @@ export function ArtistPhotoBindings({
       {message && <p role="status">{message}</p>}
       <fieldset disabled={readOnly || !enabled || command.busy}>
         <legend>Check and save a photo</legend>
-        <label>
-          MusicBrainz artist ID
-          <input
-            value={artistId}
-            spellCheck={false}
-            onChange={(event) => {
-              invalidate();
-              setArtistId(event.target.value);
-            }}
-          />
-        </label>
-        <label>
-          Commons File title
-          <input
-            value={file}
-            spellCheck={false}
-            onChange={(event) => {
-              invalidate();
-              setFile(event.target.value);
-            }}
-          />
-          <small>
-            Enter a File: title, not a URL. JPEG and PNG originals must fit the image limits.
-          </small>
-        </label>
+        <SettingsRow label="MusicBrainz artist ID" hint="Use the ID for the exact artist.">
+          {(control) => (
+            <input
+              {...control}
+              value={artistId}
+              spellCheck={false}
+              onChange={(event) => {
+                invalidate();
+                setArtistId(event.target.value);
+              }}
+            />
+          )}
+        </SettingsRow>
+        <SettingsRow
+          label="Commons File title"
+          hint="Enter a File: title, not a URL. JPEG and PNG originals must fit the image limits."
+          wide
+        >
+          {(control) => (
+            <input
+              {...control}
+              value={file}
+              spellCheck={false}
+              onChange={(event) => {
+                invalidate();
+                setFile(event.target.value);
+              }}
+            />
+          )}
+        </SettingsRow>
         <Button
           variant="secondary"
           disabled={!artistId.trim() || file.trim() === "File:"}
@@ -188,20 +193,31 @@ export function ArtistPhotoBindings({
               Commons does not guarantee rights statements. Other rights can apply, including
               personality and privacy rights.
             </p>
-            <Check
-              checked={permitted}
-              disabled={!previewLoaded || previewFailed}
-              onChange={setPermitted}
-            >
-              This photo shows the exact artist. I have permission to use it under the shown license
-              and other applicable rights.
-            </Check>
-            <Button
-              disabled={!permitted || !previewLoaded || previewFailed}
+            <SettingsRow label="This photo shows the exact artist. I have permission to use it under the shown license and other applicable rights.">
+              {(control) => (
+                <input
+                  {...control}
+                  type="checkbox"
+                  checked={permitted}
+                  disabled={!previewLoaded || previewFailed}
+                  onChange={(event) => setPermitted(event.target.checked)}
+                />
+              )}
+            </SettingsRow>
+            <SettingsSaveButton
+              busy={command.busy}
+              disabled={
+                readOnly ||
+                !enabled ||
+                command.busy ||
+                !permitted ||
+                !previewLoaded ||
+                previewFailed
+              }
               onClick={() => void save()}
             >
               Save artist photo link
-            </Button>
+            </SettingsSaveButton>
           </div>
         )}
       </fieldset>

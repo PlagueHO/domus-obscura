@@ -2213,11 +2213,12 @@ version-specific layout and mapping are still required before member admission.
 
 ### Confirmed initial remote-media profile
 
-The user selected **Require a proved server-side adapter**. Initial remote-media
-support requires proved server-side native witness and operation support.
-Standard SMB/NAS access without such support is not an approved fallback.
-This limits initial server compatibility; it does not settle durable identity
-or client-local/remote separation. Supporting every NAS is not claimed.
+The user selected **Require a proved server-side adapter** for remote write
+support. Standard SMB/NAS access without proved native witness and operations
+is not an approved write fallback. The user later approved scan-only SMB/NFS
+libraries through the host filesystem client. Those roots still require the
+supported identity codec and exact topology assurances. Supporting every NAS
+is not claimed.
 
 Keep runtime integration blocked until the applicable gates pass and the
 separate integration approval is given. The profile decision does not approve

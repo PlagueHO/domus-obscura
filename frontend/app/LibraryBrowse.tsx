@@ -322,7 +322,6 @@ export function LibraryBrowser({
   artist,
   album,
   entry,
-  readOnly,
 }: {
   locations: Location[];
   location: number;
@@ -423,13 +422,7 @@ export function LibraryBrowser({
             <a href={libraryLink(location, { view: "folders", folder: selected.data.folder })}>
               Open indexed folder
             </a>
-            <FolderRefresh
-              key={`${location}:${selected.data.folder}`}
-              location={location}
-              folder={selected.data.folder}
-              readOnly={readOnly}
-              revision={revision}
-            />
+            <a href="#/library-scans">Open Library scans and backup checks</a>
             <FilePage
               key={`${location}:${album}:files`}
               location={location}

@@ -21,6 +21,18 @@ pub(crate) const MAXIMUM: u64 = 16384;
 
 mod media_adapter;
 pub use media_adapter::PreparedMediaAdapter;
+mod folder_browser;
+pub use folder_browser::{BrowseHostFolder, HostFolderEntry, HostFolderPage};
+mod primary_library;
+mod publication;
+mod soulseek_account;
+use primary_library::LibraryChangeSelection;
+pub use primary_library::{
+    InspectPrimaryLibrary, PrimaryLibraryControl, PrimaryLibraryPreview, PrimaryLibraryStorageItem,
+    SelectPrimaryLibrary,
+};
+use soulseek_account::SoulseekAccountSelection;
+pub use soulseek_account::{SaveSoulseekAccount, SoulseekAccountStatus};
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +57,14 @@ pub(crate) struct Configuration {
     pub(crate) database: PathBuf,
     #[serde(default)]
     pub(crate) storage: Option<StorageConfiguration>,
+    #[serde(
+        default,
+        alias = "primary_library",
+        skip_serializing_if = "Option::is_none"
+    )]
+    library_change: Option<LibraryChangeSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    soulseek_account: Option<SoulseekAccountSelection>,
     pub(crate) paired_media: Option<media_adapter::PairedMediaConfiguration>,
     pub(super) listen: std::net::SocketAddr,
     pub(super) origin: String,
@@ -340,7 +360,8 @@ pub struct BackendConfigurationResult {
 }
 
 /// Startup and HTTP share passive inspection and revision-bound validation.
-/// Only an operator can edit host JSON, with every state user stopped.
+/// Host JSON is operator-managed except for confirmed primary-library activation
+/// by the native supervisor, with all API and worker processes stopped.
 ///
 /// Callers must authorize access before exposing this service to a transport.
 /// Opening it does not start a server, migrate SQLite, or activate saved changes.
@@ -357,6 +378,7 @@ pub struct ConfigurationService {
     state_storage: StorageLease,
     _configuration_storage: StorageLease,
     paired_media: Option<Arc<crate::infrastructure::filesystem::media_adapter::SelectedMedia>>,
+    folder_browser: Mutex<folder_browser::FolderBrowser>,
 }
 
 impl ConfigurationService {
@@ -484,7 +506,13 @@ impl ConfigurationService {
                 "library root must be an absolute server path of at most 4096 bytes".into(),
             ));
         }
-        let id = crate::application::add_location(store, Path::new(root), kind)?;
+        let id = crate::application::add_location(store, Path::new(root), kind).map_err(|error| {
+            match error {
+                Error::Conflict(message) if message == "directory has no selected storage role" =>
+                    Error::Conflict("This folder is not selected in the host storage configuration. An operator must select and validate it with the API and workers stopped, then restart them before registration.".into()),
+                error => error,
+            }
+        })?;
         store.location(id)
     }
 
@@ -542,6 +570,9 @@ impl ConfigurationService {
             resolve(&mut managed.state_directory);
             resolve(&mut managed.dns.client_secret_file);
         }
+        if let Some(account) = configuration.soulseek_account.as_mut() {
+            resolve(&mut account.credentials_file);
+        }
         for acquisition in [
             configuration.local_acquisition.as_mut(),
             configuration
@@ -553,6 +584,11 @@ impl ConfigurationService {
         .flatten()
         {
             resolve(&mut acquisition.staging_root);
+            if acquisition.credentials_file.as_os_str().is_empty()
+                && let Some(account) = &configuration.soulseek_account
+            {
+                acquisition.credentials_file = account.credentials_file.clone();
+            }
             resolve(&mut acquisition.credentials_file);
         }
         if let Some(account) = configuration
@@ -561,6 +597,11 @@ impl ConfigurationService {
             .and_then(|worker| worker.sharing.as_mut())
             .and_then(|sharing| sharing.account.as_mut())
         {
+            if account.credentials_file.as_os_str().is_empty()
+                && let Some(selected) = &configuration.soulseek_account
+            {
+                account.credentials_file = selected.credentials_file.clone();
+            }
             resolve(&mut account.credentials_file);
         }
     }
@@ -595,6 +636,7 @@ impl ConfigurationService {
             state_storage,
             _configuration_storage: configuration_storage,
             paired_media: None,
+            folder_browser: Mutex::default(),
         };
         service.paired_media = service
             .active
@@ -1194,7 +1236,13 @@ impl ConfigurationService {
             ),
             (
                 ConfigurationSection::Storage,
-                &["database", "cache", "storage", "paired_media"][..],
+                &[
+                    "database",
+                    "cache",
+                    "storage",
+                    "paired_media",
+                    "library_change",
+                ][..],
             ),
             (ConfigurationSection::MusicProviders, &["services"][..]),
             (
@@ -1518,6 +1566,12 @@ impl ConfigurationService {
         let mut paths = vec![self.path.clone()];
         paths.extend(
             configuration
+                .soulseek_account
+                .iter()
+                .map(|account| account.credentials_file.clone()),
+        );
+        paths.extend(
+            configuration
                 .paired_media
                 .iter()
                 .map(|media| media.client_file.clone()),
@@ -1571,6 +1625,13 @@ impl ConfigurationService {
                 .map(PathBuf::as_path)
                 .collect::<Vec<_>>(),
         )?;
+        if let Some(account) = &configuration.soulseek_account {
+            self.require_soulseek_account_reference(account)?;
+            crate::infrastructure::worker::read_credentials(
+                &store.source(),
+                &account.credentials_file,
+            )?;
+        }
         if let Some(assets) = &configuration.browser_assets {
             if let Some(client) = store.selected_filesystem() {
                 let directory = crate::infrastructure::filesystem::LibraryDirectory::open(assets)?;

@@ -59,6 +59,9 @@ impl WorkerConfiguration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerOperation {
+    ScanLibrary {
+        location_id: i64,
+    },
     Scan {
         location_id: i64,
     },
@@ -113,7 +116,10 @@ impl WorkerOperation {
         }
     }
     pub(crate) fn lane(&self) -> &'static str {
-        if matches!(self, Self::Scan { .. } | Self::RefreshFolder { .. }) {
+        if matches!(
+            self,
+            Self::ScanLibrary { .. } | Self::Scan { .. } | Self::RefreshFolder { .. }
+        ) {
             "scan"
         } else {
             "acquisition"
@@ -122,6 +128,7 @@ impl WorkerOperation {
 
     pub(crate) fn target(&self) -> String {
         match self {
+            Self::ScanLibrary { .. } => "scan-library".into(),
             Self::Scan { location_id } | Self::RefreshFolder { location_id, .. } => {
                 format!("scan-{location_id}")
             }
@@ -131,7 +138,7 @@ impl WorkerOperation {
 
     pub(crate) fn job(&self) -> Option<(i64, i64)> {
         match *self {
-            Self::Scan { .. } | Self::RefreshFolder { .. } => None,
+            Self::ScanLibrary { .. } | Self::Scan { .. } | Self::RefreshFolder { .. } => None,
             Self::Acquire {
                 job_id,
                 plan_version,
@@ -150,6 +157,13 @@ impl WorkerOperation {
             store.require_current_worker_plan(job, version)?;
         }
         match *self {
+            Self::ScanLibrary { location_id } => {
+                if location_id != store.primary_library_id()? {
+                    return Err(Error::Conflict(
+                        "A library scan must start from the primary library.".into(),
+                    ));
+                }
+            }
             Self::Scan { location_id } => {
                 if location_id <= 0 {
                     return Err(Error::InvalidInput("location ID must be positive".into()));
@@ -287,6 +301,7 @@ impl Drop for ActiveLanes {
 }
 
 pub struct PreparedProductionWorker {
+    configuration_source: Option<super::server::configuration::ConfigurationService>,
     database_source: StoreSource,
     configuration: WorkerConfiguration,
     services: crate::application::services::ServiceConfiguration,
@@ -303,14 +318,18 @@ impl PreparedProductionWorker {
             .clone()
             .ok_or_else(|| Error::InvalidInput("production_worker is not configured".into()))?;
         let store = source.open_store(StoreOpenMode::ReadCurrent)?;
+        source.require_configured_primary(&store)?;
+        source.require_configured_soulseek_account(&store)?;
         worker.validate(&store, &configuration.services)?;
         super::local_file::protect_files(&store, &[path])?;
         let lock = source.state_lock("worker")?;
+        let revision = source.active_revision().into();
         Ok(Self {
+            configuration_source: Some(source),
             database_source: store.source(),
             configuration: worker,
             services: configuration.services,
-            revision: source.active_revision().into(),
+            revision,
             _lock: lock,
         })
     }
@@ -406,6 +425,23 @@ impl PreparedProductionWorker {
             if let Err(error) = heartbeat {
                 failure.get_or_insert(error);
                 stop.store(true, Ordering::Release);
+            }
+            if !stop.load(Ordering::Acquire) && store.library_scan_due()? {
+                let editable = self.configuration_source.as_ref().map_or_else(
+                    || {
+                        Err(Error::Conflict(
+                            "Scheduled scans require an operator host configuration.".into(),
+                        ))
+                    },
+                    |source| source.require_editable(),
+                );
+                if let Err(error) = store.schedule_library_scan(
+                    self.configuration.queue_capacity,
+                    &self.configuration.binding(&self.services)?,
+                    editable,
+                ) {
+                    eprintln!("scheduled library scan: {error}");
+                }
             }
             for (index, lane) in ["acquisition", "scan"].iter().enumerate() {
                 if let Some(running) = lanes[index].as_ref()
@@ -531,6 +567,9 @@ fn execute(
         return Err(Error::Conflict("worker provider or acquisition configuration differs from the accepted request; restore that configuration or dismiss and explicitly submit again".into()));
     }
     match operation {
+        WorkerOperation::ScanLibrary { location_id } => {
+            crate::application::scan_library(&mut store, location_id)?;
+        }
         WorkerOperation::Scan { location_id } => {
             crate::application::scan_location(&mut store, location_id)?;
         }

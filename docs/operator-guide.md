@@ -1,5 +1,36 @@
 # Operator guide
 
+## Soulseek account setup
+
+On a native supervised host, open **System settings > Acquisition** and find the
+**Soulseek account** card. Enter the
+username and password, then select **Save account**. The password is write-only
+and clears from the form after submission. The app saves a new private file in
+application storage. SQLite retains only non-secret approval and activation data.
+Neither the account name nor password is returned by the account status API.
+
+Select **Restart and apply account** to apply that exact saved account. The
+supervisor stops the worker and API, validates the saved change, updates only
+the account reference, then restarts both. Saving and applying do not sign in,
+test the connection, enable downloads, or share files. **Check account status**
+appears when the result is unknown or a saved change is pending. Cancel a saved or incomplete account change
+before activation if needed. Do not delete or edit retained credential files.
+
+The account form is unavailable when host settings are read-only, the saved
+configuration is stale, or Soulseek acquisition, an account-backed sharing
+service, sharing access or a listener is configured. Installed services and
+Docker still use their separate operator procedure.
+
+Soulseek login uses plaintext TCP, as described by the
+[community protocol reference](https://nicotine-plus.org/doc/SLSKPROTOCOL.html).
+Connection setup and consent to plaintext login require separate operator actions.
+An operator can enable acquisition or sharing with an omitted `credentials_file`
+to use the selected account. Explicit credential-file references remain unchanged.
+The selected reference is stored in `soulseek_account`; new private versions use
+`.domus-soulseek-<change-id>.credentials.json` next to the host configuration.
+At most 100 account changes are retained. An explicit empty credential-file
+reference is invalid; omit the field to select the saved account.
+
 ## Scope and evidence
 
 **The current baseline is local binary execution under an approved normal user
@@ -18,6 +49,44 @@ The [Windows guide](windows-services.md) and [Linux guide](linux-services.md)
 retain the optional package and service procedures. Their presence does not
 prove installed-service or reboot acceptance. Windows host checks remain
 [#48](https://github.com/PlagueHO/domus-obscura/issues/48).
+
+### Explicit private-network media transport
+
+The media adapter and paired client keep loopback admission when `network` is
+omitted. Private-LAN admission is an explicit, media-only option in their
+separate configuration documents. It does not change the application API or
+MCP listener.
+
+For a paired client, `peer_ip` is the exact adapter IP. The client's `address`
+must use that same IP and a fixed nonzero port. For an adapter, `peer_ip` is the
+exact client source IP. Its `listen` must use a fixed private or loopback IP and
+a nonzero port. Wildcard, public, link-local, multicast and IPv4-mapped IPv6
+addresses are rejected. Loopback is permitted in explicit mode for generated
+local fixtures.
+
+```json
+{
+  "network": {
+    "mode": "private_lan",
+    "server_name": "media.internal",
+    "peer_ip": "192.168.1.20"
+  }
+}
+```
+
+Both documents must name the same lowercase server DNS name. The server certificate must
+cover that exact name. The client connects only to its fixed address; it does
+not discover or resolve another peer. Mutual TLS still requires trusted,
+currently valid certificates and the exact paired leaf certificates.
+No proxy, redirect, automatic retry or TLS resumption is enabled. Exact Host,
+Content-Type and media-adapter headers remain required. Browser headers are
+rejected. An IP match alone never replaces certificate authentication.
+
+This transport option does not configure direct SMB/NFS credentials or mounts.
+The approved Settings proposal and coordinated activation flow are still
+pending implementation. Do not change live files, certificates, listeners or
+firewall rules without separate approval. Generated loopback TLS tests do not
+prove private-LAN connectivity, server installation or media acceptance.
 
 | Evidence class                 | What it establishes                                                                                                                                                                                   | Limit                                                                                         |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -287,8 +356,19 @@ or staging choice cannot silently replace it.
 
 For manual edits, stop the API first. Stop the worker too when its configuration
 changes. Preserve private permissions and the stable sibling lock. Restart in
-API-then-worker order. Application components never edit existing host JSON.
+API-then-worker order. Other host settings remain operator-managed.
 Do not use a file replacement as a substitute for stopping all components.
+
+The sole in-app exception is a confirmed primary-library change under the
+native supervisor. Use **System settings > Library folders** to inspect an
+existing local folder, review storage separation, and save exact approval.
+Then explicitly select **Restart and apply primary library**. The supervisor
+drains both processes, validates the selected storage changes, publishes them,
+and restarts the API before the worker. Other JSON fields remain unchanged.
+No media moves. Previous location IDs and recovery evidence remain retained;
+the previous primary is not converted into a backup.
+See [the developer workflow](developer-workflow.md#change-the-primary-library-in-settings)
+for limits and uncertain-activation recovery.
 
 ## Certificates and peer networking
 
@@ -474,7 +554,9 @@ decision; it does not preserve or erase unresolved old work.
    installed files block removal; inspect the error instead of forcing deletion.
 5. Start one new API as the upgrade migration owner. Do not start a second
    migration-capable process. The worker must remain stopped until the schema
-   and active configuration are confirmed.
+   and active configuration are confirmed. API startup can migrate an existing
+   selected database. Passive validation and ordinary selected-state opens do
+   not migrate it. A missing database still requires explicit fresh setup.
 6. Inspect retained questions, publication/transfer state, and certificate recovery.
    Start the worker with the reviewed saved configuration. Confirm its revision.
 7. Restore any approved supervision only after readiness and recovery checks.

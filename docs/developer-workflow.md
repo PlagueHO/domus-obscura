@@ -123,10 +123,77 @@ After a crash, inspect an occupied
 Unix control socket and verify that its owner has stopped before explicit cleanup.
 Never delete stable application lock files.
 
-Stop all state users before editing host JSON. Application components cannot
-save host JSON. System policy commands remain gated by the current read-only flag.
+Stop all state users before operator edits to host JSON. Other host settings
+remain operator-managed. Confirmed library folder and Soulseek account changes
+in Settings are narrow exceptions. They require the native supervisor.
+System policy commands remain gated by the current read-only flag.
 Use the [operator maintenance boundary](operator-guide.md#stop-and-exclude-all-state-users)
 for migrations, backups, recovery, and external configuration changes.
+
+### Configure library folders in Settings
+
+Open **System settings > Library folders**. Select **Change…** under **Primary
+library** or **Add backup** under **Backup libraries**. Set a primary library
+before you add a backup.
+Select **Browse…** to choose a local drive and navigate directories.
+You can also enter an existing absolute folder path on the application host.
+The dialog reads through Rust, not through a browser-local file picker. It
+blocks links, reparse points and known private application storage. **Use this
+folder** only fills the path; it does not approve or register the folder.
+Directory pages scan at most 128 entries. The dialog holds at most 2048 displayed
+folders. Enter a more specific path when that limit is reached. Closing the
+dialog releases its continuation. Listings expire after three minutes and are
+discarded on the next browser request. Changed listings must be reloaded.
+Listings from another server instance cannot be continued.
+
+Use `.\dev.ps1 -TaskArgs @('browser','folder-picker.spec.ts')` on Windows to
+check this dialog with generated browser fixtures. On Linux, use
+`cargo task browser folder-picker.spec.ts`. The browser task forwards selectors
+to Playwright and keeps the private fixture asset setup.
+
+For Windows SMB, enter a UNC path such as `\\server\Music`. For Linux SMB or
+NFS, enter a mounted path such as `/mnt/music`. The account that runs the Rust
+API must have read access. If opening a share fails, check the exact path,
+host connectivity and that account's access. The picker does not discover
+shares, save SMB/NFS credentials or mount shares. A successful browse does
+not approve the path for library operations.
+
+The folder review marks a recognized SMB/NFS filesystem as **scan only**.
+The host must provide the required directory identities.
+An unsupported identity or changed binding fails without treating files as missing.
+Scan-only folders cannot be acquisition or recovery destinations. A scan-only
+primary prevents album acquisition because every plan requires a writable primary.
+
+Select **Check** to verify the folder. For a backup, review the storage layout
+and confirm that none of the other folders is another path to the same folder
+or contains it. The check rejects known overlaps and duplicate backups.
+
+Select **Save primary library change** or **Save backup library change** to
+record approval for that exact folder, role and configuration revision. This
+does not activate the location. You can cancel the saved change before
+activation starts. Select **Restart and apply primary library** or **Restart
+and apply backup library** to stop the worker and API at safe boundaries,
+recheck the location and unfinished work, publish the selected storage changes,
+and restart both processes.
+The browser checks the saved activation result after reconnecting.
+
+No media is moved, copied, replaced, or deleted. The previous primary retains
+its location ID, native binding, index, plans, and receipts for history and
+recovery. It is not made a backup. Normal library lists and new plans use only
+current folders. A newly registered primary has unknown scan coverage.
+Adding a backup leaves the primary, existing backups and scan schedule unchanged.
+Adding a folder does not queue a scan. Use **Library scans** to update the index.
+
+Unfinished jobs, worker requests, scans, and recovery operations block a change.
+A failed recheck before configuration publication leaves the configuration
+unchanged. Uncertain publication or activation leaves the application stopped;
+inspect the retained change and `.domus-primary-<id>.pending` evidence before
+restarting. Do not remove stable locks or infer success from a lost HTTP response.
+Startup can finish only the exact published, approved activation.
+
+This flow requires the native application supervisor. Paired media, Docker and
+installed services require their separate operator procedure. You can still
+register an eligible folder that the operator already selected on the host.
 
 ## Separate Docker persistent state
 

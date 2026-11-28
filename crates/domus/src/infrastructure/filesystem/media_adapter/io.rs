@@ -7,7 +7,8 @@ use super::{
 use crate::domain::LibraryPath;
 use crate::infrastructure::filesystem::read_only::ReadEvidence;
 use crate::infrastructure::filesystem::{
-    LibraryDirectory, ReadFile, is_unsafe_cap_link, sync_directory,
+    FilesystemClass, LibraryDirectory, ReadFile, filesystem_class, is_unsafe_cap_link,
+    sync_directory,
 };
 use crate::infrastructure::permissions::FilePermissions;
 use crate::{Error, Result};
@@ -149,7 +150,13 @@ pub(crate) struct MediaEntryIo {
 
 impl MediaDirectoryIo {
     pub(crate) fn native(directory: LibraryDirectory) -> Result<Self> {
-        FilePermissions::current()?.check(&directory.directory_file()?, false)?;
+        let file = directory.directory_file()?;
+        if filesystem_class(&file)? == FilesystemClass::Remote {
+            return Err(Error::Conflict(
+                "Host-mounted network media cannot be used for writes or recovery.".into(),
+            ));
+        }
+        FilePermissions::current()?.check(&file, false)?;
         Ok(Self::Native(Box::new(directory)))
     }
 

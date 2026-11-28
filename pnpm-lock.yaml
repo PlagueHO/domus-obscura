@@ -172,6 +172,12 @@ importers:
 
   frontend:
     dependencies:
+      '@headless-tree/core':
+        specifier: 1.8.1
+        version: 1.8.1
+      '@headless-tree/react':
+        specifier: 1.8.1
+        version: 1.8.1(@headless-tree/core@1.8.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       react:
         specifier: 19.3.1
         version: 19.3.1
@@ -205,6 +211,16 @@ importers:
         version: 5.0.5(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5))
 
 packages:
+
+  '@headless-tree/core@1.8.1':
+    resolution: {integrity: sha512-SdHt9wuKpdenb4HT3d07alT3lor/8qStUNnCx1uw9z4ATghfnpC6JkpBeziWWtB7r/d0DC04oVcrVS/aq17h2Q==}
+
+  '@headless-tree/react@1.8.1':
+    resolution: {integrity: sha512-ascPdEgb/oDpbPJond1ptBkXQw3BlYtlOR3v+VO2J+YiR+Iqq3evaKJoea7+hFebfjBCoUaCYuKF8z4iA1ONjg==}
+    peerDependencies:
+      '@headless-tree/core': '*'
+      react: '*'
+      react-dom: '*'
 
   '@jridgewell/resolve-uri@3.1.2':
     resolution: {integrity: sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==}
@@ -778,6 +794,14 @@ packages:
     hasBin: true
 
 snapshots:
+
+  '@headless-tree/core@1.8.1': {}
+
+  '@headless-tree/react@1.8.1(@headless-tree/core@1.8.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)':
+    dependencies:
+      '@headless-tree/core': 1.8.1
+      react: 19.3.1
+      react-dom: 19.3.1(react@19.3.1)
 
   '@jridgewell/resolve-uri@3.1.2': {}
 

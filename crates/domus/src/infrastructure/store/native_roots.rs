@@ -177,6 +177,16 @@ fn require_saved(
 }
 
 impl Store {
+    pub(crate) fn require_media_write_binding(&self, root: &str) -> Result<()> {
+        if matches!(self.saved_root(root, "media")?, SavedRoot::Logical(binding) if binding.scan_only())
+        {
+            return Err(Error::Conflict(
+                "This library folder allows scans only. It cannot be an acquisition or recovery destination.".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn media_directory_io(
         &self,
         root: &str,
@@ -187,6 +197,7 @@ impl Store {
                 "media I/O cannot run inside a database transaction".into(),
             ));
         }
+        self.require_media_write_binding(root)?;
         match self.paired_media_session(root)? {
             Some(media) => MediaDirectoryIo::paired(media),
             None => MediaDirectoryIo::native(self.open_registered_root(root, "media")?),

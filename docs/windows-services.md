@@ -165,8 +165,10 @@ account. Stop and Remove remain available for an owned, misconfigured service.
 Start launches both roles in order and has no API-only inspection pause.
 Do not use it as an API-only migration or restore check.
 Worker startup depends on API readiness. Only the API migrates SQLite.
-An API service restart under a live worker service requires current schema and
-cannot migrate it. Do not run a foreground worker against the same state while
+Both foreground and service API startup hold the stable worker lock through
+schema migration. If the lock is busy, the API can start only with current
+schema. An API service restart under a live worker service also requires
+current schema. Do not run a foreground worker against the same state while
 using services. Stop every state user before a schema upgrade.
 
 Running means initialization completed, not just process creation. Worker

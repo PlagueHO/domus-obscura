@@ -42,6 +42,7 @@ fn fixture() -> Result<(
             root_id: root_id.into(),
             binding_revision: 1,
             role,
+            scan_only: false,
             provider_scope: "application".into(),
             relative: root_id.into(),
             expected,
@@ -100,6 +101,106 @@ fn count(store: &Store) -> Result<i64> {
         .query_row("SELECT count(*) FROM native_store_probe", [], |row| {
             row.get(0)
         })?)
+}
+
+#[test]
+fn selected_library_setup_lists_only_media_and_registers_exact_selection() -> Result<()> {
+    let (root, path, _, client) = fixture()?;
+    let mut store = Store::open_scoped(&path, &client, StoreOpenMode::Create)?;
+    let folders = store.library_folder_options()?;
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0].root_id, "media");
+    assert!(folders[0].location_id.is_none());
+    assert!(
+        store
+            .register_selected_library_folder("state", false, "main")
+            .is_err()
+    );
+    let location = store.register_selected_library_folder("media", false, "main")?;
+    assert_eq!(location.root, "storage-root:media");
+    assert_eq!(
+        location.display_path.as_deref(),
+        root.path().join("media").to_str()
+    );
+    assert_eq!(
+        store.library_folder_options()?[0].location_id,
+        Some(location.id)
+    );
+    assert!(
+        store
+            .register_selected_library_folder("media", false, "backup")
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn selected_scan_only_media_can_scan_and_cannot_be_a_write_destination() -> Result<()> {
+    let (root, path, mut configuration, _) = fixture()?;
+    std::fs::create_dir(root.path().join("backup"))?;
+    let (expected, _) = DirectoryExpectation::inspect(root.path(), &LibraryPath::parse("backup")?)?;
+    configuration.roots.push(StorageRoot {
+        root_id: "backup".into(),
+        binding_revision: 1,
+        role: StorageRole::Media,
+        scan_only: true,
+        provider_scope: "application".into(),
+        relative: "backup".into(),
+        expected,
+    });
+    let client = FilesystemClient::new(configuration, "a".repeat(64))?;
+    let mut store = Store::open_scoped(&path, &client, StoreOpenMode::Create)?;
+    let primary = store.register_selected_library_folder("media", false, "main")?;
+    let backup = store.register_selected_library_folder("backup", false, "backup")?;
+    assert_eq!(backup.scan_only, Some(true));
+    std::fs::write(root.path().join("backup").join("Album.txt"), b"fixture")?;
+    crate::application::scan_library(&mut store, primary.id)?;
+    assert_eq!(store.location(primary.id)?.coverage, "complete");
+    assert_eq!(store.location(backup.id)?.coverage, "complete");
+    assert_eq!(
+        store
+            .compare_library_backup(backup.id, "", 10)?
+            .differences
+            .len(),
+        1
+    );
+    assert!(store.media_directory_io(&primary.root).is_ok());
+    assert!(matches!(
+        store.media_directory_io(&backup.root),
+        Err(Error::Conflict(message)) if message.contains("allows scans only")
+    ));
+    store.save_settings(None, &crate::domain::OutputSettings::default())?;
+    let job = store.enqueue(1)?;
+    let request = super::PlanRequest {
+        job_id: job,
+        expected_version: 1,
+        settings_version: 1,
+        format: None,
+        audio_profile: None,
+        edition: crate::domain::EditionSelection {
+            release_id: "12345678-1234-4321-9876-123456789abc".into(),
+            album_artist: "Generated Artist".into(),
+            album: "Generated Album".into(),
+            bucket: None,
+            tracks: vec![crate::domain::PlannedTrack {
+                artist: "Generated Artist".into(),
+                title: "Generated Track".into(),
+                disc: Some(1),
+                disc_track: None,
+            }],
+        },
+        locations: vec![primary.id, backup.id],
+        accepts_incomplete_coverage: false,
+    };
+    assert!(matches!(
+        store.prepare_plan(request.clone()),
+        Err(Error::Conflict(message)) if message.contains("allows scans only")
+    ));
+    store.prepare_plan(super::PlanRequest {
+        locations: vec![primary.id],
+        ..request
+    })?;
+    Ok(())
 }
 
 #[test]
@@ -193,6 +294,7 @@ fn logical_store_container_probe() -> Result<()> {
                 root_id: root_id.into(),
                 binding_revision: 1,
                 role,
+                scan_only: false,
                 provider_scope: "application".into(),
                 relative: relative.into(),
                 expected,
@@ -335,6 +437,7 @@ fn logical_store_binding_survives_provider_relocation_without_rewriting_saved_ro
             root_id: root_id.into(),
             binding_revision: 1,
             role,
+            scan_only: false,
             provider_scope: "application".into(),
             relative: root_id.into(),
             expected,
@@ -651,6 +754,44 @@ fn native_store_selected_existing_modes_preserve_legacy_schema() -> Result<()> {
 }
 
 #[test]
+fn native_store_explicit_migration_requires_existing_selected_state() -> Result<()> {
+    let (_root, path, _configuration, client) = fixture()?;
+    assert!(Store::open_scoped(&path, &client, StoreOpenMode::Migrate).is_err());
+    assert!(!path.exists());
+    let mut initial = Store::open_scoped(&path, &client, StoreOpenMode::Create)?;
+    let job = initial.enqueue(1)?;
+    initial.connection.execute_batch(
+        "DROP TABLE soulseek_account_changes;
+         DROP TABLE primary_library_changes;
+         DROP INDEX one_main_location;
+         ALTER TABLE locations DROP COLUMN retired;
+         CREATE UNIQUE INDEX one_main_location ON locations(kind) WHERE kind='main';
+         DROP TABLE library_scan_schedule;
+         DROP TABLE library_scan_settings;
+         PRAGMA user_version=33;",
+    )?;
+    let source = initial.source();
+    drop(initial);
+    assert!(source.open(StoreOpenMode::Current).is_err());
+    let upgraded = source.open(StoreOpenMode::Migrate)?;
+    assert_eq!(
+        upgraded
+            .connection
+            .query_row("SELECT count(*) FROM jobs WHERE id=?1", [job], |row| row
+                .get::<_, i64>(0),)?,
+        1
+    );
+    assert_eq!(upgraded.library_scan_policy()?.interval_minutes, None);
+    assert_eq!(
+        upgraded.source().filesystem()?.selection_digest(),
+        client.selection_digest()
+    );
+    drop(upgraded);
+    assert!(source.open(StoreOpenMode::Current).is_ok());
+    Ok(())
+}
+
+#[test]
 fn native_store_spills_temp_data_inside_its_private_child() -> Result<()> {
     let (_root, path, _configuration, client) = fixture()?;
     let store = Store::open_scoped(&path, &client, StoreOpenMode::Create)?;
@@ -686,6 +827,7 @@ fn native_store_refuses_replaced_roots_and_missing_temp_without_repair() -> Resu
     std::fs::rename(state.join("sqlite-tmp"), state.join("retained-tmp"))?;
     for mode in [
         StoreOpenMode::Existing,
+        StoreOpenMode::Migrate,
         StoreOpenMode::Current,
         StoreOpenMode::ReadCurrent,
         StoreOpenMode::Snapshot,

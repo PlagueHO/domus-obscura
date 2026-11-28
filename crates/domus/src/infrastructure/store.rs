@@ -15,6 +15,7 @@ mod catalog_clock;
 mod inbox;
 mod job_controls;
 mod library;
+mod library_maintenance;
 mod native_roots;
 #[cfg(test)]
 mod native_storage_tests;
@@ -22,6 +23,7 @@ mod normalization;
 mod tag_reviews;
 pub use tag_reviews::{TagReview, TagReviewTrack};
 mod planning;
+mod primary_library;
 mod private_roots;
 mod publication;
 mod queries;
@@ -29,6 +31,8 @@ mod queue;
 mod recovery;
 mod restore;
 mod sessions;
+mod soulseek_account;
+pub use soulseek_account::SoulseekAccountChange;
 mod source_candidates;
 mod transfer_evidence;
 mod transfers;
@@ -100,6 +104,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/031_certificate_roots.sql"),
     include_str!("../../migrations/032_tag_policy.sql"),
     include_str!("../../migrations/033_expand_settings_tag_policy.sql"),
+    include_str!("../../migrations/034_library_maintenance.sql"),
+    include_str!("../../migrations/035_primary_library.sql"),
+    include_str!("../../migrations/036_soulseek_account.sql"),
 ];
 
 pub struct Store {
@@ -116,6 +123,9 @@ pub struct Store {
 pub enum StoreOpenMode {
     Create,
     Existing,
+    /// Upgrade an existing bound database while all other state users are stopped.
+    /// Unlike `Create`, this mode never creates a missing database.
+    Migrate,
     Current,
     ReadCurrent,
     Snapshot,
@@ -171,7 +181,9 @@ impl StoreSource {
     pub fn open(&self, mode: StoreOpenMode) -> Result<Store> {
         let native_mode = match mode {
             StoreOpenMode::Create => native_sqlite::OpenMode::Create,
-            StoreOpenMode::Existing | StoreOpenMode::Current => native_sqlite::OpenMode::ReadWrite,
+            StoreOpenMode::Existing | StoreOpenMode::Migrate | StoreOpenMode::Current => {
+                native_sqlite::OpenMode::ReadWrite
+            }
             StoreOpenMode::ReadCurrent | StoreOpenMode::Snapshot => {
                 native_sqlite::OpenMode::ReadOnly
             }
@@ -181,7 +193,7 @@ impl StoreSource {
             self.path.clone(),
             self.directory.clone(),
             self.filesystem.clone(),
-            matches!(mode, StoreOpenMode::Create)
+            matches!(mode, StoreOpenMode::Create | StoreOpenMode::Migrate)
                 || (self.filesystem.is_none() && matches!(mode, StoreOpenMode::Existing)),
             matches!(mode, StoreOpenMode::ReadCurrent | StoreOpenMode::Snapshot),
         )?;
@@ -224,6 +236,12 @@ impl JobClaim {
 pub struct Location {
     pub id: i64,
     pub root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub scan_only: Option<bool>,
     pub kind: String,
     pub coverage: String,
     pub observed_at: Option<i64>,
@@ -567,7 +585,7 @@ impl Store {
         let transaction = self.connection.unchecked_transaction()?;
         native_roots::require_bound_roots(&transaction)?;
         let (count, mains): (i64, i64) = transaction.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(kind = 'main'), 0) FROM locations",
+            "SELECT COUNT(*), COALESCE(SUM(kind = 'main' AND retired=0), 0) FROM locations",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -619,6 +637,8 @@ impl Store {
                     Ok(Location {
                         id: row.get(0)?,
                         root: row.get(1)?,
+                        display_path: None,
+                        scan_only: None,
                         kind: row.get(2)?,
                         coverage: row.get(3)?,
                         observed_at: row.get(4)?,
@@ -628,6 +648,7 @@ impl Store {
                 },
             )
             .map_err(Error::from)
+            .and_then(|location| self.describe_location(location))
     }
 
     pub fn begin_scan(&mut self, location: i64) -> Result<ScanClaim> {
@@ -639,6 +660,18 @@ impl Store {
     }
 
     fn begin_scoped_scan(&mut self, location: i64, folder: Option<&str>) -> Result<ScanClaim> {
+        self.connection
+            .query_row(
+                "SELECT id FROM locations WHERE id=?1 AND retired=0",
+                [location],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::Conflict("This library folder is no longer active.".into())
+                }
+                error => error.into(),
+            })?;
         self.location(location)?;
         let owner = format!(
             "{}-{}",

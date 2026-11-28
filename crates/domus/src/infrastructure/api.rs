@@ -30,7 +30,15 @@ use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 const SESSION_COOKIE: &str = "__Host-domus-session";
 pub mod artist_images;
+mod folder_browser;
 mod library;
+mod library_maintenance;
+mod primary_library;
+mod soulseek_account;
+pub use library_maintenance::RegisterSelectedLibraryFolder;
+use library_maintenance::*;
+use primary_library::*;
+use soulseek_account::*;
 mod recovery;
 use library::*;
 pub use library::{LibraryRefresh, RefreshLibraryFolder};
@@ -53,6 +61,7 @@ struct Shared {
     backend_configuration: Option<Arc<super::server::configuration::ConfigurationService>>,
     request_slots: Semaphore,
     recovery_slots: Arc<Semaphore>,
+    folder_slots: Arc<Semaphore>,
     recovery_stopping: std::sync::atomic::AtomicBool,
     event_slots: Arc<Semaphore>,
     broker: Option<RwLock<Arc<EntraBroker>>>,
@@ -349,6 +358,7 @@ impl Api {
             backend_configuration: None,
             request_slots: Semaphore::new(32),
             recovery_slots: Arc::new(Semaphore::new(1)),
+            folder_slots: Arc::new(Semaphore::new(2)),
             recovery_stopping: std::sync::atomic::AtomicBool::new(false),
             event_slots: Arc::new(Semaphore::new(4)),
             broker: broker.map(|broker| RwLock::new(Arc::new(broker))),
@@ -440,6 +450,78 @@ impl Api {
             .route(
                 "/api/locations/{id}/availability",
                 get(location_availability),
+            )
+            .route("/api/library/setup", get(library_setup))
+            .route("/api/library/primary/control", get(primary_library_control))
+            .route(
+                "/api/system/folders/roots",
+                get(folder_browser::host_folder_roots),
+            )
+            .route(
+                "/api/system/folders/browse",
+                post(folder_browser::browse_host_folder).layer(DefaultBodyLimit::max(8192)),
+            )
+            .route(
+                "/api/system/folders/close",
+                post(folder_browser::close_host_folder).layer(DefaultBodyLimit::max(512)),
+            )
+            .route("/api/system/soulseek-account", get(soulseek_account_status))
+            .route(
+                "/api/system/soulseek-account/changes",
+                post(save_soulseek_account).layer(DefaultBodyLimit::max(4096)),
+            )
+            .route(
+                "/api/system/soulseek-account/changes/{id}",
+                get(soulseek_account_change),
+            )
+            .route(
+                "/api/system/soulseek-account/changes/{id}/activate",
+                post(activate_soulseek_account).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
+                "/api/system/soulseek-account/changes/{id}/cancel",
+                post(cancel_soulseek_account).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
+                "/api/library/primary/inspect",
+                post(inspect_primary_library).layer(DefaultBodyLimit::max(8192)),
+            )
+            .route(
+                "/api/library/primary/changes",
+                post(select_primary_library).layer(DefaultBodyLimit::max(16384)),
+            )
+            .route(
+                "/api/library/primary/changes/{id}",
+                get(primary_library_change),
+            )
+            .route(
+                "/api/library/primary/changes/{id}/activate",
+                post(activate_primary_library).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
+                "/api/library/primary/changes/{id}/cancel",
+                post(cancel_primary_library_change).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
+                "/api/library/folders",
+                post(register_selected_library_folder).layer(DefaultBodyLimit::max(4096)),
+            )
+            .route(
+                "/api/library/setup/output",
+                post(initialize_library_output).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
+                "/api/library/scan",
+                post(scan_library).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
+                "/api/library/scan-policy",
+                get(library_scan_policy)
+                    .merge(put(save_library_scan_policy).layer(DefaultBodyLimit::max(4096))),
+            )
+            .route(
+                "/api/locations/{id}/library/comparison",
+                get(library_backup_comparison),
             )
             .route(
                 "/api/locations/{id}/scan",
@@ -1781,6 +1863,12 @@ async fn scan_location(
     Json(_request): Json<ScanLocation>,
 ) -> ApiResult<(StatusCode, Json<Location>)> {
     api.require_configuration_write().await?;
+    api.database(move |store| {
+        if store.location(id)?.kind != "main" {
+            return Err(Error::Conflict("Start a library scan from the primary library. Backups are checked as part of that scan.".into()));
+        }
+        Ok(())
+    }).await?;
     if let Some(worker) = &api.0.production_worker {
         let capacity = worker.queue_capacity;
         let binding = worker.binding(&api.0.service_configuration)?;
@@ -1789,7 +1877,7 @@ async fn scan_location(
             Json(
                 api.database(move |store| {
                     store.enqueue_worker(
-                        super::production_worker::WorkerOperation::Scan { location_id: id },
+                        super::production_worker::WorkerOperation::ScanLibrary { location_id: id },
                         capacity,
                         &binding,
                     )?;
@@ -1803,7 +1891,7 @@ async fn scan_location(
         StatusCode::OK,
         Json(
             api.database(move |store| {
-                crate::application::scan_location(store, id)?;
+                crate::application::scan_library(store, id)?;
                 store.location(id)
             })
             .await?,
@@ -1856,7 +1944,8 @@ async fn worker_retry(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult<
     let request = api.database(move |store| store.worker_request(id)).await?;
     if matches!(
         request.operation,
-        super::production_worker::WorkerOperation::Scan { .. }
+        super::production_worker::WorkerOperation::ScanLibrary { .. }
+            | super::production_worker::WorkerOperation::Scan { .. }
             | super::production_worker::WorkerOperation::RefreshFolder { .. }
     ) {
         api.require_configuration_write().await?;

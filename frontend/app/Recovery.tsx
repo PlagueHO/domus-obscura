@@ -6,7 +6,16 @@ import type { RecoveryDecision } from "../src/generated/RecoveryDecision";
 import type { RecoveryContinue } from "../src/generated/RecoveryContinue";
 import { query, request } from "./api";
 import { useCommand, useResource } from "./hooks";
-import { Alert, Badge, Button, Card, Check, Empty, Pager } from "./components/ui";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Check,
+  EmptyState,
+  LoadingState,
+  Pager,
+} from "./components/ui";
 
 export function recoveryJobFilter(route: string): number | undefined {
   const value = new URLSearchParams(route.split("?")[1]).get("job");
@@ -112,7 +121,11 @@ export function Recovery({ job }: { job?: number }) {
       <header className="page-heading">
         <div>
           <h1>Recovery</h1>
-          <p>Inspect retained versions and cleanup records. Library browsing stays read-only.</p>
+          <p>
+            Inspect retained versions and cleanup records. Scratch cleanup runs after all
+            destinations verify. A failed cleanup needs an explicit retry and never changes album
+            completion.
+          </p>
         </div>
         <Button variant="secondary" disabled={resource.loading || command.busy} onClick={refresh}>
           Refresh recovery
@@ -123,10 +136,6 @@ export function Recovery({ job }: { job?: number }) {
           Request {job} · <a href="#/recovery">Show all requests</a>
         </p>
       )}
-      <p>
-        Scratch cleanup runs after all destinations verify. A cleanup failure does not change album
-        completion. Failed work needs an explicit retry.
-      </p>
       <Alert error={resource.error} />
       <Alert error={actionError} />
       {actionNotice && (
@@ -134,11 +143,13 @@ export function Recovery({ job }: { job?: number }) {
           The command returned. Check the refreshed operation for its saved result.
         </p>
       )}
-      {resource.loading && <p role="status">Loading recovery records…</p>}
+      {resource.loading && <LoadingState label="Loading recovery records…" />}
       {rows && (
         <Card title="Recovery inventory">
-          <p>Recorded bytes are saved evidence, not a measurement of current disk allocation.</p>
-          {!rows.length && <Empty>No recovery records on this page.</Empty>}
+          <p className="muted">
+            Recorded bytes are saved evidence, not a measurement of current disk allocation.
+          </p>
+          {!rows.length && <EmptyState title="No recovery records on this page" />}
           {rows.map((row) => (
             <article className="list-row" key={row.id}>
               <div>

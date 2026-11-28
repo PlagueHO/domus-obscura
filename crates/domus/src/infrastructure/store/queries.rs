@@ -70,13 +70,15 @@ impl Store {
         let mut statement = self.connection.prepare_cached(
             "SELECT l.id, l.root, l.kind, l.coverage, l.observed_at, l.last_error, n.identity
              FROM locations l LEFT JOIN filesystem_roots n ON n.root = l.root AND n.kind = 'media'
-             WHERE l.id > ?1 ORDER BY l.id LIMIT ?2",
+             WHERE l.id > ?1 AND l.retired=0 ORDER BY l.id LIMIT ?2",
         )?;
-        statement
+        let locations = statement
             .query_map(params![page.after(), page.limit()], |row| {
                 Ok(Location {
                     id: row.get(0)?,
                     root: row.get(1)?,
+                    display_path: None,
+                    scan_only: None,
                     kind: row.get(2)?,
                     coverage: row.get(3)?,
                     observed_at: row.get(4)?,
@@ -84,8 +86,11 @@ impl Store {
                     native_identity: row.get(6)?,
                 })
             })?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Error::from)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        locations
+            .into_iter()
+            .map(|location| self.describe_location(location))
+            .collect()
     }
 
     pub fn jobs(&self, page: Page) -> Result<Vec<JobSummary>> {

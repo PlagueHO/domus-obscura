@@ -66,8 +66,11 @@ describe("system library settings", () => {
     expect(markup).not.toContain('value="m4a"');
     expect(markup).toMatch(/<option value="mp3_cbr320" selected/);
     expect(markup).not.toMatch(/<option value="mp3_cbr128"/);
-    expect(markup).toContain("Register library root");
-    expect(markup).toContain("Server folder path");
+    expect(markup).toContain("Use as primary");
+    expect(markup).toContain("Select a configured folder");
+    expect(markup).not.toContain("Server folder path");
+    expect(markup).not.toContain("Read-only library indexing");
+    expect(markup).toContain('href="#/library-scans"');
   });
 
   it("requires a preferred choice within the accepted combinations", () => {
@@ -131,7 +134,7 @@ describe("system library settings", () => {
   it("keeps loading distinct from missing configuration", () => {
     const markup = render({ settings: undefined, loading: true });
     expect(markup).toContain("Loading system output settings");
-    expect(markup).toContain("Loading library roots");
+    expect(markup).toContain("Loading library folders");
     expect(markup).not.toContain("Run local setup.");
   });
 });

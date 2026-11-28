@@ -52,12 +52,39 @@ permissions. Only this operator procedure
 can change `system_settings_read_only`; browser requests cannot change it.
 Do not restart a service or edit a live external configuration without approval.
 
-Application components cannot update existing host JSON. The old save and
+Confirmed library folder and Soulseek account changes are narrow
+application-owned exceptions. The folder picker uses existing host SMB/NFS
+access. It does not configure network connections, credentials or mounts.
+Do not treat browsing or transport configuration support as library approval.
+The native supervisor drains the worker and API, validates the exact approved
+storage selection, publishes host JSON, finishes registration, then restarts
+both processes. Only storage selection and the library activation reference
+can change during a library folder operation. A backup approval binds the
+backup role and leaves the primary and scan schedule unchanged. Other fields,
+including `system_settings_read_only`, remain
+operator-managed. Never restore a general configuration writer or API-only reload.
+Uncertain publication leaves the host stopped with its evidence retained.
+
+Account setup writes only a new private credential file and non-secret journal
+metadata. Never return credentials or write them or credential hashes to SQLite.
+Account activation changes only `soulseek_account` in host JSON. Its reference
+binds to the exact journal ID, checked file identity and candidate revision.
+The supervisor accepts only `account:<exact-change-id>`, stops the worker and API,
+validates the candidate, publishes it, then restarts both. Saving and activation
+cannot enable capabilities, log in, test an account, download, or share files.
+Supervisor diagnostics report account activation failures without raw error
+details. The readiness line reports only the configured browser origin.
+Refuse changes while local acquisition, worker acquisition, a sharing account,
+sharing access or a listener is configured. Keep failed and interrupted files for
+explicit operator inspection. Do not replace or edit an existing account file.
+An incomplete save can be cancelled; an uncertain activation cannot.
+
+Other application components cannot update existing host JSON. The old save and
 API-only reload routes return `410 Gone`, with browser guards still active.
 Do not restore their writer locks, pending files, replacement code or host
 handover channel. Preserve existing operator files and interrupted evidence.
 `system_settings_read_only` still gates each protected SQLite policy command.
-It never enables host JSON writes. Keep output policy and artist-photo bindings
+It never enables general host JSON writes. Keep output policy and artist-photo bindings
 on their existing versioned database commands.
 
 Run `domus configuration-check <absolute-configuration-file>` with all components
@@ -77,6 +104,12 @@ worker queue and acquisition settings. Section validation must preserve sibling
 settings. Sharing is disabled by default. A sharing-only worker needs no staging
 root. An explicit sharing account must match the acquisition account when both
 are configured; otherwise sharing can reuse the acquisition account.
+
+For separate operator-enabled Soulseek services, an omitted `credentials_file`
+uses the explicitly selected `soulseek_account` file. Never override an explicit
+credential-file reference. Do not supply a fallback account without a selection.
+Server address, plaintext-login acknowledgement, staging and service enablement
+remain explicit operator configuration.
 
 Folder inspection and explicit native binding are separate from configuration
 validation. Passive checks validate policy and existing account references without binding
@@ -134,6 +167,16 @@ same durable scan lane, location target and fenced scan claims. Resume only the
 same scope. A direct-folder refresh lists child directories but never scans them,
 marks descendants absent, or renews whole-location coverage.
 
+The browser's Library scans page enqueues a primary-led library request on that
+lane. Scan the primary first, then all registered backups. Keep failures durable
+per location and do not change media. Automatic scans use an immutable SQLite
+policy version and mutable schedule state. They default to off, require the
+operator edit policy, and never retry a failed request without explicit recovery.
+Schedule changes do not cancel admitted requests.
+Read backup coverage and bounded path/type/size differences from one database
+snapshot. Incomplete coverage cannot support missing-file claims. Matching sizes
+do not establish equal contents.
+
 Metadata inspection reads MP3 and FLAC through no-follow native handles or exact
 paired retained-file leases. Both use the same bounded parser. Keep the
 8 MiB metadata envelope, 1024 frame/comment limit, 64 KiB MPEG probe, 64 KiB saved
@@ -163,7 +206,10 @@ Do not extract embedded covers or infer artwork approval from a preview.
 `domus media-adapter-check <absolute-adapter-configuration-file>` validates and
 retains the separate native media configuration without opening SQLite or a
 listener. `domus media-adapter <absolute-adapter-configuration-file>` explicitly
-starts its mutually authenticated loopback listener in the foreground.
+starts its mutually authenticated listener in the foreground. Loopback remains
+the default. An explicit media-only `network` admission can allow a fixed private
+LAN address with one exact peer IP and TLS server name. This does not change
+application HTTP or MCP listener admission.
 Both use `ConfigurationService`. Keep the document directly in its selected
 private application-role root. All TLS references stay beneath that root.
 Never create or rebind missing roots, generate pairing material automatically,
@@ -197,6 +243,11 @@ scans or activates production library routing. Native and paired clients share
 opaque session leases; cancellation or connection loss requires explicit
 recreation. Never fall back to a guest-mounted path. See
 [paired client configuration](docker.md#configure-the-paired-client).
+
+Host-visible SMB/NFS can use an explicit `scan_only` native media binding for
+library scans and their read-only results. Keep full native identity and topology
+checks. Do not admit scan-only bindings to write plans, publication, recovery,
+or adapter exports. A recognized remote filesystem never enters native write I/O.
 
 The operator-managed host field `paired_media` selects a private `client_file`
 and exact `topology_assurances`. Keep foreign roots out of the local `storage`
@@ -399,8 +450,8 @@ Linux candidate packaging and systemd operations are in
 remain #18. A service callback requests stop; it must not abort active blocking
 work or release its native locks before draining. Only the API owns migration.
 An API restart under a live worker must open current schema without migration.
-Linux API startup holds the stable worker process lock through schema
-preparation. A busy lock permits only current-schema startup.
+API startup holds the stable worker process lock through schema migration.
+A busy lock permits only current-schema startup.
 The Linux-only `systemd-service <api|worker> <absolute-configuration-file>`
 entry point rejects root and requires private configuration and a notification
 socket. It connects readiness and early latched signals to the existing runtimes.

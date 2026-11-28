@@ -4,6 +4,54 @@ use domus::infrastructure::store::Store;
 mod private;
 use private::tempdir;
 
+/// Generated comparison-query evidence, not physical scans or content equality.
+#[test]
+#[ignore = "separate million-record scale check: cargo task scale"]
+fn million_library_entries_keep_backup_comparison_pages_bounded()
+-> Result<(), Box<dyn std::error::Error>> {
+    let data = tempdir()?;
+    let mut store = Store::open(&data.path().join("comparison.db"))?;
+    let mut locations = Vec::new();
+    for kind in ["main", "backup"] {
+        let root = data.path().join(kind);
+        std::fs::create_dir(&root)?;
+        locations.push(domus::application::add_location(&store, &root, kind)?);
+    }
+    let raw = rusqlite::Connection::open(store.database_path())?;
+    for location in &locations {
+        let claim = store.begin_scan(*location)?;
+        raw.execute(
+            "UPDATE scans SET lease_until=unixepoch()+600 WHERE id=?1",
+            [claim.id],
+        )?;
+        raw.execute(
+            "WITH RECURSIVE n(v) AS (SELECT 1 UNION ALL SELECT v+1 FROM n WHERE v<1000000)
+             INSERT INTO entries(location_id,relative_path,parent_path,kind,size,scan_id)
+             SELECT ?1,printf('track-%08d.mp3',v),'','file',
+               CASE WHEN ?1=?3 AND v=1000000 THEN 200 ELSE 100 END,?2 FROM n
+             WHERE NOT (?1=?3 AND v=999999)",
+            rusqlite::params![location, claim.id, locations[1]],
+        )?;
+        store.complete_directory(&claim, &LibraryPath::parse("")?)?;
+        assert!(store.finish_scan(&claim)?);
+    }
+    let first = store.compare_library_backup(locations[1], "", 1)?;
+    assert_eq!(first.differences.len(), 1);
+    assert_eq!(first.differences[0].path, "track-00999999.mp3");
+    assert_eq!(first.differences[0].difference, "missing_in_backup");
+    let next = store.compare_library_backup(locations[1], &first.differences[0].path, 1)?;
+    assert_eq!(next.differences.len(), 1);
+    assert_eq!(next.differences[0].path, "track-01000000.mp3");
+    assert_eq!(next.differences[0].difference, "file_size_differs");
+    assert!(
+        store
+            .compare_library_backup(locations[1], &next.differences[0].path, 1)?
+            .differences
+            .is_empty()
+    );
+    Ok(())
+}
+
 /// Generated recovery history evidence, not physical file or memory acceptance.
 #[test]
 #[ignore = "separate million-record scale check: cargo task scale"]

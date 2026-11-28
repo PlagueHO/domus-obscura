@@ -35,6 +35,38 @@ pub fn scan_location(store: &mut Store, location_id: i64) -> Result<i64> {
     run_scan(store, claim)
 }
 
+/// One user operation observes the primary library and every registered backup.
+/// Each location keeps its own durable coverage, including offline failures.
+pub fn scan_library(store: &mut Store, primary_id: i64) -> Result<()> {
+    if store.primary_library_id()? != primary_id {
+        return Err(Error::Conflict(
+            "A library scan must start from the primary library.".into(),
+        ));
+    }
+    let mut locations = store.locations(crate::domain::Page::new(0, 100)?)?;
+    locations.sort_by_key(|location| (location.kind != "main", location.id));
+    let mut failures = Vec::new();
+    for location in locations {
+        store.check_worker_stop()?;
+        if let Err(error) = scan_location(store, location.id) {
+            if matches!(error, Error::WorkerStopping) {
+                return Err(error);
+            }
+            failures.push(format!(
+                "{} library #{}: {error}",
+                location.kind, location.id
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        return Err(Error::Conflict(format!(
+            "The library scan has incomplete locations. {}",
+            failures.join("; ")
+        )));
+    }
+    Ok(())
+}
+
 /// Refresh one directory only. This never renews whole-location coverage.
 pub fn refresh_library_folder(
     store: &mut Store,

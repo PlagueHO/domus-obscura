@@ -1,4 +1,4 @@
-use super::{MAX_FRAME, NativeAdapter, Request, Response, Selection, Session};
+use super::{MAX_FRAME, NativeAdapter, NetworkAccess, Request, Response, Selection, Session};
 use crate::infrastructure::{server, tls};
 use crate::{Error, Result};
 use axum::body::Bytes;
@@ -26,6 +26,7 @@ use tokio::sync::Semaphore;
 pub struct PreparedAdapter {
     native: Arc<NativeAdapter>,
     tls: RustlsConfig,
+    access: NetworkAccess,
 }
 
 impl PreparedAdapter {
@@ -40,6 +41,29 @@ impl PreparedAdapter {
         client_ca: &[u8],
         paired_client: &[u8],
     ) -> Result<Self> {
+        Self::with_network_access(
+            selection,
+            protected_inputs,
+            certificate,
+            private_key,
+            client_ca,
+            paired_client,
+            NetworkAccess::Loopback,
+        )
+    }
+
+    /// Explicit media-only private-LAN admission. Exact mutual-TLS certificate
+    /// pinning and guarded request limits remain mandatory in both modes.
+    pub fn with_network_access(
+        selection: Selection,
+        protected_inputs: Vec<File>,
+        certificate: &[u8],
+        private_key: &[u8],
+        client_ca: &[u8],
+        paired_client: &[u8],
+        access: NetworkAccess,
+    ) -> Result<Self> {
+        access.validate()?;
         let roots = anchors(client_ca)?;
         let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
             Arc::new(roots),
@@ -60,7 +84,7 @@ impl PreparedAdapter {
             certificate: paired[0].clone(),
         };
         let checked = tls::authenticated_configuration(
-            "localhost",
+            access.server_name(),
             certificate,
             private_key,
             Arc::new(verifier),
@@ -73,10 +97,11 @@ impl PreparedAdapter {
         Ok(Self {
             native: Arc::new(NativeAdapter::new(selection, protected_inputs)?),
             tls: RustlsConfig::from_config(Arc::new(checked)),
+            access,
         })
     }
 
-    /// Serve only a caller-created loopback listener. Dropping this future
+    /// Serve only a caller-created, explicitly admitted listener. Dropping this future
     /// shuts it down through the shared guarded server. Native I/O runs on
     /// bounded blocking tasks, never on an async executor thread.
     pub async fn serve(
@@ -85,15 +110,16 @@ impl PreparedAdapter {
         handle: axum_server::Handle<SocketAddr>,
     ) -> std::io::Result<()> {
         let address = listener.local_addr()?;
-        if !address.ip().is_loopback() {
+        if !self.access.permits_listener(address.ip()) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                "native media adapter requires loopback",
+                "native media listener does not match its network admission",
             ));
         }
         let state = Arc::new(AdapterState {
             native: self.native,
-            host: format!("localhost:{}", address.port()),
+            host: format!("{}:{}", self.access.server_name(), address.port()),
+            access: self.access,
             slots: Arc::new(Semaphore::new(8)),
         });
         let router = Router::new()
@@ -109,6 +135,7 @@ impl PreparedAdapter {
 struct AdapterState {
     native: Arc<NativeAdapter>,
     host: String,
+    access: NetworkAccess,
     slots: Arc<Semaphore>,
 }
 
@@ -191,7 +218,7 @@ async fn dispatch(
         let mut values = headers.get_all(name).iter();
         values.next().is_some_and(|value| value == expected) && values.next().is_none()
     };
-    if !connection.peer.ip().is_loopback()
+    if !state.access.permits_peer(connection.peer.ip())
         || !exact(header::HOST, &state.host)
         || !exact(header::CONTENT_TYPE, "application/json")
         || !exact(
@@ -246,9 +273,28 @@ impl Client {
         certificate: &[u8],
         private_key: &[u8],
     ) -> Result<Self> {
-        if !address.ip().is_loopback() {
+        Self::with_network_access(
+            address,
+            server_ca,
+            paired_server,
+            certificate,
+            private_key,
+            NetworkAccess::Loopback,
+        )
+    }
+
+    pub fn with_network_access(
+        address: SocketAddr,
+        server_ca: &[u8],
+        paired_server: &[u8],
+        certificate: &[u8],
+        private_key: &[u8],
+        access: NetworkAccess,
+    ) -> Result<Self> {
+        access.validate()?;
+        if !access.permits_peer(address.ip()) || address.port() == 0 {
             return Err(Error::InvalidInput(
-                "native media client requires loopback".into(),
+                "native media client address does not match its network admission".into(),
             ));
         }
         tls::initialize_crypto()?;
@@ -265,7 +311,7 @@ impl Client {
             .verify_server_cert(
                 &paired[0],
                 &paired[1..],
-                &ServerName::try_from("localhost")
+                &ServerName::try_from(access.server_name())
                     .map_err(|_| Error::Internal("native media TLS hostname is invalid"))?,
                 &[],
                 UnixTime::now(),
@@ -299,14 +345,18 @@ impl Client {
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(10))
             .pool_max_idle_per_host(1)
-            .resolve("localhost", address)
+            .resolve(access.server_name(), address)
             .build()
             .map_err(|_| {
                 Error::InvalidInput("native media TLS client could not be built".into())
             })?;
         Ok(Self {
             http,
-            url: format!("https://localhost:{}/v1/media", address.port()),
+            url: format!(
+                "https://{}:{}/v1/media",
+                access.server_name(),
+                address.port()
+            ),
             unavailable: false,
         })
     }

@@ -111,6 +111,304 @@ fn developer_https_processes_validate_tls_and_retain_state()
     real_processes(true)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn developer_library_and_soulseek_account_changes_restart_both_real_children()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = tempdir()?;
+    let binaries = fixture.path().join("bin");
+    let assets = binaries.join("browser");
+    std::fs::create_dir_all(assets.join("assets"))?;
+    std::fs::write(
+        assets.join("index.html"),
+        "<!doctype html><title>primary switch fixture</title>",
+    )?;
+    let executable = binaries.join(if cfg!(windows) { "domus.exe" } else { "domus" });
+    std::fs::copy(env!("CARGO_BIN_EXE_domus"), &executable)?;
+    let application = fixture.path().join("application");
+    let initialized = run_with(
+        &executable,
+        &[
+            "developer-init",
+            "--confirm-fresh",
+            application.to_str().ok_or("application")?,
+        ],
+    )?;
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let configuration = application.join("config.json");
+    let socket = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = socket.local_addr()?;
+    drop(socket);
+    let origin = format!("http://{address}");
+    let mut document: serde_json::Value = serde_json::from_slice(&std::fs::read(&configuration)?)?;
+    document["listen"] = address.to_string().into();
+    document["origin"] = origin.clone().into();
+    document["browser_assets"] = assets.to_str().ok_or("assets")?.into();
+    std::fs::write(&configuration, serde_json::to_vec(&document)?)?;
+    let media = fixture.path().join("new-primary");
+    std::fs::create_dir(&media)?;
+    std::fs::write(media.join("existing.txt"), "keep original media")?;
+    let backup_media = fixture.path().join("new-backup");
+    std::fs::create_dir(&backup_media)?;
+    std::fs::write(backup_media.join("existing.txt"), "keep backup media")?;
+    let config = configuration.to_str().ok_or("configuration")?;
+    let mut supervisor = SupervisorGuard::start(config)?;
+    let stdout = supervisor.stdout.take().ok_or("stdout")?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let ready_line = format!("Domus ready: {origin}");
+    let wait_ready = || -> Result<(), Box<dyn std::error::Error>> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or("readiness timeout")?;
+            if receiver.recv_timeout(remaining)?? == ready_line {
+                return Ok(());
+            }
+        }
+    };
+    wait_ready()?;
+    let mut current = checked(&["developer-control", config, "status"])?;
+    domus::infrastructure::tls::initialize_crypto()?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    let available: serde_json::Value = client
+        .get(format!("{origin}/api/library/primary/control"))
+        .header("origin", &origin)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(available["available"], true);
+    let mut primary = None;
+    for (path, backup) in [(&media, false), (&backup_media, true)] {
+        let original = current;
+        let preview: serde_json::Value = client
+            .post(format!("{origin}/api/library/primary/inspect"))
+            .header("origin", &origin)
+            .header("x-domus-csrf", "1")
+            .json(&serde_json::json!({"path":path,"backup":backup}))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let mut approval = preview.as_object().ok_or("preview")?.clone();
+        approval.remove("storage_layout");
+        approval.insert("confirm_separation".into(), true.into());
+        approval.insert("backup".into(), backup.into());
+        let saved: serde_json::Value = client
+            .post(format!("{origin}/api/library/primary/changes"))
+            .header("origin", &origin)
+            .header("x-domus-csrf", "1")
+            .json(&approval)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(saved["state"], "approved");
+        let id = saved["id"].as_i64().ok_or("change id")?;
+        let pending: serde_json::Value = client
+            .get(format!("{origin}/api/library/primary/control"))
+            .header("origin", &origin)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(pending["pending_change_id"], id);
+        assert_eq!(pending["pending_backup"], backup);
+        assert!(
+            domus::infrastructure::server::developer::control(
+                &configuration,
+                &format!("primary:{}", id + 1),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            checked(&["developer-control", config, "status"])?["processes"],
+            original["processes"]
+        );
+        let response = client
+            .post(format!(
+                "{origin}/api/library/primary/changes/{id}/activate"
+            ))
+            .header("origin", &origin)
+            .header("x-domus-csrf", "1")
+            .json(&serde_json::json!({}))
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+        wait_ready()?;
+        current = checked(&["developer-control", config, "status"])?;
+        assert_eq!(current["state"], "ready");
+        assert_ne!(original["revision"], current["revision"]);
+        for role in ["api", "worker"] {
+            let pid = |state: &serde_json::Value| -> Option<u64> {
+                state["processes"]
+                    .as_array()?
+                    .iter()
+                    .find(|process| process["role"] == role)?["pid"]
+                    .as_u64()
+            };
+            assert!(pid(&current).is_some());
+            assert_ne!(pid(&original), pid(&current), "{role} did not restart");
+        }
+        let result: serde_json::Value = client
+            .get(format!("{origin}/api/library/primary/changes/{id}"))
+            .header("origin", &origin)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(result["state"], "active");
+        let locations: serde_json::Value = client
+            .get(format!("{origin}/api/locations"))
+            .header("origin", &origin)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let locations = locations.as_array().ok_or("locations")?;
+        assert_eq!(locations.len(), if backup { 2 } else { 1 });
+        assert_eq!(locations[0]["kind"], "main");
+        assert_eq!(locations[0]["coverage"], "unknown");
+        if backup {
+            assert_eq!(Some(&locations[0]), primary.as_ref());
+            assert_eq!(locations[1]["kind"], "backup");
+            assert_eq!(locations[1]["coverage"], "unknown");
+            assert_eq!(locations[1]["id"], result["location_id"]);
+        } else {
+            primary = Some(locations[0].clone());
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(backup_media.join("existing.txt"))?,
+        "keep backup media"
+    );
+    let username = format!("fixture-{:016x}", rand::random::<u64>());
+    let password = format!("{:032x}", rand::random::<u128>());
+    let account_request = serde_json::json!({
+        "expected_revision":current["revision"],
+        "username":username,
+        "password":password
+    });
+    let account_endpoint = format!("{origin}/api/system/soulseek-account/changes");
+    let rejected = client
+        .post(&account_endpoint)
+        .header("origin", &origin)
+        .json(&account_request)
+        .send()
+        .await?;
+    assert_eq!(rejected.status(), reqwest::StatusCode::FORBIDDEN);
+    let rejected = client
+        .post(&account_endpoint)
+        .header("origin", "http://invalid.example")
+        .header("x-domus-csrf", "1")
+        .json(&account_request)
+        .send()
+        .await?;
+    assert_eq!(rejected.status(), reqwest::StatusCode::FORBIDDEN);
+    let account: serde_json::Value = client
+        .post(&account_endpoint)
+        .header("origin", &origin)
+        .header("x-domus-csrf", "1")
+        .json(&account_request)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(account["state"], "approved");
+    let account_response = account.to_string();
+    assert!(!account_response.contains(&username));
+    assert!(!account_response.contains(&password));
+    let account_id = account["id"].as_i64().ok_or("account ID")?;
+    assert!(
+        domus::infrastructure::server::developer::control(
+            &configuration,
+            &format!("account:{}", account_id + 1),
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        checked(&["developer-control", config, "status"])?["processes"],
+        current["processes"]
+    );
+    let response = client
+        .post(format!("{account_endpoint}/{account_id}/activate"))
+        .header("origin", &origin)
+        .header("x-domus-csrf", "1")
+        .json(&serde_json::json!({}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    wait_ready()?;
+    let account_current = checked(&["developer-control", config, "status"])?;
+    assert_eq!(account_current["state"], "ready");
+    for role in ["api", "worker"] {
+        let pid = |state: &serde_json::Value| -> Option<u64> {
+            state["processes"]
+                .as_array()?
+                .iter()
+                .find(|process| process["role"] == role)?["pid"]
+                .as_u64()
+        };
+        assert_ne!(
+            pid(&account_current),
+            pid(&current),
+            "{role} did not restart for the account"
+        );
+    }
+    let result: serde_json::Value = client
+        .get(format!("{account_endpoint}/{account_id}"))
+        .header("origin", &origin)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(result["state"], "active");
+    assert_eq!(
+        result["configuration_revision"],
+        account_current["revision"]
+    );
+    let after_account: serde_json::Value = serde_json::from_slice(&std::fs::read(&configuration)?)?;
+    assert_eq!(after_account["services"], document["services"]);
+    assert_eq!(
+        after_account["production_worker"],
+        document["production_worker"]
+    );
+    assert!(after_account["local_acquisition"].is_null());
+    assert_eq!(
+        std::fs::read_to_string(media.join("existing.txt"))?,
+        "keep original media"
+    );
+    assert!(checked(&["developer-control", config, "stop"])?["state"] == "stopped");
+    assert!(supervisor.wait()?.success());
+    reader.join().map_err(|_| "reader failed")?;
+    Ok(())
+}
+
 fn real_processes(https: bool) -> Result<(), Box<dyn std::error::Error>> {
     let fixture = tempdir()?;
     let binary_directory = fixture.path().join("bin");

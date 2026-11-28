@@ -896,10 +896,10 @@ async fn browse_load(client: &reqwest::Client, origin: &str, location: i64) -> T
     Ok(requests)
 }
 
-async fn admit_scan(client: &reqwest::Client, fixture: &Fixture, location: i64) -> TestResult<i64> {
-    http_json(
+async fn admit_scan(client: &reqwest::Client, fixture: &Fixture) -> TestResult<i64> {
+    let primary = http_json(
         client
-            .post(format!("{}/api/locations/{location}/scan", fixture.origin))
+            .post(format!("{}/api/library/scan", fixture.origin))
             .header("origin", &fixture.origin)
             .header("x-domus-csrf", "1")
             .json(&json!({})),
@@ -916,7 +916,8 @@ async fn admit_scan(client: &reqwest::Client, fixture: &Fixture, location: i64) 
         .into_iter()
         .flatten()
         .filter(|r| {
-            r["operation"]["operation"] == "scan" && r["operation"]["location_id"] == location
+            r["operation"]["operation"] == "scan_library"
+                && r["operation"]["location_id"] == primary["id"]
         })
         .filter_map(|r| r["id"].as_i64())
         .max()
@@ -975,7 +976,7 @@ fn exercise(command: &Command, channel: &Channel) -> TestResult<Value> {
         let iterations = if action == "scan" { 2 } else { 1 };
         for iteration in 0..iterations {
             let id = match action {
-                "scan" | "admit" => admit_scan(&client,&fixture,location).await?,
+                "scan" | "admit" => admit_scan(&client,&fixture).await?,
                 "resume" | "retry" => {
                     let id = command.request_id.ok_or("request_id is required for resume or retry")?;
                     if action == "retry" {

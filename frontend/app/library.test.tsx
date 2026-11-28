@@ -90,7 +90,7 @@ describe("read-only library", () => {
     const markup = renderToStaticMarkup(
       <Library locations={[root]} route="/library?location=101&view=folders" />,
     );
-    expect(markup).toMatch(/<option[^>]*value="101"[^>]*selected[^>]*>backup/);
+    expect(markup).toMatch(/<option[^>]*value="101"[^>]*selected[^>]*>Backup library/);
     expect(markup).toContain("selected-backup");
     expect(vi.mocked(useResource).mock.calls[1]?.[1]).toBe("101::0");
   });

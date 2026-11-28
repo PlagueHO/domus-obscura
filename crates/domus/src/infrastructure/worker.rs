@@ -1122,6 +1122,10 @@ impl PreparedWorker {
 pub struct LocalAcquisition {
     #[serde(default = "default_staging_root")]
     pub staging_root: PathBuf,
+    #[serde(
+        default,
+        deserialize_with = "super::local_file::deserialize_credential_reference"
+    )]
     pub credentials_file: PathBuf,
     pub server: SocketAddrV4,
     pub acknowledge_plaintext_login: bool,

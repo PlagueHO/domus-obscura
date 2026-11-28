@@ -121,10 +121,10 @@ impl Fixture {
     }
 
     fn new() -> Result<Self> {
-        Self::with_audio(AudioFormat::Mp3, false)
+        Self::with_audio(AudioFormat::Mp3, false, true)
     }
 
-    fn with_audio(format: AudioFormat, multi_disc: bool) -> Result<Self> {
+    fn with_audio(format: AudioFormat, multi_disc: bool, output_configured: bool) -> Result<Self> {
         let root = private::tempdir().map_err(|error| Error::InvalidInput(error.to_string()))?;
         for folder in ["main", "backup", "staging", "state"] {
             let path = root.path().join(folder);
@@ -139,7 +139,9 @@ impl Fixture {
         let backup = add_location(&store, &root.path().join("backup"), "backup")?;
         scan_location(&mut store, main)?;
         scan_location(&mut store, backup)?;
-        store.save_settings(None, &OutputSettings::default())?;
+        if output_configured {
+            store.save_settings(None, &OutputSettings::default())?;
+        }
         let connection = rusqlite::Connection::open(store.database_path())?;
         for (index, id) in RELEASES.iter().enumerate() {
             let query = CatalogQuery::release(id)?;
@@ -592,7 +594,11 @@ impl Fixture {
         body: &[u8],
     ) -> Result<Response> {
         let page = Page::new(
-            integer(query, "after", 0)?,
+            if path.ends_with("/library/comparison") {
+                0
+            } else {
+                integer(query, "after", 0)?
+            },
             u16::try_from(integer(query, "limit", 50)?)
                 .map_err(|_| Error::InvalidInput("invalid page limit".into()))?,
         )?;
@@ -603,8 +609,15 @@ impl Fixture {
             } else {
                 decode::<FixtureOptions>(body)?
             };
-            std::mem::replace(self, Self::with_audio(options.format, options.multi_disc)?)
-                .dispose()?;
+            std::mem::replace(
+                self,
+                Self::with_audio(
+                    options.format,
+                    options.multi_disc,
+                    options.output_configured,
+                )?,
+            )
+            .dispose()?;
             return empty();
         }
         if path == "/__fixture/cover" && !command {
@@ -690,6 +703,51 @@ impl Fixture {
                 return Ok((StatusCode::GONE, Json(json!({
                     "error":"Host configuration is operator-managed. Stop all components before editing and validating the file, then restart them."
                 }))).into_response());
+            }
+            ("GET", "/api/library/setup") => return json_response(self.store.library_setup()?),
+            ("GET", "/api/system/soulseek-account") => {
+                return json_response(
+                    domus::infrastructure::server::configuration::SoulseekAccountStatus {
+                        available: false,
+                        reason: Some(
+                            "This generated browser fixture does not configure real accounts."
+                                .into(),
+                        ),
+                        configured: false,
+                        active_revision: "generated-browser-fixture".into(),
+                        pending_change_id: None,
+                    },
+                );
+            }
+            ("GET", "/api/library/primary/control") => {
+                return json_response(
+                    domus::infrastructure::server::configuration::PrimaryLibraryControl {
+                        available: false,
+                        reason: Some(
+                            "Library folder changes require the native application supervisor."
+                                .into(),
+                        ),
+                        pending_change_id: None,
+                        pending_backup: false,
+                    },
+                );
+            }
+            ("GET", "/api/library/scan-policy") => {
+                return json_response(self.store.library_scan_policy()?);
+            }
+            ("POST", "/api/library/setup/output") | ("POST", "/api/library/scan") => {
+                if self.read_only {
+                    return Err(Error::Conflict("System settings are read-only.".into()));
+                }
+                self.configuration.require_editable()?;
+                if path == "/api/library/setup/output" {
+                    return json_response(
+                        self.store.save_settings(None, &OutputSettings::default())?,
+                    );
+                }
+                let primary = self.store.primary_library_id()?;
+                domus::application::scan_library(&mut self.store, primary)?;
+                return json_response(self.store.location(primary)?);
             }
             ("GET", "/api/settings") => return json_response(self.store.settings()?),
             ("PUT", "/api/settings") => {
@@ -798,6 +856,13 @@ impl Fixture {
                 return json_response(self.store.library_coverage(
                     parse(id)?,
                     &LibraryPath::parse(query.get("folder").map_or("", String::as_str))?,
+                )?);
+            }
+            ["api", "locations", id, "library", "comparison"] if !command => {
+                return json_response(self.store.compare_library_backup(
+                    parse(id)?,
+                    query.get("after").map_or("", String::as_str),
+                    page.limit(),
                 )?);
             }
             ["api", "locations", id, "library", "matches"] if command => {
@@ -1113,12 +1178,14 @@ struct FixtureSettings {
 struct FixtureOptions {
     format: AudioFormat,
     multi_disc: bool,
+    output_configured: bool,
 }
 impl Default for FixtureOptions {
     fn default() -> Self {
         Self {
             format: AudioFormat::Mp3,
             multi_disc: false,
+            output_configured: true,
         }
     }
 }
@@ -1259,7 +1326,7 @@ mod tests {
         backup: bool,
         offline: bool,
     ) -> Result<Fixture> {
-        let mut fixture = Fixture::with_audio(format, true)?;
+        let mut fixture = Fixture::with_audio(format, true, true)?;
         let job = fixture.store.enqueue(1)?;
         let settings = fixture
             .store
