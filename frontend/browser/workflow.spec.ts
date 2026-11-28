@@ -923,7 +923,7 @@ test("settings opens as a fixed-width modal and returns focus to the previous pa
   const opener = page.getByRole("link", { name: "System settings", exact: true });
   await opener.focus();
   await opener.press("Enter");
-  const dialog = page.getByRole("dialog", { name: "System settings", exact: true });
+  const dialog = page.getByRole("dialog", { name: "System Settings", exact: true });
   await expect(dialog).toBeVisible();
   expect(await dialog.evaluate((element) => element.matches(":modal"))).toBe(true);
   const size = () =>
@@ -952,8 +952,10 @@ test("settings panes scroll independently and keep navigation in view", async ({
   const narrow = test.info().project.name === "narrow";
   await page.setViewportSize({ width: narrow ? 375 : 1280, height: 480 });
   await page.goto("/#/settings?section=music_output");
-  const dialog = page.getByRole("dialog", { name: "System settings" });
+  const dialog = page.getByRole("dialog", { name: "System Settings", exact: true });
   const close = dialog.getByRole("button", { name: "Close settings" });
+  const title = dialog.getByRole("heading", { name: "System Settings", level: 1 });
+  const band = title.locator("..");
   const sidebar = dialog.getByRole("navigation", { name: "Configuration sections" });
   const picker = dialog.getByRole("combobox", { name: "Settings section", exact: true });
   const content = dialog.getByRole("region", { name: "Settings content" });
@@ -963,6 +965,15 @@ test("settings panes scroll independently and keep navigation in view", async ({
   const bounds = await dialog.boundingBox();
   expect(bounds?.height).toBeCloseTo(360);
   expect(bounds?.y).toBeCloseTo(60);
+  const bandBounds = (await band.boundingBox())!;
+  expect(bandBounds.x).toBeCloseTo(bounds!.x + 1);
+  expect(bandBounds.width).toBeCloseTo(bounds!.width - 2);
+  expect(bandBounds.y).toBeCloseTo(bounds!.y + 1);
+  expect(
+    await title.evaluate((element) => parseFloat(getComputedStyle(element).fontSize)),
+  ).toBeGreaterThan(
+    await dialog.evaluate((element) => parseFloat(getComputedStyle(element).fontSize)),
+  );
   const chromeBefore = await close.boundingBox();
   const pickerBefore = narrow ? await picker.boundingBox() : null;
   await expect(save).toBeVisible();
@@ -982,6 +993,7 @@ test("settings panes scroll independently and keep navigation in view", async ({
   const header = content.getByRole("heading", { name: "Output policy", exact: true }).locator("..");
   const gradient = await header.evaluate((element) => getComputedStyle(element).backgroundImage);
   expect(gradient).toMatch(/^linear-gradient\(/);
+  await expect(band).toHaveCSS("background-image", gradient);
   await expect(footer).toHaveCSS(
     "background-image",
     gradient.replace(/^linear-gradient\((?:180deg, )?/, "linear-gradient(0deg, "),

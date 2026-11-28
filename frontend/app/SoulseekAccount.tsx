@@ -36,6 +36,7 @@ export function SoulseekAccount({
   const available = !disabled && !status.loading && !status.error && status.data?.available;
   const busy = command.busy || watchId !== undefined;
   const canSave = available && !busy && Boolean(username && password);
+  const canCheckStatus = pendingId != null || unknownSave || Boolean(watchError || status.error);
 
   useEffect(() => {
     if (watchId === undefined) return;
@@ -88,18 +89,6 @@ export function SoulseekAccount({
 
   return (
     <section className="soulseek-account" aria-label="Soulseek account credentials">
-      <p>
-        Save your username and password in a private file on the application host. The password
-        cannot be read back. Enter both fields to replace an account.
-      </p>
-      <p>
-        Saving does not sign in, test the connection, enable downloads, or share files. Applying the
-        account restarts the API and worker together.
-      </p>
-      <p className="warning">
-        Soulseek sends login credentials over plaintext TCP. Connection setup and consent to
-        plaintext login remain separate operator actions.
-      </p>
       <Alert error={status.error || watchError || (change?.state !== "active" && command.error)} />
       {status.loading && <p role="status">Checking account settings…</p>}
       {!status.loading && status.data?.reason && <p role="status">{status.data.reason}</p>}
@@ -132,64 +121,69 @@ export function SoulseekAccount({
         </div>
       )}
       {watchId !== undefined && <p role="status">Waiting for the API and worker to restart…</p>}
-      <div className="actions">
-        <Button
-          variant="secondary"
-          disabled={busy}
-          onClick={() =>
-            void command.run(async () => {
-              const current = await request<SoulseekAccountStatus>(endpoint);
-              const id = current.pending_change_id ?? change?.id;
-              if (id != null) {
-                const saved = await request<SoulseekAccountChange>(`${endpoint}/changes/${id}`);
-                setChange(saved);
-                if (saved.state === "activating") setWatchId(saved.id);
-              }
-              setUnknownSave(false);
-              setWatchError(undefined);
-              status.refresh();
-              changed.current();
-            })
-          }
-        >
-          Check account status
-        </Button>
-        {pendingId != null && change?.state === "approved" && (
-          <Button
-            disabled={busy || !available}
-            onClick={() =>
-              void command.run(async () => {
-                setWatchError(undefined);
-                try {
-                  await request<void>(`${endpoint}/changes/${change.id}/activate`, { body: {} });
-                } finally {
-                  setWatchId(change.id);
-                }
-              })
-            }
-          >
-            Restart and apply account
-          </Button>
-        )}
-        {pendingId != null && (change?.state === "approved" || change?.state === "preparing") && (
+      {canCheckStatus && (
+        <div className="actions">
           <Button
             variant="secondary"
-            disabled={busy || disabled || status.loading || Boolean(status.error)}
+            disabled={busy}
             onClick={() =>
               void command.run(async () => {
-                setChange(
-                  await request<SoulseekAccountChange>(`${endpoint}/changes/${pendingId}/cancel`, {
-                    body: {},
-                  }),
-                );
+                const current = await request<SoulseekAccountStatus>(endpoint);
+                const id = current.pending_change_id ?? change?.id;
+                if (id != null) {
+                  const saved = await request<SoulseekAccountChange>(`${endpoint}/changes/${id}`);
+                  setChange(saved);
+                  if (saved.state === "activating") setWatchId(saved.id);
+                }
+                setUnknownSave(false);
+                setWatchError(undefined);
                 status.refresh();
+                changed.current();
               })
             }
           >
-            Cancel saved account
+            Check account status
           </Button>
-        )}
-      </div>
+          {pendingId != null && change?.state === "approved" && (
+            <Button
+              disabled={busy || !available}
+              onClick={() =>
+                void command.run(async () => {
+                  setWatchError(undefined);
+                  try {
+                    await request<void>(`${endpoint}/changes/${change.id}/activate`, { body: {} });
+                  } finally {
+                    setWatchId(change.id);
+                  }
+                })
+              }
+            >
+              Restart and apply account
+            </Button>
+          )}
+          {pendingId != null && (change?.state === "approved" || change?.state === "preparing") && (
+            <Button
+              variant="secondary"
+              disabled={busy || disabled || status.loading || Boolean(status.error)}
+              onClick={() =>
+                void command.run(async () => {
+                  setChange(
+                    await request<SoulseekAccountChange>(
+                      `${endpoint}/changes/${pendingId}/cancel`,
+                      {
+                        body: {},
+                      },
+                    ),
+                  );
+                  status.refresh();
+                })
+              }
+            >
+              Cancel saved account
+            </Button>
+          )}
+        </div>
+      )}
       {pendingId != null && !change && (
         <p role="status">An account change is pending. Check account status to review it.</p>
       )}
@@ -220,7 +214,7 @@ export function SoulseekAccount({
             });
           }}
         >
-          <SettingsRow label="Soulseek username" hint="Use the name you sign in with.">
+          <SettingsRow label="Soulseek username">
             {(control) => (
               <input
                 {...control}
@@ -236,7 +230,7 @@ export function SoulseekAccount({
               />
             )}
           </SettingsRow>
-          <SettingsRow label="Soulseek password" hint="Enter the password for this account.">
+          <SettingsRow label="Soulseek password">
             {(control) => (
               <input
                 {...control}
@@ -251,6 +245,7 @@ export function SoulseekAccount({
               />
             )}
           </SettingsRow>
+          <p>Saving stores the account on this host. It does not sign in or enable downloads.</p>
           <SettingsSaveButton form={formId} type="submit" disabled={!canSave} busy={command.busy}>
             Save account
           </SettingsSaveButton>

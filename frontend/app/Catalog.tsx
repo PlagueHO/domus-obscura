@@ -528,7 +528,7 @@ export function Settings({
   return (
     <>
       <header className="settings-title">
-        <h1 id="system-settings-title">System settings</h1>
+        <h1 id="system-settings-title">System Settings</h1>
         {onDismiss && (
           <HeaderIconAction label="Close settings" onClick={onDismiss}>
             <Icon name="close" />

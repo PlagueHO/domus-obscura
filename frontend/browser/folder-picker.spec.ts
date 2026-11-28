@@ -149,7 +149,7 @@ test("a failed refresh clears selection and closing releases the retained listin
   await expect(dialog.getByRole("button", { name: "Use this folder", exact: true })).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByRole("dialog", { name: "System settings" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "System Settings" })).toBeVisible();
   expect(closes).toBe(1);
 });
 

@@ -28,9 +28,7 @@ it("uses write-only fields and distinguishes account storage from connection and
   const markup = renderToStaticMarkup(<SoulseekAccount disabled={false} onChanged={() => {}} />);
   expect(markup).toContain('type="password"');
   expect(markup).toContain('autoComplete="new-password"');
-  expect(markup).toContain("The password cannot be read back");
-  expect(markup).toContain("Saving does not sign in");
-  expect(markup).toContain("plaintext TCP");
+  expect(markup).toContain("It does not sign in or enable downloads.");
   expect(markup).toContain("Save account");
   expect(markup).not.toContain("Restart and apply account");
 });

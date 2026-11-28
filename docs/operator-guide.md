@@ -12,8 +12,8 @@ Neither the account name nor password is returned by the account status API.
 Select **Restart and apply account** to apply that exact saved account. The
 supervisor stops the worker and API, validates the saved change, updates only
 the account reference, then restarts both. Saving and applying do not sign in,
-test the connection, enable downloads, or share files. Use **Check account status**
-after a lost response or page reload. Cancel a saved or incomplete account change
+test the connection, enable downloads, or share files. **Check account status**
+appears when the result is unknown or a saved change is pending. Cancel a saved or incomplete account change
 before activation if needed. Do not delete or edit retained credential files.
 
 The account form is unavailable when host settings are read-only, the saved

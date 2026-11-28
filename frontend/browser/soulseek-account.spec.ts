@@ -66,6 +66,11 @@ test("Soulseek account is saved once, cleared, and applied only by a separate re
     .getByRole("group", { name: "Settings save actions" })
     .getByRole("button", { name: "Save account", exact: true });
   await expect(form.getByLabel("Soulseek username", { exact: true })).toBeEnabled();
+  await expect(form.getByLabel("Soulseek password", { exact: true })).toHaveAttribute(
+    "type",
+    "password",
+  );
+  await expect(form.getByRole("button", { name: "Check account status" })).toHaveCount(0);
   await expect(save).toBeDisabled();
   await form.getByLabel("Soulseek username", { exact: true }).fill("generated-browser-user");
   await expect(save).toBeDisabled();
