@@ -448,6 +448,7 @@ pub async fn run(path: &Path) -> Result<()> {
     let mut logs = VecDeque::new();
     let stop = crate::infrastructure::lifecycle::Lifecycle::foreground();
     let mut stop_connection = None;
+    let mut origin = source.active.origin.clone();
     let mut source = source;
     loop {
         let mut primary_change = None;
@@ -492,7 +493,7 @@ pub async fn run(path: &Path) -> Result<()> {
             result?;
             return Err(error);
         }
-        println!("Domus ready: {}", source.active.origin);
+        println!("Domus ready: {origin}");
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         let outcome = async { loop {
         tokio::select! {
@@ -583,12 +584,17 @@ pub async fn run(path: &Path) -> Result<()> {
             result?;
             children.clear();
             source = tokio::task::block_in_place(|| source.activate_stopped_primary(id))?;
+            origin.clone_from(&source.active.origin);
             continue;
         }
         if let Some(id) = account_change {
             result?;
             children.clear();
-            source = tokio::task::block_in_place(|| source.activate_stopped_soulseek_account(id))?;
+            // Account activation can change only the account reference, not the browser origin.
+            source = tokio::task::block_in_place(|| source.activate_stopped_soulseek_account(id))
+                .map_err(|_| Error::Conflict(
+                    "Soulseek account activation could not finish safely. Keep all components stopped and check the saved activation state.".into(),
+                ))?;
             continue;
         }
         tokio::task::block_in_place(|| drop(listener));

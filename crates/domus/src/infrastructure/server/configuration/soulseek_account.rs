@@ -215,10 +215,12 @@ impl ConfigurationService {
     pub(crate) fn activate_stopped_soulseek_account(self, id: i64) -> Result<Self> {
         let prepared = match self.prepare_soulseek_account(id) {
             Ok(prepared) => prepared,
-            Err(error) => {
+            Err(_) => {
                 self.open_store(StoreOpenMode::Existing)?.fail_soulseek_account(id,
                     "Account activation failed before publication. No account reference was published by this operation.")?;
-                eprintln!("Soulseek account activation rejected: {error}");
+                eprintln!(
+                    "Soulseek account activation rejected before publication. Check the saved result."
+                );
                 self.require_revision(
                     self.active_revision(),
                     &self.read_file(&self.directory()?)?.1,
@@ -230,7 +232,7 @@ impl ConfigurationService {
         drop(self);
         let candidate = match prepared.validate() {
             Ok(candidate) => candidate,
-            Err(error) => {
+            Err(_) => {
                 let unchanged = Self::open(&path)?;
                 if unchanged.active_revision() != prepared.expected {
                     return Err(Error::Conflict(
@@ -239,7 +241,9 @@ impl ConfigurationService {
                 }
                 unchanged.open_store(StoreOpenMode::Existing)?.fail_soulseek_account(id,
                     "Account validation failed before publication. The saved host configuration is unchanged.")?;
-                eprintln!("Soulseek account validation rejected: {error}");
+                eprintln!(
+                    "Soulseek account validation rejected before publication. Check the saved result."
+                );
                 return Ok(unchanged);
             }
         };

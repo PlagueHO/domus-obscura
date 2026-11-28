@@ -29,11 +29,13 @@ Other host settings remain operator-managed. Previous location records and media
 stay unchanged. Failed or uncertain activation is not success.
 Acquisition also needs private staging and
 explicit host enablement. Provider credentials stay on the host.
-Settings has a separate Soulseek account section with write-only password input.
+Acquisition has a Soulseek account card with a write-only password field.
 Saving creates a private credential version, not a login. A separate action
 restarts both supervised processes and applies only the saved account reference.
-Lost responses are reconciled through account status; credentials are never
-resubmitted automatically. Account setup cannot enable downloads or sharing.
+If the server confirms that it rejected an account command, the app shows the
+error and clears any submitted password. If the result is uncertain, use account
+status to check the saved change. The app never resubmits credentials
+automatically. Account setup cannot enable downloads or sharing.
 Other host settings still use their operator procedure.
 Search and source assessment read metadata only. The app requires separate
 frozen-plan approval, source acknowledgement, exact JPEG approval and an explicit

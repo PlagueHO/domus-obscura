@@ -72,6 +72,8 @@ binds to the exact journal ID, checked file identity and candidate revision.
 The supervisor accepts only `account:<exact-change-id>`, stops the worker and API,
 validates the candidate, publishes it, then restarts both. Saving and activation
 cannot enable capabilities, log in, test an account, download, or share files.
+Supervisor diagnostics report account activation failures without raw error
+details. The readiness line reports only the configured browser origin.
 Refuse changes while local acquisition, worker acquisition, a sharing account,
 sharing access or a listener is configured. Keep failed and interrupted files for
 explicit operator inspection. Do not replace or edit an existing account file.
@@ -448,8 +450,8 @@ Linux candidate packaging and systemd operations are in
 remain #18. A service callback requests stop; it must not abort active blocking
 work or release its native locks before draining. Only the API owns migration.
 An API restart under a live worker must open current schema without migration.
-Linux API startup holds the stable worker process lock through schema
-preparation. A busy lock permits only current-schema startup.
+API startup holds the stable worker process lock through schema migration.
+A busy lock permits only current-schema startup.
 The Linux-only `systemd-service <api|worker> <absolute-configuration-file>`
 entry point rejects root and requires private configuration and a notification
 socket. It connects readiness and early latched signals to the existing runtimes.

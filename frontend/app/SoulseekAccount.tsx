@@ -8,6 +8,10 @@ import { Alert, Button, SettingsRow, SettingsSaveButton } from "./components/ui"
 
 const endpoint = "/api/system/soulseek-account";
 
+function isRejected(error: unknown) {
+  return error instanceof ApiError && error.status >= 400 && error.status < 500;
+}
+
 export function SoulseekAccount({
   disabled,
   onChanged,
@@ -152,9 +156,11 @@ export function SoulseekAccount({
                   setWatchError(undefined);
                   try {
                     await request<void>(`${endpoint}/changes/${change.id}/activate`, { body: {} });
-                  } finally {
-                    setWatchId(change.id);
+                  } catch (error) {
+                    if (!isRejected(error)) setWatchId(change.id);
+                    throw error;
                   }
+                  setWatchId(change.id);
                 })
               }
             >
@@ -205,7 +211,7 @@ export function SoulseekAccount({
               try {
                 setChange(await request<SoulseekAccountChange>(`${endpoint}/changes`, { body }));
               } catch (error) {
-                setUnknownSave(true);
+                if (!isRejected(error)) setUnknownSave(true);
                 throw error;
               } finally {
                 body.password = "";

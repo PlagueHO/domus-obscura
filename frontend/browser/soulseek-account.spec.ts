@@ -158,3 +158,81 @@ test("lost account-save response is reconciled without resubmitting the password
   await expect(form.getByLabel("Soulseek password", { exact: true })).toHaveValue("");
   expect(saves).toBe(1);
 });
+
+test("confirmed account rejections leave the form and restart controls usable", async ({
+  page,
+}) => {
+  const invalidPassword = "é".repeat(65);
+  const saveError = "Soulseek password must contain 1 through 128 bytes without control characters";
+  const restartError = "The supervisor is unavailable.";
+  let saved = false;
+  let active = false;
+  let reads = 0;
+  let activations = 0;
+  const change = () => ({
+    id: 22,
+    state: active ? "active" : "approved",
+    configuration_revision: active ? "b".repeat(64) : null,
+    last_error: null,
+  });
+  await page.route("**/api/system/soulseek-account**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/soulseek-account")) {
+      await route.fulfill({
+        json: {
+          available: true,
+          reason: null,
+          configured: active,
+          active_revision: (active ? "b" : "a").repeat(64),
+          pending_change_id: saved && !active ? 22 : null,
+        },
+      });
+    } else if (path.endsWith("/changes")) {
+      if (route.request().postDataJSON().password === invalidPassword) {
+        await route.fulfill({ status: 400, json: { error: saveError } });
+      } else {
+        saved = true;
+        await route.fulfill({ json: change() });
+      }
+    } else if (path.endsWith("/activate")) {
+      if (++activations === 1) {
+        await route.fulfill({ status: 409, json: { error: restartError } });
+      } else {
+        active = true;
+        await route.fulfill({ status: 503 });
+      }
+    } else {
+      reads++;
+      await route.fulfill({ json: change() });
+    }
+  });
+  await page.goto("/#/settings?section=music_acquisition");
+  const form = page.getByRole("region", { name: "Soulseek account credentials" });
+  const username = form.getByLabel("Soulseek username", { exact: true });
+  const password = form.getByLabel("Soulseek password", { exact: true });
+  const save = page
+    .getByRole("group", { name: "Settings save actions" })
+    .getByRole("button", { name: "Save account", exact: true });
+  await username.fill("generated-rejection-user");
+  await password.fill(invalidPassword);
+  await save.click();
+  await expect(form.getByRole("alert")).toContainText(saveError);
+  await expect(username).toHaveValue("generated-rejection-user");
+  await expect(password).toBeEnabled();
+  await expect(password).toHaveValue("");
+  await expect(save).toBeDisabled();
+  await password.fill("generated-corrected-password");
+  await save.click();
+
+  const restart = form.getByRole("button", { name: "Restart and apply account", exact: true });
+  await restart.click();
+  await expect(form.getByRole("alert")).toContainText(restartError);
+  await expect(restart).toBeEnabled();
+  await expect(form.getByRole("button", { name: "Cancel saved account" })).toBeEnabled();
+  await expect(form.getByRole("button", { name: "Check account status" })).toBeEnabled();
+  expect(reads).toBe(0);
+
+  await restart.click();
+  await expect(form.getByText("Account applied. No login was started.")).toBeVisible();
+  expect(reads).toBeGreaterThan(0);
+});

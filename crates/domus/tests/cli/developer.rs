@@ -165,16 +165,14 @@ async fn developer_library_and_soulseek_account_changes_restart_both_real_childr
             }
         }
     });
+    let ready_line = format!("Domus ready: {origin}");
     let wait_ready = || -> Result<(), Box<dyn std::error::Error>> {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .ok_or("readiness timeout")?;
-            if receiver
-                .recv_timeout(remaining)??
-                .starts_with("Domus ready: ")
-            {
+            if receiver.recv_timeout(remaining)?? == ready_line {
                 return Ok(());
             }
         }
@@ -184,6 +182,7 @@ async fn developer_library_and_soulseek_account_changes_restart_both_real_childr
     domus::infrastructure::tls::initialize_crypto()?;
     let client = reqwest::Client::builder()
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(15))
         .build()?;
     let available: serde_json::Value = client
@@ -305,10 +304,12 @@ async fn developer_library_and_soulseek_account_changes_restart_both_real_childr
         std::fs::read_to_string(backup_media.join("existing.txt"))?,
         "keep backup media"
     );
+    let username = format!("fixture-{:016x}", rand::random::<u64>());
+    let password = format!("{:032x}", rand::random::<u128>());
     let account_request = serde_json::json!({
         "expected_revision":current["revision"],
-        "username":"generated-process-user",
-        "password":"generated-process-password"
+        "username":username,
+        "password":password
     });
     let account_endpoint = format!("{origin}/api/system/soulseek-account/changes");
     let rejected = client
@@ -337,7 +338,9 @@ async fn developer_library_and_soulseek_account_changes_restart_both_real_childr
         .json()
         .await?;
     assert_eq!(account["state"], "approved");
-    assert!(!account.to_string().contains("generated-process"));
+    let account_response = account.to_string();
+    assert!(!account_response.contains(&username));
+    assert!(!account_response.contains(&password));
     let account_id = account["id"].as_i64().ok_or("account ID")?;
     assert!(
         domus::infrastructure::server::developer::control(

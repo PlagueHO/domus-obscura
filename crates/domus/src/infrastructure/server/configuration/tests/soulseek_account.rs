@@ -1,14 +1,16 @@
 use super::*;
 use crate::infrastructure::server::configuration::SaveSoulseekAccount;
 
+fn account_request(source: &ConfigurationService) -> SaveSoulseekAccount {
+    SaveSoulseekAccount {
+        expected_revision: source.active_revision().into(),
+        username: format!("fixture-{:016x}", rand::random::<u64>()),
+        password: format!("{:032x}", rand::random::<u128>()),
+    }
+}
+
 fn save(source: &ConfigurationService) -> TestResult<i64> {
-    Ok(source
-        .save_soulseek_account(SaveSoulseekAccount {
-            expected_revision: source.active_revision().into(),
-            username: "generated-test-user".into(),
-            password: "generated-test-password".into(),
-        })?
-        .id)
+    Ok(source.save_soulseek_account(account_request(source))?.id)
 }
 
 #[test]
@@ -16,14 +18,17 @@ fn backend_configuration_soulseek_account_is_private_versioned_and_offline() -> 
     let fixture = Fixture::new(false)?;
     let original: Value = serde_json::from_slice(&std::fs::read(&fixture.path)?)?;
     let original_services = serde_json::to_value(&fixture.source.active.services)?;
-    let id = save(&fixture.source)?;
+    let request = account_request(&fixture.source);
+    let (username, password) = (request.username.clone(), request.password.clone());
+    let id = fixture.source.save_soulseek_account(request)?.id;
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&fixture.path)?)?,
         original
     );
     let store = fixture.source.open_store(StoreOpenMode::ReadCurrent)?;
     let response = serde_json::to_string(&store.soulseek_account_change(id)?)?;
-    assert!(!response.contains("generated-test"));
+    assert!(!response.contains(&username));
+    assert!(!response.contains(&password));
     assert_eq!(store.soulseek_account_change(id)?.state, "approved");
     drop(store);
     let source = fixture.source.activate_stopped_soulseek_account(id)?;
@@ -34,8 +39,8 @@ fn backend_configuration_soulseek_account_is_private_versioned_and_offline() -> 
         &store.source(),
         &account.credentials_file,
     )?;
-    assert_eq!(credentials.username, "generated-test-user");
-    assert_eq!(credentials.password, "generated-test-password");
+    assert_eq!(credentials.username, username);
+    assert_eq!(credentials.password, password);
     let file = account.credentials_file.clone();
     let old_bytes = std::fs::read(&file)?;
     let saved: Value = serde_json::from_slice(&std::fs::read(&fixture.path)?)?;
@@ -58,10 +63,7 @@ fn backend_configuration_soulseek_account_is_private_versioned_and_offline() -> 
     let database = source.active.database.clone();
     drop(source);
     let database_bytes = std::fs::read(database)?;
-    for secret in [
-        b"generated-test-user".as_slice(),
-        b"generated-test-password".as_slice(),
-    ] {
+    for secret in [username.as_bytes(), password.as_bytes()] {
         assert!(
             !database_bytes
                 .windows(secret.len())
@@ -75,23 +77,28 @@ fn backend_configuration_soulseek_account_is_private_versioned_and_offline() -> 
 fn backend_configuration_soulseek_account_rejects_invalid_stale_and_read_only_input() -> TestResult
 {
     let fixture = Fixture::new(false)?;
+    let request = account_request(&fixture.source);
     for (username, password, revision) in [
         (
             "invalid\nuser".to_owned(),
-            "password".to_owned(),
-            fixture.source.active_revision().to_owned(),
+            request.password.clone(),
+            request.expected_revision.clone(),
         ),
         (
-            "valid".to_owned(),
-            "bad\npassword".to_owned(),
-            fixture.source.active_revision().to_owned(),
+            request.username.clone(),
+            format!("{}\n", request.password),
+            request.expected_revision.clone(),
         ),
         (
-            "valid".to_owned(),
+            request.username.clone(),
             "é".repeat(65),
-            fixture.source.active_revision().to_owned(),
+            request.expected_revision.clone(),
         ),
-        ("valid".to_owned(), "password".to_owned(), "0".repeat(64)),
+        (
+            request.username.clone(),
+            request.password.clone(),
+            "0".repeat(64),
+        ),
     ] {
         assert!(
             fixture
