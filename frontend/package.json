@@ -11,6 +11,8 @@
     "browser:install": "playwright install chromium"
   },
   "dependencies": {
+    "@headless-tree/core": "1.8.1",
+    "@headless-tree/react": "1.8.1",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },

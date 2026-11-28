@@ -157,50 +157,56 @@ async fn worker_api_queues_offline_scans_without_running_them_and_preserves_comm
 
 #[tokio::test]
 async fn worker_api_scan_retry_rechecks_system_settings_read_only() -> TestResult {
-    let temp = super::super::permissions::private_test_directory()?;
-    let database = temp.path().join("state.sqlite");
-    let mut store = Store::open(&database)?;
-    let root = temp.path().join("media");
-    std::fs::create_dir(&root)?;
-    let location = crate::application::add_location(&store, &root, "main")?;
-    let request = store.enqueue_worker(
-        WorkerOperation::Scan {
-            location_id: location,
-        },
-        1,
-        &"a".repeat(64),
-    )?;
-    let host = store.start_worker_host("fixture", &"a".repeat(64))?;
-    let claim = store
-        .claim_worker_request(&host, "scan")?
-        .ok_or(Error::Internal("missing fixture request"))?;
-    store.finish_worker_request(&claim, "failed", Some("generated failure"))?;
-    let api = Api::development("https://localhost:8443", store)?
-        .with_system_settings_read_only(true)?
-        .with_production_worker(WorkerConfiguration {
-            queue_capacity: 1,
-            acquisition: None,
-            sharing: None,
-        })?;
-    let router = api.router();
-    for path in [
-        format!("/api/locations/{location}/scan"),
-        format!("/api/worker/requests/{}/retry", request.id),
-    ] {
+    for library in [false, true] {
+        let temp = super::super::permissions::private_test_directory()?;
+        let database = temp.path().join("state.sqlite");
+        let mut store = Store::open(&database)?;
+        let root = temp.path().join("media");
+        std::fs::create_dir(&root)?;
+        let location = crate::application::add_location(&store, &root, "main")?;
+        let operation = if library {
+            WorkerOperation::ScanLibrary {
+                location_id: location,
+            }
+        } else {
+            WorkerOperation::Scan {
+                location_id: location,
+            }
+        };
+        let request = store.enqueue_worker(operation, 1, &"a".repeat(64))?;
+        let host = store.start_worker_host("fixture", &"a".repeat(64))?;
+        let claim = store
+            .claim_worker_request(&host, "scan")?
+            .ok_or(Error::Internal("missing fixture request"))?;
+        store.finish_worker_request(&claim, "failed", Some("generated failure"))?;
+        let api = Api::development("https://localhost:8443", store)?
+            .with_system_settings_read_only(true)?
+            .with_production_worker(WorkerConfiguration {
+                queue_capacity: 1,
+                acquisition: None,
+                sharing: None,
+            })?;
+        let router = api.router();
+        for path in [
+            "/api/library/scan".into(),
+            format!("/api/locations/{location}/scan"),
+            format!("/api/worker/requests/{}/retry", request.id),
+        ] {
+            assert_eq!(
+                router
+                    .clone()
+                    .oneshot(command(&path, true)?)
+                    .await?
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
         assert_eq!(
-            router
-                .clone()
-                .oneshot(command(&path, true)?)
-                .await?
-                .status(),
-            StatusCode::FORBIDDEN
+            Store::open_read_current(&database)?
+                .worker_request(request.id)?
+                .state,
+            "failed"
         );
     }
-    assert_eq!(
-        Store::open_read_current(&database)?
-            .worker_request(request.id)?
-            .state,
-        "failed"
-    );
     Ok(())
 }

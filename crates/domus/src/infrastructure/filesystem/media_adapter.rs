@@ -18,6 +18,8 @@ use std::time::UNIX_EPOCH;
 
 mod transport;
 pub use transport::{Client, PreparedAdapter};
+mod network;
+pub use network::NetworkAccess;
 mod client;
 pub use client::{
     MediaClient, MediaDirectory, MediaFile, MediaMove, MediaNode, MediaOutput, MediaPage,
@@ -111,6 +113,7 @@ impl MediaSelection {
             || self.media.is_empty()
             || self.media.len() > MAX_ROOTS
             || self.private.role != StorageRole::Application
+            || self.private.scan_only
         {
             return Err(Error::InvalidInput("invalid native media selection".into()));
         }
@@ -132,7 +135,7 @@ impl MediaSelection {
         if self
             .media
             .iter()
-            .any(|root| root.role != StorageRole::Media)
+            .any(|root| root.role != StorageRole::Media || root.scan_only)
         {
             return Err(Error::InvalidInput(
                 "only media roots can be exported".into(),

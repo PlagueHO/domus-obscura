@@ -36,6 +36,33 @@ separation, approval, and recovery guarantees still apply. The
 [storage layout](docs/storage-layout.md) records the agreed model and the details
 that still need review.
 
+Let the administrator set or change the primary library and add backup libraries
+from System settings on the supervised host.
+Require an exact folder review and confirmation. Apply selected storage settings
+only after a coordinated API and worker stop and validation. Restart both with
+the same saved configuration. Other host settings remain operator-managed.
+Do not move media or automatically convert the previous primary to a backup.
+Adding a backup does not change the primary or start a scan.
+Keep old location identities, indexed history, immutable plans, and receipts.
+Reject changes while unfinished work needs completion, cancellation, or recovery.
+
+For folder browsing, Windows or Linux handles SMB/NFS access. Do not add a
+separate adapter, certificate wizard, share credentials or mount management to
+the picker. Browsing does not approve a share for library use.
+Recognized host SMB/NFS locations can be bound as scan-only primary or backup
+libraries. Require the existing identity and separation checks. Do not use
+scan-only locations for acquisition, publication or recovery writes. Supported
+local locations retain scan and write support.
+
+Let the administrator save a Soulseek username and password from System settings.
+Keep each credential version in a new private application file, outside SQLite
+and Git. Save non-secret approval metadata before file creation. Apply only the
+exact saved account through a separate coordinated API and worker restart.
+Do not sign in, test a connection, enable acquisition, or enable sharing.
+Reject account changes while a Soulseek service or listener is configured.
+Other host JSON fields stay operator-managed. Connection setup and consent to
+plaintext Soulseek login remain separate operator actions.
+
 Planned Docker distribution uses one Linux image for separate API and optional worker
 containers on Windows Docker Desktop or Linux Docker Engine. Keep shared private
 state on local Linux volumes. Preserve loopback guards and checked native roots.
@@ -162,11 +189,27 @@ policy. Only an operator can change it outside the UI. Host JSON remains
 read-only even when this flag is `false`. Versioned shared-library output policy
 remains in SQLite. Artist-photo bindings retain their separate guarded commands.
 System settings is a route inside the main application, with its normal header
-and navigation. It also supports explicit registration of existing server-side
-main/backup library folders and separate read-only index scans. Both commands
-require the same backend edit policy and browser command guards. Registration
-uses normal native root identity, ancestry and overlap checks. It cannot create
-folders, move media, replace existing roots or rebind legacy roots.
+and navigation. Its cog opens host configuration, shared output policy and library
+folders. Folder cards show the primary/backup role, configured path and saved scan
+status. Internal storage references stay in expandable safety details.
+Registration offers only operator-selected folders and preserves native identity,
+ancestry and overlap checks. Other folders and network shares need stopped,
+validated operator setup first. Registration cannot create folders, move media,
+replace existing roots or rebind legacy roots.
+
+Editable primary-library paths use a Headless Tree folder dialog. Rust lists
+local drives and bounded directory pages from retained, no-follow handles.
+The browser never opens host or network files itself. Known private storage,
+links and reparse points cannot be selected. A changed listing must be reloaded.
+Selection only fills the path. Exact library inspection, approval and coordinated
+activation remain separate. Enter a Windows SMB share path or the absolute path
+of a Linux SMB/NFS mount. Rust uses the application account's existing access.
+The picker does not search for shares or grant a storage role.
+
+At startup, check for a verified primary library and a saved shared output policy.
+Show the setup wizard when either is missing or the primary is unavailable.
+Backups and download providers are optional. An unavailable saved primary must be
+restored, not replaced through the wizard. Failed setup reads remain errors.
 
 The system output-settings API uses the existing immutable version history and rejects
 stale versions. Existing plans keep their saved settings. Backend JSON changes
@@ -883,12 +926,19 @@ File details show saved tags, identifiers, header properties and inspection erro
 Album folders list assets; indexed JPEG previews use checked native handles and
 strict bounded image decoding. Embedded covers are not extracted.
 
-Saved-index refresh is passive. The separate **Refresh folder from disk** command
-scans only the selected directory and its direct entries through the existing scan
-lane. It does not renew complete-location coverage or scan child folders. Failed
-enumeration cannot confirm absence. Production requests show their exact worker
-request state and require explicit retry after failure. The system-settings edit
-policy applies. No Library operation changes media or creates acquisition work.
+Saved-index refresh is passive. The separate **Library scans** page starts one
+primary-first scan, followed by every registered backup. It also controls an
+optional versioned schedule, off by default. Scheduled scans require the running
+background worker. Missed intervals do not create a burst of catch-up work.
+Changing a schedule does not cancel an already admitted scan.
+Scans update the index without copying, replacing or deleting media.
+Backup comparisons report relative-path, entry-type and size differences only
+when both saved scans have complete coverage. They do not prove equal contents.
+Failed enumeration cannot confirm absence. Production requests show their exact
+worker request state and require explicit retry after failure. The system-settings
+edit policy and browser command guards apply. Browsing and Settings do not offer
+per-folder scan actions. Existing CLI/internal direct-folder refresh remains
+available without renewing complete-location coverage.
 Changing a resource key immediately
 hides the old resource until the new read starts. This also protects request
 and provider views from showing another resource's saved result as current.

@@ -9,6 +9,7 @@ fn runtime(directory: &Path) -> Result<PreparedProductionWorker> {
     let database = directory.join("state.sqlite");
     let source = Store::open(&database)?.source();
     Ok(PreparedProductionWorker {
+        configuration_source: None,
         _lock: ProcessLock::acquire(&database, "worker")?,
         database_source: source,
         configuration: WorkerConfiguration {
@@ -144,6 +145,61 @@ fn worker_runtime_runs_a_durable_scan_and_releases_native_ownership_on_stop() ->
     assert!(!store.worker_status(64)?.online);
     assert!(!store.worker_status(64)?.stopping);
     let _next = ProcessLock::acquire(store.database_path(), "worker")?;
+    Ok(())
+}
+
+#[test]
+fn worker_library_maintenance_scans_primary_and_backup() -> TestResult {
+    let temp = super::super::permissions::private_test_directory()?;
+    let worker = runtime(temp.path())?;
+    let mut store = worker.database_source.open(StoreOpenMode::Current)?;
+    let mut locations = Vec::new();
+    for kind in ["main", "backup"] {
+        let root = temp.path().join(kind);
+        std::fs::create_dir(&root)?;
+        std::fs::write(root.join("generated.txt"), b"generated scan fixture")?;
+        locations.push(crate::application::add_location(&store, &root, kind)?);
+    }
+    let request = store.enqueue_library_scan(64, &"a".repeat(64))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = stop.clone();
+    let handle = std::thread::spawn(move || worker.supervise(stopping));
+    let mut complete = false;
+    for _ in 0..100 {
+        if store.worker_request(request.id)?.state == "complete" {
+            complete = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    stop.store(true, Ordering::Release);
+    handle
+        .join()
+        .map_err(|_| Error::Internal("fixture supervisor panicked"))??;
+    assert!(complete, "worker did not finish its accepted library scan");
+    for location in locations {
+        assert_eq!(store.location(location)?.coverage, "complete");
+        assert_eq!(
+            store
+                .browse(
+                    location,
+                    &crate::domain::LibraryPath::parse("")?,
+                    Page::new(0, 10)?
+                )?
+                .len(),
+            1
+        );
+    }
+    assert!(
+        store
+            .compare_library_backup(2, "", 50)?
+            .differences
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("backup").join("generated.txt"))?,
+        b"generated scan fixture"
+    );
     Ok(())
 }
 

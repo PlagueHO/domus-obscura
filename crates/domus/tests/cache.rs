@@ -151,6 +151,7 @@ async fn shared_cache_host_configuration_is_explicit_bounded_and_never_migrates_
             root_id: root_id.into(),
             binding_revision: 1,
             role,
+            scan_only: false,
             provider_scope: "application".into(),
             relative,
             expected,

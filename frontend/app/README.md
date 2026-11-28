@@ -18,8 +18,23 @@ This mode needs no certificate or sign-in configuration. Production uses
 development TLS certificate. Failed secure configuration never selects
 anonymous HTTP.
 
-The host must register library roots, bind private staging, save output settings
-and explicitly enable local acquisition. Provider credentials stay on the host.
+The startup wizard requires a verified primary library and saved output settings.
+Backups and providers are optional. Library registration offers only folders
+already selected in host storage configuration. Other folders and network shares
+need stopped, validated operator setup. The native supervised application can
+also set or change the primary local folder. Check the exact folder, confirm
+storage separation, save approval, then explicitly restart and apply.
+The supervisor drains both processes before publishing selected storage settings.
+Other host settings remain operator-managed. Previous location records and media
+stay unchanged. Failed or uncertain activation is not success.
+Acquisition also needs private staging and
+explicit host enablement. Provider credentials stay on the host.
+Settings has a separate Soulseek account section with write-only password input.
+Saving creates a private credential version, not a login. A separate action
+restarts both supervised processes and applies only the saved account reference.
+Lost responses are reconciled through account status; credentials are never
+resubmitted automatically. Account setup cannot enable downloads or sharing.
+Other host settings still use their operator procedure.
 Search and source assessment read metadata only. The app requires separate
 frozen-plan approval, source acknowledgement, exact JPEG approval and an explicit
 new-only download command. Commands use same-origin credentials and
@@ -37,7 +52,12 @@ No external image URLs are rendered. Local cover upload remains available.
 
 The app displays saved job states and publication receipts. An accepted start
 command is not completion. `backup_pending` remains separate from `complete`.
-Library browsing and setup views are read-only. Saved recovery questions and
+Library browsing is passive. Settings registers selected folders without scanning.
+Library scans is a separate page for one primary-plus-backups scan, an optional
+schedule, and paginated backup differences. Schedules default to off and need a
+background worker. Comparisons check saved paths, entry types and file sizes,
+not equal contents. Scans never copy, replace or delete media.
+Saved recovery questions and
 failed or uncertain transfers still require the existing operator recovery
 commands; this app does not bypass those controls.
 

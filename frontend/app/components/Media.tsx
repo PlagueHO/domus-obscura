@@ -6,7 +6,7 @@ import type { QueueSelection } from "../../src/generated/QueueSelection";
 import { request } from "../api";
 import { useCommand } from "../hooks";
 import { visibleJobs } from "../state";
-import { Alert, Button, Cover, Empty } from "./ui";
+import { Alert, Button, Cover, Empty, HeaderCard } from "./ui";
 import { ArtistPhoto } from "../ArtistPhoto";
 import { SelectAlbum } from "../AlbumSelection";
 
@@ -17,13 +17,16 @@ export type IconName =
   | "queue"
   | "inbox"
   | "settings"
+  | "scan"
   | "back"
   | "forward"
   | "bell"
   | "account"
   | "close"
   | "refresh"
-  | "agent";
+  | "agent"
+  | "folder"
+  | "plus";
 
 export function Icon({ name }: { name: IconName }) {
   const paths: Record<IconName, string> = {
@@ -33,13 +36,16 @@ export function Icon({ name }: { name: IconName }) {
     queue: "M8 6h13M8 12h13M8 18h13M3 6h1m-1 6h1m-1 6h1",
     inbox: "M4 4h16v16H4V4m0 9h5l1 3h4l1-3h5",
     settings:
-      "M12 3v3m0 12v3M3 12h3m12 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0",
+      "M10 2h4l.6 2.4 1.6.9 2.4-.7 2 3.5-1.8 1.7v4.4l1.8 1.7-2 3.5-2.4-.7-1.6.9L14 22h-4l-.6-2.4-1.6-.9-2.4.7-2-3.5 1.8-1.7V9.8L3.4 8.1l2-3.5 2.4.7 1.6-.9L10 2Zm6 10a4 4 0 1 1-8 0 4 4 0 0 1 8 0",
+    scan: "M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5M4 12h16",
     back: "m14 5-7 7 7 7",
     forward: "m10 5 7 7-7 7",
     bell: "M5 17h14l-2-3V9a5 5 0 0 0-10 0v5l-2 3m5 3h4",
     account: "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0M4 21v-3c0-5 16-5 16 0v3",
     close: "m6 6 12 12M6 18 18 6",
     refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
+    folder: "M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6Z",
+    plus: "M12 5v14M5 12h14",
     agent: "m9 3 2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6m10 11 1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3",
   };
   return (
@@ -515,23 +521,25 @@ export function HomeQueue({
   const [expanded, setExpanded] = useState<boolean>();
   const open = expanded ?? groups.attention.length > 0;
   return (
-    <section
-      className={`design-card home-queue ${groups.attention.length ? "attention-card" : ""}`}
+    <HeaderCard
+      title="Download queue"
+      className={`home-queue ${groups.attention.length ? "attention-card" : ""}`}
+      actions={
+        <>
+          <span className="queue-summary">
+            {groups.attention.length
+              ? `${groups.attention.length} need your input`
+              : `${groups.active.length} in progress · ${groups.finished.length} finished`}
+          </span>
+          <Button variant="ghost" aria-expanded={open} onClick={() => setExpanded(!open)}>
+            {open ? "Hide" : "Show"}
+          </Button>
+          <a href="#/queue">Open queue</a>
+        </>
+      }
     >
-      <header className="design-card-header">
-        <h2>Download queue</h2>
-        <span className="queue-summary">
-          {groups.attention.length
-            ? `${groups.attention.length} need your input`
-            : `${groups.active.length} in progress · ${groups.finished.length} finished`}
-        </span>
-        <Button variant="ghost" aria-expanded={open} onClick={() => setExpanded(!open)}>
-          {open ? "Hide" : "Show"}
-        </Button>
-        <a href="#/queue">Open queue</a>
-      </header>
       {open && (
-        <div className="design-card-body">
+        <>
           <ul className="queue-rows">
             {[...groups.attention, ...groups.active].slice(0, 5).map((job) => (
               <JobRow
@@ -545,8 +553,8 @@ export function HomeQueue({
           {!groups.attention.length && !groups.active.length && (
             <Empty>No active requests on the loaded queue page.</Empty>
           )}
-        </div>
+        </>
       )}
-    </section>
+    </HeaderCard>
   );
 }

@@ -4,7 +4,7 @@ import type { TagRule } from "../src/generated/TagRule";
 import type { TagReview } from "../src/generated/TagReview";
 import { request } from "./api";
 import { useCommand, useMetadataResource } from "./hooks";
-import { Alert, Button, Card, Pager } from "./components/ui";
+import { Alert, Button, Card, Pager, SettingsRow } from "./components/ui";
 
 const fields = [
   ["genre", "Genre"],
@@ -33,6 +33,17 @@ export function needsTagReview(policy: TagPolicy | null | undefined): boolean {
   );
 }
 
+export function sameTagPolicy(left: TagPolicy, right: TagPolicy): boolean {
+  return fields.every(([key]) => {
+    const a = left[key];
+    const b = right[key];
+    if (a.action === "retain" || b.action === "retain") return a.action === b.action;
+    if (a.mode !== b.mode) return false;
+    if (a.action === "update") return b.action === "update" && a.value === b.value;
+    return b.action === "remove";
+  });
+}
+
 export function TagPolicyFields({
   policy,
   disabled,
@@ -56,53 +67,69 @@ export function TagPolicyFields({
         const rule = policy[key];
         return (
           <div key={key}>
-            <label>
-              {label} action
-              <select
-                value={rule.action}
-                onChange={(event) => {
-                  const action = event.target.value;
-                  if (action === "retain") change(key, { action });
-                  else if (action === "update")
-                    change(key, { action, value: "", mode: "automatic" });
-                  else if (action === "remove") change(key, { action, mode: "automatic" });
-                }}
-              >
-                <option value="remove">Remove</option>
-                <option value="retain">Retain exact source text</option>
-                <option value="update">Update with fixed text</option>
-              </select>
-            </label>
+            <SettingsRow
+              label={`${label} action`}
+              hint={`Remove, keep, or replace the source ${label.toLowerCase()} tag.`}
+            >
+              {(control) => (
+                <select
+                  {...control}
+                  value={rule.action}
+                  onChange={(event) => {
+                    const action = event.target.value;
+                    if (action === "retain") change(key, { action });
+                    else if (action === "update")
+                      change(key, { action, value: "", mode: "automatic" });
+                    else if (action === "remove") change(key, { action, mode: "automatic" });
+                  }}
+                >
+                  <option value="remove">Remove</option>
+                  <option value="retain">Retain exact source text</option>
+                  <option value="update">Update with fixed text</option>
+                </select>
+              )}
+            </SettingsRow>
             {rule.action === "update" && (
-              <label>
-                {label} value
-                <input
-                  required
-                  value={rule.value}
-                  onChange={(event) => change(key, { ...rule, value: event.target.value })}
-                />
-                <small>
-                  At most 4,096 UTF-8 bytes. No control characters. Copyright must start with a
-                  four-digit year and a space.
-                </small>
-              </label>
+              <SettingsRow
+                label={`${label} value`}
+                hint={
+                  key === "copyright"
+                    ? "Start with a four-digit year and a space. Maximum 4,096 UTF-8 bytes. No control characters."
+                    : "Maximum 4,096 UTF-8 bytes. No control characters."
+                }
+                wide
+              >
+                {(control) => (
+                  <input
+                    {...control}
+                    required
+                    value={rule.value}
+                    onChange={(event) => change(key, { ...rule, value: event.target.value })}
+                  />
+                )}
+              </SettingsRow>
             )}
             {rule.action === "retain" ? (
               <p>{label} mode: Review required</p>
             ) : (
-              <label>
-                {label} mode
-                <select
-                  value={rule.mode}
-                  onChange={(event) => {
-                    const mode = event.target.value;
-                    if (mode === "automatic" || mode === "review") change(key, { ...rule, mode });
-                  }}
-                >
-                  <option value="automatic">Automatic under the approved plan</option>
-                  <option value="review">Review after download</option>
-                </select>
-              </label>
+              <SettingsRow
+                label={`${label} mode`}
+                hint="Apply under the approved plan or require review after download."
+              >
+                {(control) => (
+                  <select
+                    {...control}
+                    value={rule.mode}
+                    onChange={(event) => {
+                      const mode = event.target.value;
+                      if (mode === "automatic" || mode === "review") change(key, { ...rule, mode });
+                    }}
+                  >
+                    <option value="automatic">Automatic under the approved plan</option>
+                    <option value="review">Review after download</option>
+                  </select>
+                )}
+              </SettingsRow>
             )}
           </div>
         );

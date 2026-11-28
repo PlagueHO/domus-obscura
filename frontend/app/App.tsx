@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { SessionIdentity } from "../src/generated/SessionIdentity";
 import type { Location } from "../src/generated/Location";
 import type { SettingsVersion } from "../src/generated/SettingsVersion";
 import type { SystemSettingsPolicy } from "../src/generated/SystemSettingsPolicy";
 import type { JobSummary } from "../src/generated/JobSummary";
 import type { StoredQuestion } from "../src/generated/StoredQuestion";
+import type { LibrarySetup } from "../src/generated/LibrarySetup";
 import { request, type LocalStatus } from "./api";
 import { WorkerRequests } from "./WorkerRequests";
 import { useCommand, useResource } from "./hooks";
@@ -15,14 +16,27 @@ import {
   Button,
   Card,
   Check,
+  CompactTable,
   Cover,
   Empty,
+  EmptyState,
+  HeaderCard,
+  HeaderIconAction,
+  LoadingState,
   Pager,
   ProviderWaiting,
+  SettingsRow,
+  SettingsSaveButton,
+  StatTile,
+  StatusBadge,
+  Subcard,
+  Switch,
 } from "./components/ui";
 import { Album, Artist, Settings } from "./Catalog";
 import { RequestPage } from "./Request";
 import { Library } from "./Library";
+import { SetupWizard, needsLibrarySetup } from "./LibrarySetup";
+import { LibraryMaintenance } from "./LibraryMaintenance";
 import { Inbox } from "./Inbox";
 import { Search } from "./Search";
 import { Recovery, recoveryJobFilter } from "./Recovery";
@@ -37,28 +51,63 @@ import {
   groupJobs,
 } from "./components/Media";
 
+function isSettingsRoute(route: string) {
+  return route === "/settings" || route.startsWith("/settings?");
+}
+
 function useRoute() {
-  const [route, setRoute] = useState(window.location.hash.slice(1) || "/");
+  const [route, setRoute] = useState(() => {
+    const current = window.location.hash.slice(1) || "/";
+    return { current, page: isSettingsRoute(current) ? "/" : current };
+  });
   useEffect(() => {
     function change() {
-      setRoute(window.location.hash.slice(1) || "/");
-      window.scrollTo(0, 0);
+      const current = window.location.hash.slice(1) || "/";
+      setRoute((previous) => ({
+        current,
+        page: isSettingsRoute(current) ? previous.page : current,
+      }));
     }
     window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, []);
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [route.page]);
   return route;
+}
+
+function SettingsDialog({ children, onDismiss }: { children: ReactNode; onDismiss: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useLayoutEffect(() => {
+    const element = dialog.current!;
+    element.showModal();
+    return () => element.close();
+  }, []);
+  return (
+    <dialog
+      ref={dialog}
+      className="settings-dialog"
+      aria-labelledby="system-settings-title"
+      onCancel={(event) => {
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        onDismiss();
+      }}
+    >
+      {children}
+    </dialog>
+  );
 }
 
 function ComponentLibrary() {
   const [checked, setChecked] = useState(false);
+  const [lossless, setLossless] = useState(true);
   return (
     <>
-      <header className="hero">
-        <div>
-          <h1>Component library</h1>
-          <p>Shared production components. This page makes no service commands.</p>
-        </div>
+      <header className="page-heading">
+        <h1>Component library</h1>
+        <p>Shared production components. This page makes no service commands.</p>
       </header>
       <Card title="Actions and input states">
         <div className="actions">
@@ -67,13 +116,61 @@ function ComponentLibrary() {
           <Button variant="destructive">Safe cancel</Button>
           <Button disabled>Unavailable action</Button>
         </div>
+        {(["small", "medium", "large"] as const).map((width) => (
+          <div className="actions" key={width}>
+            <Button width={width}>
+              {width === "small" ? "Small" : width === "medium" ? "Medium" : "Large"}
+            </Button>
+            <Button width={width} icon={<Icon name="refresh" />} variant="secondary">
+              Refresh
+            </Button>
+          </div>
+        ))}
+        <Button width="medium" icon={<Icon name="refresh" />} variant="secondary" busy>
+          Refresh
+        </Button>
         <Check checked={checked} onChange={setChecked}>
           Keyboard-accessible explicit acknowledgement
         </Check>
+        <div className="settings-save-footer">
+          <SettingsSaveButton disabled>Save settings</SettingsSaveButton>
+        </div>
       </Card>
       <Card title="Status and empty states">
-        <Badge>Pending review</Badge>
-        <Empty>No records are loaded in this component example.</Empty>
+        <div className="actions">
+          <Badge>Pending review</Badge>
+          {(["ready", "scanning", "pending", "attention", "failed"] as const).map((status) => (
+            <StatusBadge key={status} status={status} />
+          ))}
+        </div>
+        <Alert error={new Error("Example failure message")} />
+        <EmptyState title="Nothing here yet" action={<Button variant="secondary">Add one</Button>}>
+          Say what is missing and what to do next.
+        </EmptyState>
+        <LoadingState label="Loading example" />
+      </Card>
+      <Card title="Settings rows and stat tiles">
+        <SettingsRow label="Primary library" hint="Where new albums are published.">
+          <Button variant="secondary">Change</Button>
+        </SettingsRow>
+        <SettingsRow label="Artwork size" hint="The maximum size for saved artwork.">
+          {(control) => (
+            <select {...control} defaultValue="400">
+              <option value="400">400 × 400 px</option>
+              <option value="800">800 × 800 px</option>
+            </select>
+          )}
+        </SettingsRow>
+        <SettingsRow label="Accept lossless audio">
+          {(control) => <Switch {...control} checked={lossless} onChange={setLossless} />}
+        </SettingsRow>
+        <SettingsRow label="Album folder template" hint="The pattern for new folder names." wide>
+          {(control) => <input {...control} defaultValue="{album_artist}\{album}" />}
+        </SettingsRow>
+        <div className="actions">
+          <StatTile label="Albums" value="1,284" />
+          <StatTile label="Tracks" value="14,902" />
+        </div>
       </Card>
       <Card title="Artwork unavailable">
         <div className="component-cover">
@@ -81,6 +178,47 @@ function ComponentLibrary() {
         </div>
         <p>Missing artwork stays explicit. It never becomes a fabricated album cover.</p>
       </Card>
+      <HeaderCard
+        title="Header card"
+        actions={
+          <HeaderIconAction href="#/library-scans" label="Open Library scans">
+            <Icon name="scan" />
+          </HeaderIconAction>
+        }
+      >
+        <p>A compact titled card with an optional body.</p>
+      </HeaderCard>
+      <HeaderCard title="Header-only card" actions={<Badge>No body</Badge>} />
+      <HeaderCard title="Subcards and compact lists">
+        <div className="subcard-stack">
+          <Subcard
+            title="Backup libraries"
+            actions={
+              <Button width="medium" variant="secondary" icon={<Icon name="plus" />}>
+                Add backup
+              </Button>
+            }
+          >
+            <CompactTable label="Backup folders" columns={["Folder", "Status"]}>
+              <tr>
+                <td>Archive</td>
+                <td>
+                  <StatusBadge status="complete">Scanned</StatusBadge>
+                </td>
+              </tr>
+              <tr>
+                <td>Off-site copy</td>
+                <td>
+                  <StatusBadge status="pending">Not scanned</StatusBadge>
+                </td>
+              </tr>
+            </CompactTable>
+          </Subcard>
+          <Subcard title="Empty list">
+            <p className="subcard-note">No backup libraries.</p>
+          </Subcard>
+        </div>
+      </HeaderCard>
       <Card title="Shared queue status pills">
         <div className="actions">
           {[
@@ -131,19 +269,31 @@ export function App() {
 
 function ConnectedApp() {
   const selection = useAlbumSelection();
-  const route = useRoute();
+  const { current, page: route } = useRoute();
+  const settingsOpen = isSettingsRoute(current);
+  const dismissSettings = () => window.location.replace(`#${route}`);
   const session = useResource(
     (signal) => request<SessionIdentity>("/api/session", { signal }),
     "session",
   );
   const setup = useResource(async (signal) => {
-    const [locations, settings, settingsPolicy] = await Promise.all([
+    const [locations, settings, settingsPolicy, librarySetup] = await Promise.all([
       request<Location[]>("/api/locations?limit=100", { signal }),
       request<SettingsVersion | null>("/api/settings", { signal }),
       request<SystemSettingsPolicy>("/api/system/settings-policy", { signal }),
+      request<LibrarySetup>("/api/library/setup", { signal }),
     ]);
-    return { locations, settings, settingsPolicy };
+    return { locations, settings, settingsPolicy, librarySetup };
   }, "setup");
+  const setupChecked = useRef(false);
+  useEffect(() => {
+    if (setupChecked.current || setup.loading || setup.error || !setup.data) return;
+    setupChecked.current = true;
+    const status = setup.data.librarySetup;
+    if (needsLibrarySetup(status)) {
+      window.location.hash = "/setup";
+    }
+  }, [setup.data, setup.loading, setup.error]);
   const [poll, setPoll] = useState(false);
   const local = useResource(
     (signal) => request<LocalStatus>("/api/local/status", { signal }),
@@ -205,9 +355,11 @@ function ConnectedApp() {
   const sectionTitle =
     section === "inbox"
       ? "Decisions"
-      : section
-        ? section.charAt(0).toUpperCase() + section.slice(1)
-        : "Home";
+      : section === "library-scans"
+        ? "Library scans"
+        : section
+          ? section.charAt(0).toUpperCase() + section.slice(1)
+          : "Home";
   const routeId = parts[2] ? decodeURIComponent(parts[2]) : "";
   const routeVersion = Number(parts[3]);
   function changed() {
@@ -319,16 +471,37 @@ function ConnectedApp() {
         }
       />
     );
-  } else if (route === "/settings" || route.startsWith("/settings?")) {
-    page = (
-      <Settings
-        settings={setup.data?.settings}
+  } else if (route === "/setup") {
+    page = setup.data ? (
+      <SetupWizard
+        setup={setup.data.librarySetup}
         locations={locations}
-        policy={setup.data?.settingsPolicy}
-        onSaved={() => setup.refresh()}
-        error={setup.error}
+        readOnly={setup.data.settingsPolicy.read_only}
         loading={setup.loading}
-        onReload={setup.refresh}
+        error={setup.error}
+        onChanged={setup.refresh}
+      />
+    ) : (
+      <Card title="Checking required setup">
+        <Alert error={setup.error} />
+        <p>
+          Reading the primary library and shared output policy. Failed reads do not mean setup is
+          missing.
+        </p>
+        <Button disabled={setup.loading} onClick={setup.refresh}>
+          Retry setup check
+        </Button>
+      </Card>
+    );
+  } else if (route === "/library-scans") {
+    page = (
+      <LibraryMaintenance
+        locations={locations}
+        readOnly={
+          (setup.data?.settingsPolicy.read_only ?? true) || setup.loading || Boolean(setup.error)
+        }
+        worker={local.error || local.loading ? undefined : (local.data?.worker ?? undefined)}
+        onChanged={setup.refresh}
       />
     );
   } else if (route.split("?")[0] === "/library") {
@@ -348,11 +521,9 @@ function ConnectedApp() {
         {setup.data && (!setup.data.settings || locations.length === 0) && (
           <Card title="Local setup is incomplete">
             <p>
-              Register library roots in System settings. Initialize output settings with the local
-              setup command if they are missing. The app will not use sample paths or default
-              approval.
+              Complete the setup wizard to select a primary library and save shared output policy.
             </p>
-            <a href="#/settings">Inspect system settings</a>
+            <a href="#/setup">Open setup wizard</a>
           </Card>
         )}
         <Alert error={jobs.error} />
@@ -366,39 +537,31 @@ function ConnectedApp() {
           />
         ) : null}
         <div className="home-grid">
-          <section className="design-card suggestions">
-            <header className="design-card-header">
-              <h2>Suggested next</h2>
-              <Badge>Coming later</Badge>
-            </header>
-            <div className="design-card-body">
-              <Empty>
-                Suggestions are not available yet. A future service will fill this book with artists
-                and albums.
-              </Empty>
+          <HeaderCard
+            title="Suggested next"
+            className="suggestions"
+            actions={<Badge>Coming later</Badge>}
+          >
+            <EmptyState title="No suggestions yet">
+              A future service will fill this book with artists and albums.
+            </EmptyState>
+          </HeaderCard>
+          <HeaderCard title="Recent searches">
+            <p className="muted">From this browser session. Select one to search again.</p>
+            <div className="recent-searches">
+              {recent.map((value) => (
+                <a
+                  key={value}
+                  className="button button-secondary"
+                  href={`#/search?q=${encodeURIComponent(value)}`}
+                >
+                  {value}
+                </a>
+              ))}
+              {!recent.length && <EmptyState title="Your searches will appear here" />}
             </div>
-          </section>
-          <section className="design-card">
-            <header className="design-card-header">
-              <h2>Recent searches</h2>
-            </header>
-            <div className="design-card-body">
-              <p className="muted">From this browser session. Select one to search again.</p>
-              <div className="recent-searches">
-                {recent.map((value) => (
-                  <a
-                    key={value}
-                    className="button button-secondary"
-                    href={`#/search?q=${encodeURIComponent(value)}`}
-                  >
-                    {value}
-                  </a>
-                ))}
-                {!recent.length && <Empty>Your searches will appear here.</Empty>}
-              </div>
-              <a href="#/library">Browse the indexed library</a>
-            </div>
-          </section>
+            <a href="#/library">Browse the indexed library</a>
+          </HeaderCard>
         </div>
       </>
     );
@@ -529,7 +692,7 @@ function ConnectedApp() {
       <nav className="sidebar" aria-label="Music navigation">
         <a
           href="#/"
-          className={`side-link ${!route.startsWith("/settings") && section !== "recovery" ? "selected" : ""}`}
+          className={`side-link ${!["settings", "recovery", "library-scans", "setup"].includes(section) ? "selected" : ""}`}
           aria-label="Media"
           title="Media"
         >
@@ -546,6 +709,16 @@ function ConnectedApp() {
           <Icon name="refresh" />
           <span className="sr-only">Recovery</span>
         </a>
+        <a
+          href="#/library-scans"
+          className={`side-link ${route === "/library-scans" ? "selected" : ""}`}
+          aria-label="Library scans"
+          title="Library scans"
+          aria-current={route === "/library-scans" ? "page" : undefined}
+        >
+          <Icon name="scan" />
+          <span className="sr-only">Library scans</span>
+        </a>
         <div className="sidebar-utilities">
           <a
             className="side-link"
@@ -556,11 +729,11 @@ function ConnectedApp() {
             <Icon name="inbox" />
           </a>
           <a
-            className={`side-link ${route.startsWith("/settings") ? "selected" : ""}`}
+            className={`side-link ${settingsOpen ? "selected" : ""}`}
             href="#/settings"
             aria-label="System settings"
             title="System settings"
-            aria-current={route.startsWith("/settings") ? "page" : undefined}
+            aria-haspopup="dialog"
           >
             <Icon name="settings" />
           </a>
@@ -692,6 +865,22 @@ function ConnectedApp() {
         )}
         <footer>Music only · Local collection · No automatic downloads</footer>
       </main>
+      {session.data && settingsOpen && (
+        <SettingsDialog onDismiss={dismissSettings}>
+          <Settings
+            key={current}
+            settings={setup.data?.settings}
+            locations={locations}
+            policy={setup.data?.settingsPolicy}
+            onSaved={() => setup.refresh()}
+            error={setup.error}
+            loading={setup.loading}
+            onReload={setup.refresh}
+            librarySetup={setup.data?.librarySetup}
+            onDismiss={dismissSettings}
+          />
+        </SettingsDialog>
+      )}
     </div>
   );
 }

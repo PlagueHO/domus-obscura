@@ -263,7 +263,7 @@ impl PreparedServer {
         configuration: Configuration,
         hostname: String,
     ) -> Result<Self> {
-        let store = configuration_source.open_store(super::store::StoreOpenMode::Existing)?;
+        let store = configuration_source.open_store(super::store::StoreOpenMode::Migrate)?;
         Self::from_source_with_store(configuration_source, configuration, hostname, store)
     }
 
@@ -273,6 +273,8 @@ impl PreparedServer {
         hostname: String,
         mut store: Store,
     ) -> Result<Self> {
+        configuration_source.activate_configured_primary(&mut store)?;
+        configuration_source.activate_configured_soulseek_account(&store)?;
         let protected = configuration_source.protected(&configuration);
         let (secret, tls) = configuration_source.startup_material(&store, &hostname)?;
         if let Some(cache) = &configuration.cache {

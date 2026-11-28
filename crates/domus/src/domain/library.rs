@@ -96,6 +96,62 @@ pub struct LibraryMatches {
     pub matches: Vec<LibraryMatch>,
 }
 
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct LibraryFolderOption {
+    pub root_id: String,
+    pub display_path: String,
+    pub paired: bool,
+    pub location_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct LibrarySetup {
+    pub primary_id: Option<i64>,
+    pub primary_error: Option<String>,
+    pub output_configured: bool,
+    pub folders: Vec<LibraryFolderOption>,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct PrimaryLibraryChange {
+    pub id: i64,
+    pub path: String,
+    pub state: String,
+    pub location_id: Option<i64>,
+    pub configuration_revision: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct LibraryScanPolicy {
+    pub version: i64,
+    pub interval_minutes: Option<u32>,
+    pub next_due: Option<i64>,
+    pub last_request: Option<i64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct SaveLibraryScanPolicy {
+    pub expected_version: i64,
+    pub interval_minutes: Option<u32>,
+}
+
+/// Index comparison only. Equal paths and lengths do not prove equal bytes.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct LibraryDifference {
+    pub path: String,
+    pub difference: String,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct LibraryComparison {
+    pub primary: LibraryCoverage,
+    pub backup: LibraryCoverage,
+    pub differences: Vec<LibraryDifference>,
+}
+
 pub fn library_key(text: &str) -> String {
     text.trim().to_lowercase()
 }

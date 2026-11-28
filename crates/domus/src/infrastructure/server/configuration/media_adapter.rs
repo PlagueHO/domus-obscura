@@ -1,7 +1,8 @@
 use super::{ConfigurationService, FilePermissions, LibraryDirectory, valid_reference};
 use crate::domain::LibraryPath;
 use crate::infrastructure::filesystem::media_adapter::{
-    MediaClient, MediaPairing, MediaSelection, PreparedAdapter, SelectedMedia, Selection,
+    MediaClient, MediaPairing, MediaSelection, NetworkAccess, PreparedAdapter, SelectedMedia,
+    Selection,
 };
 use crate::{Error, Result};
 use serde::Deserialize;
@@ -20,6 +21,8 @@ const MAX_PRIVATE_KEY: u64 = 16384;
 struct Configuration {
     format_version: u32,
     listen: SocketAddr,
+    #[serde(default)]
+    network: NetworkAccess,
     selection: Selection,
     certificate_file: String,
     private_key_file: String,
@@ -32,6 +35,8 @@ struct Configuration {
 struct ClientConfiguration {
     format_version: u32,
     address: SocketAddr,
+    #[serde(default)]
+    network: NetworkAccess,
     selection: MediaSelection,
     server_ca_file: String,
     paired_server_file: String,
@@ -90,12 +95,15 @@ impl ConfigurationService {
         let configuration: ClientConfiguration = serde_json::from_slice(&bytes).map_err(|_| {
             Error::InvalidInput("saved media client configuration JSON is invalid".into())
         })?;
+        configuration.network.validate()?;
         if configuration.format_version != 1
-            || !configuration.address.ip().is_loopback()
+            || !configuration
+                .network
+                .permits_peer(configuration.address.ip())
             || configuration.address.port() == 0
         {
             return Err(Error::InvalidInput(
-                "media client configuration requires version 1 and a fixed loopback port".into(),
+                "media client configuration requires version 1 and a fixed admitted address".into(),
             ));
         }
         configuration.selection.validate()?;
@@ -123,6 +131,7 @@ impl ConfigurationService {
             configuration.selection,
             MediaPairing {
                 address: configuration.address,
+                access: configuration.network,
                 server_ca: ca,
                 paired_server: peer,
                 certificate,
@@ -152,12 +161,15 @@ impl ConfigurationService {
         let configuration: Configuration = serde_json::from_slice(&bytes).map_err(|_| {
             Error::InvalidInput("saved native media configuration JSON is invalid".into())
         })?;
+        configuration.network.validate()?;
         if configuration.format_version != 1
-            || !configuration.listen.ip().is_loopback()
+            || !configuration
+                .network
+                .permits_listener(configuration.listen.ip())
             || configuration.listen.port() == 0
         {
             return Err(Error::InvalidInput(
-                "native media configuration requires version 1 and a fixed loopback port".into(),
+                "native media configuration requires version 1 and a fixed admitted address".into(),
             ));
         }
         let selection = configuration.selection;
@@ -182,13 +194,14 @@ impl ConfigurationService {
         let client_ca = read(&configuration.client_ca_file, MAX_TLS_INPUT)?;
         let client = read(&configuration.paired_client_file, MAX_TLS_INPUT)?;
         Ok(PreparedMediaAdapter {
-            adapter: PreparedAdapter::new(
+            adapter: PreparedAdapter::with_network_access(
                 selection,
                 protected,
                 &certificate,
                 &key,
                 &client_ca,
                 &client,
+                configuration.network,
             )?,
             listen: configuration.listen,
         })

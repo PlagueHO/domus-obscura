@@ -89,6 +89,7 @@ impl ManagedChild {
     fn start(role: &'static str, path: &Path, revision: &str) -> Result<Self> {
         let mut command = Command::new(std::env::current_exe()?);
         command
+            .env("DOMUS_NATIVE_SUPERVISED", "1")
             .arg("developer-child")
             .arg(role)
             .arg(path)
@@ -440,56 +441,60 @@ pub async fn run(path: &Path) -> Result<()> {
         ));
     }
     let (_lock, endpoint) = tokio::task::block_in_place(|| {
-        Ok::<_, Error>((source.state_lock("developer-supervisor")?, endpoint(path)?))
+        Ok::<_, Error>((source.supervisor_lock()?, endpoint(path)?))
     })?;
     let mut listener = tokio::task::block_in_place(|| ControlListener::bind(&endpoint))?;
     let mut children = Vec::new();
     let mut logs = VecDeque::new();
     let stop = crate::infrastructure::lifecycle::Lifecycle::foreground();
     let mut stop_connection = None;
-    let startup = async {
-        children.push(ManagedChild::start("api", path, source.active_revision())?);
-        children
-            .last_mut()
-            .ok_or(Error::Internal("API child missing"))?
-            .wait_ready(&mut logs)
-            .await?;
-        if source.active.production_worker.is_some() {
-            children.push(ManagedChild::start(
-                "worker",
-                path,
-                source.active_revision(),
-            )?);
+    let mut source = source;
+    loop {
+        let mut primary_change = None;
+        let mut account_change = None;
+        let startup = async {
+            children.push(ManagedChild::start("api", path, source.active_revision())?);
             children
                 .last_mut()
-                .ok_or(Error::Internal("worker child missing"))?
+                .ok_or(Error::Internal("API child missing"))?
                 .wait_ready(&mut logs)
                 .await?;
+            if source.active.production_worker.is_some() {
+                children.push(ManagedChild::start(
+                    "worker",
+                    path,
+                    source.active_revision(),
+                )?);
+                children
+                    .last_mut()
+                    .ok_or(Error::Internal("worker child missing"))?
+                    .wait_ready(&mut logs)
+                    .await?;
+            }
+            verify_browser(&source).await
+        };
+        let startup = await_startup(startup, &mut listener, &stop, &mut stop_connection).await;
+        if let Err(error) = startup {
+            if stop_connection.is_none() {
+                eprintln!("Developer startup failed: {error}");
+            }
+            let result = drain(&mut children, &mut logs).await;
+            tokio::task::block_in_place(|| drop(listener));
+            drop(_lock);
+            if let Some(mut connection) = stop_connection {
+                let response = match &result {
+                    Ok(()) => json!({"state": "stopped"}),
+                    Err(error) => json!({"state": "failed", "error": error.to_string()}),
+                };
+                write_response(&mut connection, response).await?;
+                return result;
+            }
+            result?;
+            return Err(error);
         }
-        verify_browser(&source).await
-    };
-    let startup = await_startup(startup, &mut listener, &stop, &mut stop_connection).await;
-    if let Err(error) = startup {
-        if stop_connection.is_none() {
-            eprintln!("Developer startup failed: {error}");
-        }
-        let result = drain(&mut children, &mut logs).await;
-        tokio::task::block_in_place(|| drop(listener));
-        drop(_lock);
-        if let Some(mut connection) = stop_connection {
-            let response = match &result {
-                Ok(()) => json!({"state": "stopped"}),
-                Err(error) => json!({"state": "failed", "error": error.to_string()}),
-            };
-            write_response(&mut connection, response).await?;
-            return result;
-        }
-        result?;
-        return Err(error);
-    }
-    println!("Domus ready: {}", source.active.origin);
-    let mut tick = tokio::time::interval(Duration::from_millis(100));
-    let outcome = async { loop {
+        println!("Domus ready: {}", source.active.origin);
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let outcome = async { loop {
         tokio::select! {
             stopped = stop.stopped() => break stopped.map_err(Error::from),
             connection = listener.accept() => {
@@ -518,6 +523,43 @@ pub async fn run(path: &Path) -> Result<()> {
                     Ok(Ok(command)) if command == "logs" => {
                         reply_to_control(&mut connection, json!({"lines": logs})).await;
                     }
+                    Ok(Ok(command)) if primary_change_id(&command).is_some() => {
+                        let pending = tokio::task::block_in_place(|| {
+                            source.require_editable()?;
+                            source.open_store(crate::infrastructure::store::StoreOpenMode::ReadCurrent)?
+                                .pending_primary_library_change()
+                        });
+                        match pending {
+                            Ok(Some(id)) if Some(id) == primary_change_id(&command) => {
+                                write_response(&mut connection, json!({"state":"restarting","change_id":id})).await?;
+                                primary_change = Some(id);
+                                break Ok(());
+                            }
+                            Ok(_) => reply_to_control(&mut connection, json!({"error":"The requested library folder change is no longer pending. Check its saved result."})).await,
+                            Err(error) => reply_to_control(&mut connection, json!({"error":error.to_string()})).await,
+                        }
+                    }
+                    Ok(Ok(command)) if account_change_id(&command).is_some() => {
+                        let requested = account_change_id(&command).ok_or(Error::Internal("account command ID missing"))?;
+                        let approved = tokio::task::block_in_place(|| {
+                            source.require_editable()?;
+                            if source.read()?.saved_revision != source.active_revision() {
+                                return Err(Error::Conflict("Host configuration changed. Check it before applying an account.".into()));
+                            }
+                            let store = source.open_store(crate::infrastructure::store::StoreOpenMode::ReadCurrent)?;
+                            Ok::<_, Error>(store.pending_soulseek_account_change()? == Some(requested)
+                                && store.soulseek_account_change(requested)?.state == "approved")
+                        });
+                        match approved {
+                            Ok(true) => {
+                                write_response(&mut connection, json!({"state":"restarting","change_id":requested})).await?;
+                                account_change = Some(requested);
+                                break Ok(());
+                            }
+                            Ok(false) => reply_to_control(&mut connection, json!({"error":"The requested account change is no longer approved. Check its saved result."})).await,
+                            Err(error) => reply_to_control(&mut connection, json!({"error":error.to_string()})).await,
+                        }
+                    }
                     _ => {
                         reply_to_control(&mut connection, json!({"error": "invalid or timed-out local command"})).await;
                     }
@@ -536,17 +578,30 @@ pub async fn run(path: &Path) -> Result<()> {
             }
         }
     }}.await;
-    let result = drain(&mut children, &mut logs).await.and(outcome);
-    tokio::task::block_in_place(|| drop(listener));
-    drop(_lock);
-    if let Some(mut connection) = stop_connection {
-        let response = match &result {
-            Ok(()) => json!({"state": "stopped"}),
-            Err(error) => json!({"state": "failed", "error": error.to_string()}),
-        };
-        write_response(&mut connection, response).await?;
+        let result = drain(&mut children, &mut logs).await.and(outcome);
+        if let Some(id) = primary_change {
+            result?;
+            children.clear();
+            source = tokio::task::block_in_place(|| source.activate_stopped_primary(id))?;
+            continue;
+        }
+        if let Some(id) = account_change {
+            result?;
+            children.clear();
+            source = tokio::task::block_in_place(|| source.activate_stopped_soulseek_account(id))?;
+            continue;
+        }
+        tokio::task::block_in_place(|| drop(listener));
+        drop(_lock);
+        if let Some(mut connection) = stop_connection {
+            let response = match &result {
+                Ok(()) => json!({"state": "stopped"}),
+                Err(error) => json!({"state": "failed", "error": error.to_string()}),
+            };
+            write_response(&mut connection, response).await?;
+        }
+        return result;
     }
-    result
 }
 
 async fn await_startup(
@@ -610,7 +665,7 @@ async fn read_command(stream: &mut (impl AsyncRead + Unpin)) -> Result<String> {
         .take(32)
         .read_until(b'\n', &mut bytes)
         .await?;
-    if !bytes.ends_with(b"\n") || bytes.len() > 16 {
+    if !bytes.ends_with(b"\n") || bytes.len() > 32 {
         return Err(Error::InvalidInput("invalid local control request".into()));
     }
     String::from_utf8(bytes[..bytes.len() - 1].to_vec())
@@ -634,8 +689,27 @@ async fn reply_to_control(stream: &mut (impl AsyncWrite + Unpin), value: Value) 
     }
 }
 
+fn primary_change_id(command: &str) -> Option<i64> {
+    command
+        .strip_prefix("primary:")?
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
+}
+
+fn account_change_id(command: &str) -> Option<i64> {
+    command
+        .strip_prefix("account:")?
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
+}
+
 pub async fn control(path: &Path, command: &str) -> Result<Value> {
-    if !["stop", "status", "logs"].contains(&command) {
+    if !["stop", "status", "logs"].contains(&command)
+        && primary_change_id(command).is_none()
+        && account_change_id(command).is_none()
+    {
         return Err(Error::InvalidInput(
             "unknown local control operation".into(),
         ));
@@ -883,11 +957,41 @@ mod tests {
 
     #[tokio::test]
     async fn developer_control_rejects_incomplete_and_oversized_commands() -> Result<()> {
-        for input in [b"stop".as_slice(), b"012345678901234567890\n", b"\xff\n"] {
+        for input in [
+            b"stop".as_slice(),
+            b"0123456789012345678901234567890123\n",
+            b"\xff\n",
+        ] {
             let mut reader = input;
             assert!(read_command(&mut reader).await.is_err());
         }
         assert_eq!(read_command(&mut b"status\n".as_slice()).await?, "status");
+        assert_eq!(
+            primary_change_id(
+                &read_command(&mut b"primary:9223372036854775807\n".as_slice()).await?
+            ),
+            Some(i64::MAX)
+        );
+        for command in [
+            "primary",
+            "primary:0",
+            "primary:-1",
+            "primary:9223372036854775808",
+        ] {
+            assert_eq!(primary_change_id(command), None);
+        }
+        assert_eq!(
+            account_change_id("account:9223372036854775807"),
+            Some(i64::MAX)
+        );
+        for command in [
+            "account",
+            "account:0",
+            "account:-1",
+            "account:9223372036854775808",
+        ] {
+            assert_eq!(account_change_id(command), None);
+        }
         Ok(())
     }
 

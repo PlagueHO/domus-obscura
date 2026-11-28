@@ -38,6 +38,8 @@ pub struct StorageRoot {
     pub root_id: String,
     pub binding_revision: u64,
     pub role: StorageRole,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scan_only: bool,
     pub provider_scope: String,
     pub relative: String,
     pub expected: DirectoryExpectation,
@@ -54,6 +56,10 @@ pub struct LogicalRootBinding {
 }
 
 impl LogicalRootBinding {
+    pub(crate) fn scan_only(&self) -> bool {
+        self.root.scan_only
+    }
+
     pub(crate) fn key(&self) -> String {
         format!("storage-root:{}", self.root.root_id)
     }
@@ -220,6 +226,9 @@ impl StorageRoot {
             ));
         }
         let (expected, retained) = DirectoryExpectation::inspect(boundary, relative)?;
+        let scan_only = role == StorageRole::Media
+            && super::filesystem_class(&retained.directory.directory_file()?)?
+                == super::FilesystemClass::Remote;
         if role != StorageRole::Media {
             retained.directory.require_local()?;
             super::super::permissions::FilePermissions::current()?
@@ -229,6 +238,7 @@ impl StorageRoot {
             root_id: root_id.into(),
             binding_revision,
             role,
+            scan_only,
             provider_scope: provider_scope.into(),
             relative: relative.as_str().into(),
             expected,
@@ -267,6 +277,7 @@ impl StorageConfiguration {
                 root_id: root_id.into(),
                 binding_revision: 1,
                 role,
+                scan_only: false,
                 provider_scope: "application".into(),
                 relative: relative.as_str().into(),
                 expected,
@@ -352,6 +363,7 @@ impl FilesystemClient {
             root.expected.validate(&relative)?;
             if !name(&root.root_id)
                 || root.binding_revision == 0
+                || (root.scan_only && root.role != StorageRole::Media)
                 || !providers.contains_key(&root.provider_scope)
                 || roots.insert(&root.root_id, root).is_some()
             {
@@ -436,6 +448,18 @@ impl FilesystemClient {
         &self.selection_digest
     }
 
+    pub(crate) fn media_root_ids(&self) -> impl Iterator<Item = &str> {
+        self.selection
+            .roots
+            .iter()
+            .filter(|root| root.role == StorageRole::Media)
+            .map(|root| root.root_id.as_str())
+    }
+
+    pub(crate) fn media_scan_only(&self, root_id: &str) -> Result<bool> {
+        Ok(self.root(root_id, StorageRole::Media)?.scan_only)
+    }
+
     pub fn require_current(&self, source_digest: &str) -> Result<()> {
         if self.source_digest != source_digest {
             return Err(Error::Conflict(
@@ -512,6 +536,18 @@ impl FilesystemClient {
     pub(crate) fn require_media_component(&self, file: &std::fs::File) -> Result<()> {
         let identity = super::binding::persistent_file_identity(file)?;
         self.require_component(StorageRole::Media, &identity)
+    }
+
+    /// Check the actual retained ancestry before exposing directory names.
+    /// Runtime private roots cannot be browsed through a media folder picker.
+    pub(crate) fn require_media_directory(
+        &self,
+        directory: &super::LibraryDirectory,
+    ) -> Result<()> {
+        for parent in &directory.parents {
+            self.require_media_component(&parent.try_clone()?.into_std_file())?;
+        }
+        self.require_media_component(&directory.directory_file()?)
     }
 
     fn require_component(&self, role: StorageRole, identity: &str) -> Result<()> {
@@ -638,6 +674,13 @@ impl FilesystemClient {
             .open(&provider.boundary, &LibraryPath::parse(&root.relative)?)?;
         if role != StorageRole::Media {
             retained.directory.require_local()?;
+        } else if !root.scan_only
+            && super::filesystem_class(&retained.directory.directory_file()?)?
+                == super::FilesystemClass::Remote
+        {
+            return Err(Error::Conflict(
+                "A host-mounted network library must have a scan-only binding.".into(),
+            ));
         }
         let boundary = (retained.directory.parents.len() + 1)
             .checked_sub(root.expected.components.len())
@@ -833,7 +876,9 @@ impl FilesystemClient {
                     || (other.role == StorageRole::Application
                         && selected.role != StorageRole::Media))
             {
-                return Err(Error::Conflict("selected storage locators overlap".into()));
+                return Err(Error::Conflict(
+                    "This folder contains, or is inside, another Domus folder such as application storage or another library. Choose a separate folder.".into(),
+                ));
             }
             if selected.expected.profile == other.expected.profile
                 && (selected.expected.components.contains(
@@ -850,7 +895,9 @@ impl FilesystemClient {
                         .ok_or(Error::Internal("root expectation is empty"))?,
                 ))
             {
-                return Err(Error::Conflict("selected storage roots overlap".into()));
+                return Err(Error::Conflict(
+                    "This folder is the same as, or inside, another Domus folder. Choose a separate folder.".into(),
+                ));
             }
             let same_filesystem = |root: &StorageRoot| {
                 let scope = root.expected.components[0].split(':').nth(1);
@@ -987,6 +1034,7 @@ pub(crate) fn fixture_storage(
             root_id,
             binding_revision: 1,
             role,
+            scan_only: false,
             provider_scope: "application".into(),
             relative,
             expected,
@@ -1014,6 +1062,7 @@ mod tests {
                 root_id: root_id.into(),
                 binding_revision: 1,
                 role,
+                scan_only: false,
                 provider_scope: "local".into(),
                 relative: root_id.into(),
                 expected,
@@ -1338,6 +1387,7 @@ mod tests {
             root_id: "application".into(),
             binding_revision: 1,
             role: StorageRole::Application,
+            scan_only: false,
             provider_scope: "local".into(),
             relative: String::new(),
             expected,

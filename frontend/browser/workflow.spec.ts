@@ -12,6 +12,241 @@ import type { AudioProfile } from "../src/generated/AudioProfile";
 const origin = "http://127.0.0.1:4174";
 const guards = { Origin: origin, "x-domus-csrf": "1" };
 
+for (const backup of [false, true]) {
+  test(`${backup ? "backup" : "primary"} location requires exact review and a separate coordinated restart`, async ({
+    page,
+  }, testInfo) => {
+    const path = backup ? "\\\\fixture\\Backup" : "D:\\Generated-fixture\\Music";
+    const role = backup ? "backup library" : "primary library";
+    const title = backup ? "Backup library" : "Primary library";
+    const roleInput = backup ? { backup: true } : {};
+    await page.setViewportSize({
+      width: testInfo.project.name === "narrow" ? 375 : 1280,
+      height: 900,
+    });
+    let finishInspection!: () => void;
+    const inspection = new Promise<void>((resolve) => {
+      finishInspection = resolve;
+    });
+    let state = "approved";
+    let inspections = 0;
+    let approvals = 0;
+    let activations = 0;
+    const saved = () => ({
+      id: 12,
+      path,
+      state,
+      location_id: state === "active" ? 9 : null,
+      configuration_revision: state === "active" ? "b".repeat(64) : null,
+      last_error: null,
+    });
+    await page.route("**/api/library/primary/**", async (route) => {
+      const url = new URL(route.request().url());
+      const endpoint = url.pathname;
+      if (endpoint.endsWith("/control")) {
+        await route.fulfill({
+          json: {
+            available: true,
+            reason: null,
+            pending_change_id: approvals && state !== "active" ? 12 : null,
+            pending_backup: backup,
+          },
+        });
+      } else if (endpoint.endsWith("/inspect")) {
+        inspections++;
+        expect(route.request().postDataJSON()).toEqual({ path, ...roleInput });
+        await inspection;
+        await route.fulfill({
+          json: {
+            path,
+            expected_revision: "a".repeat(64),
+            previous_location_id: 1,
+            review_token: "c".repeat(64),
+            storage_layout: [
+              { role: "Application storage", path: "D:\\Generated-fixture\\application" },
+              { role: backup ? "New backup library (scan only)" : "New primary library", path },
+            ],
+          },
+        });
+      } else if (endpoint.endsWith("/activate")) {
+        activations++;
+        state = "active";
+        await route.fulfill({ status: 202, json: null });
+      } else if (endpoint.endsWith("/changes")) {
+        approvals++;
+        expect(route.request().postDataJSON()).toEqual({
+          path,
+          expected_revision: "a".repeat(64),
+          previous_location_id: 1,
+          review_token: "c".repeat(64),
+          confirm_separation: true,
+          ...roleInput,
+        });
+        expect(route.request().headers()["x-domus-csrf"]).toBe("1");
+        await route.fulfill({ json: saved() });
+      } else {
+        await route.fulfill({ json: saved() });
+      }
+    });
+    await page.goto("/#/settings?section=music_roots");
+    const card = page.getByRole("region", {
+      name: backup ? "Backup libraries" : title,
+      exact: true,
+    });
+    const change = card.getByRole("button", {
+      name: backup ? "Add backup" : "Change…",
+      exact: true,
+    });
+    await expect(change).toHaveAttribute("aria-expanded", "false");
+    await change.click();
+    const form = page.getByRole("region", {
+      name: `${backup ? "Add" : "Change"} ${role}`,
+      exact: true,
+    });
+    const field = form.getByRole("textbox", { name: `${title} folder` });
+    await expect(field).toBeEnabled();
+    await expect(form.getByRole("button", { name: "Browse…" })).toBeEnabled();
+    await field.fill(path);
+    const check = form.getByRole("button", { name: "Check", exact: true });
+    try {
+      await check.click();
+      await expect(check).toHaveAttribute("aria-busy", "true");
+      await expect(check).toBeDisabled();
+      await expect(check.locator(".button-spinner")).toBeVisible();
+    } finally {
+      finishInspection();
+    }
+    const save = page
+      .getByRole("group", { name: "Settings save actions" })
+      .getByRole("button", { name: `Save ${role} change`, exact: true });
+    if (backup) {
+      await expect(form.getByText("New backup library (scan only)", { exact: true })).toBeVisible();
+      await expect(save).toBeDisabled();
+      await form.getByRole("checkbox", { name: /I confirm/ }).check();
+    }
+    await expect(save).toBeEnabled();
+    await expect(form.getByText(`Ready: ${path}`, { exact: false })).toBeVisible();
+    await page.screenshot({
+      path: test.info().outputPath(`${backup ? "backup" : "primary"}-library-review.png`),
+      fullPage: true,
+    });
+    await save.click();
+    await expect(
+      form.getByText(`${title} change saved, not yet active`, { exact: true }),
+    ).toBeVisible();
+    expect(inspections).toBe(1);
+    expect(approvals).toBe(1);
+    expect(activations).toBe(0);
+    if (backup) {
+      await page.reload();
+      await expect(
+        page.getByRole("region", { name: "Change primary library", exact: true }),
+      ).toHaveCount(0);
+      await form.getByRole("button", { name: "Check saved change" }).click();
+    }
+    await form.getByRole("button", { name: `Restart and apply ${role}`, exact: true }).click();
+    await expect(
+      form.getByText(backup ? "Backup library added" : "Primary library changed", { exact: true }),
+    ).toBeVisible();
+    expect(activations).toBe(1);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+  });
+}
+
+test("startup wizard saves missing output policy without scanning media", async ({ page }) => {
+  await control(page, "/__fixture/reset", { output_configured: false });
+  await page.goto("/");
+  await expect(page).toHaveURL(/#\/setup$/);
+  await expect(
+    page.getByRole("heading", { name: "Shared output policy", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Save initial output policy", exact: true }).click();
+  await expect(page.getByText("An output policy is saved.", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Continue to finish", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Required setup is complete" })).toBeVisible();
+  await expect(
+    page.getByText("Backups and download providers are optional.", { exact: false }),
+  ).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath("setup-wizard.png"), fullPage: true });
+  await page.getByRole("link", { name: "Open library", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Your Music library", exact: true }),
+  ).toBeVisible();
+  expect((await (await page.request.get("/api/settings")).json()).version).toBe(1);
+});
+
+test("library folder settings separate registration from primary-led scans and backup checks", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({
+    width: testInfo.project.name === "narrow" ? 375 : 1280,
+    height: 900,
+  });
+  await page.goto("/#/settings?section=music_roots");
+  const primary = page.getByRole("region", { name: "Primary library", exact: true });
+  const backups = page.getByRole("region", { name: "Backup libraries", exact: true });
+  await expect(primary.getByRole("table", { name: "Current primary folder" })).toBeVisible();
+  const backupFolders = backups.getByRole("table", { name: "Backup folders" });
+  await expect(backupFolders.getByRole("cell", { name: /backup/i }).first()).toBeVisible();
+  const change = primary.getByRole("button", { name: "Change…", exact: true });
+  const add = backups.getByRole("button", { name: "Add backup", exact: true });
+  expect((await change.boundingBox())?.width).toBe((await add.boundingBox())?.width);
+  for (const button of [change, add]) {
+    const spacing = await button.evaluate((element) => {
+      const header = element.closest("header")!;
+      const outer = header.getBoundingClientRect();
+      const inner = element.getBoundingClientRect();
+      return [
+        inner.top - outer.top,
+        outer.bottom - inner.bottom - parseFloat(getComputedStyle(header).borderBottomWidth),
+      ];
+    });
+    expect(spacing[0]).toBeCloseTo(2);
+    expect(spacing[1]).toBeCloseTo(2);
+  }
+  await expect(page.getByRole("textbox", { name: "Server folder path", exact: true })).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole("button", { name: /^Scan / })).toHaveCount(0);
+  await add.click();
+  await expect(backups.getByRole("textbox", { name: "Backup library folder" })).toBeVisible();
+  await expect(backups.getByRole("combobox", { name: "Library folder" })).toHaveCount(0);
+  await expect(add).toHaveCount(0);
+  await backups.getByRole("button", { name: "Close form" }).click();
+  await page.screenshot({ path: test.info().outputPath("library-folders.png"), fullPage: true });
+  const scans = page.getByRole("link", { name: "Open Library scans", exact: true });
+  await expect(scans).toHaveAttribute("title", "Open Library scans");
+  await scans.focus();
+  await scans.press("Enter");
+  const scan = page.getByRole("button", {
+    name: "Scan primary library and check backups",
+    exact: true,
+  });
+  await expect(scan).toBeEnabled();
+  await expect(
+    page.getByRole("combobox", { name: "Automatic scan frequency", exact: true }),
+  ).toHaveValue("");
+  await expect(
+    page.getByRole("button", { name: "Save scan schedule", exact: true }),
+  ).toBeDisabled();
+  await scan.click();
+  await expect(page.getByText("Library scan requested.", { exact: false })).toBeVisible();
+  await expect(
+    page.getByText("No path, type or size differences on this page.", { exact: false }),
+  ).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath("library-scans.png"), fullPage: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  );
+  const folders = await (await page.request.get("/api/locations")).json();
+  expect(folders.map((folder: { coverage: string }) => folder.coverage)).toEqual([
+    "complete",
+    "complete",
+  ]);
+});
+
 async function openSelection(page: Page) {
   const selection = page.getByRole("region", { name: /^Selected albums/ });
   const toggle = selection.getByRole("button", { name: /^(Open|Hide) selection$/ });
@@ -439,7 +674,9 @@ test("host configuration is read-only and old write routes preserve startup stat
   const initial: BackendConfigurationState = await (
     await page.request.get("/api/system/configuration")
   ).json();
-  await expect(page.getByText("Host configuration is read-only.", { exact: false })).toBeVisible();
+  await expect(
+    page.getByText("Other host settings are managed by the operator.", { exact: false }),
+  ).toBeVisible();
   await expect(page.getByRole("textbox", { name: /^Listen address/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Save changes", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Reload/ })).toHaveCount(0);
@@ -679,6 +916,106 @@ test("tag rules freeze exact album review and keep approval separate from local 
   );
 });
 
+test("settings opens as a fixed-width modal and returns focus to the previous page", async ({
+  page,
+}) => {
+  await page.goto("/#/library");
+  const opener = page.getByRole("link", { name: "System settings", exact: true });
+  await opener.focus();
+  await opener.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "System settings", exact: true });
+  await expect(dialog).toBeVisible();
+  expect(await dialog.evaluate((element) => element.matches(":modal"))).toBe(true);
+  const size = () =>
+    dialog.evaluate((element) => ({
+      width: element.getBoundingClientRect().width,
+      viewport: window.innerWidth,
+      fixed: 64 * parseFloat(getComputedStyle(document.documentElement).fontSize),
+    }));
+  const { width, viewport, fixed } = await size();
+  expect(width).toBeCloseTo(Math.min(fixed, viewport - 24));
+  if (viewport > fixed + 224) {
+    await page.setViewportSize({ width: viewport - 200, height: 900 });
+    expect((await size()).width).toBeCloseTo(width);
+  }
+  await expect(dialog.getByRole("button", { name: "Close settings" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page).toHaveURL(/#\/library$/);
+  await expect(opener).toBeFocused();
+  await page.goto("/?direct-settings=1#/settings?section=music_output");
+  await dialog.getByRole("button", { name: "Close settings" }).click();
+  await expect(page).toHaveURL(/#\/$/);
+});
+
+test("settings panes scroll independently and keep navigation in view", async ({ page }) => {
+  const narrow = test.info().project.name === "narrow";
+  await page.setViewportSize({ width: narrow ? 375 : 1280, height: 480 });
+  await page.goto("/#/settings?section=music_output");
+  const dialog = page.getByRole("dialog", { name: "System settings" });
+  const close = dialog.getByRole("button", { name: "Close settings" });
+  const sidebar = dialog.getByRole("navigation", { name: "Configuration sections" });
+  const picker = dialog.getByRole("combobox", { name: "Settings section", exact: true });
+  const content = dialog.getByRole("region", { name: "Settings content" });
+  const footer = dialog.getByRole("group", { name: "Settings save actions" });
+  const save = footer.getByRole("button", { name: "Save system output settings" });
+  const scrollTop = (pane: typeof content) => pane.evaluate((element) => element.scrollTop);
+  const bounds = await dialog.boundingBox();
+  expect(bounds?.height).toBeCloseTo(360);
+  expect(bounds?.y).toBeCloseTo(60);
+  const chromeBefore = await close.boundingBox();
+  const pickerBefore = narrow ? await picker.boundingBox() : null;
+  await expect(save).toBeVisible();
+  const saveBefore = await save.boundingBox();
+  const footerBefore = await footer.boundingBox();
+  const contentBefore = await content.boundingBox();
+  expect(contentBefore?.height).toBeGreaterThanOrEqual(40);
+  expect(saveBefore?.width).toBe(224);
+  expect(saveBefore?.height).toBe(36);
+  await expect(save.locator(".button-icon svg")).toBeVisible();
+  expect(footerBefore!.x + footerBefore!.width - saveBefore!.x - saveBefore!.width).toBe(12);
+  expect(footerBefore!.x).toBe(contentBefore!.x);
+  expect(footerBefore!.width).toBe(contentBefore!.width);
+  expect(footerBefore!.y).toBe(contentBefore!.y + contentBefore!.height);
+  const layout = await dialog.locator(".configuration-layout").boundingBox();
+  expect(footerBefore!.y + footerBefore!.height).toBe(layout!.y + layout!.height - 1);
+  const header = content.getByRole("heading", { name: "Output policy", exact: true }).locator("..");
+  const gradient = await header.evaluate((element) => getComputedStyle(element).backgroundImage);
+  expect(gradient).toMatch(/^linear-gradient\(/);
+  await expect(footer).toHaveCSS(
+    "background-image",
+    gradient.replace(/^linear-gradient\((?:180deg, )?/, "linear-gradient(0deg, "),
+  );
+
+  await content.focus();
+  const bottom = await content.evaluate((element) => element.scrollHeight - element.clientHeight);
+  expect(bottom).toBeGreaterThan(100);
+  await content.press("End");
+  await expect.poll(() => scrollTop(content)).toBeCloseTo(bottom, 0);
+  expect(await save.boundingBox()).toEqual(saveBefore);
+  await page.screenshot({ path: test.info().outputPath("settings-save-footer.png") });
+  if (narrow) {
+    await expect(sidebar).toBeHidden();
+    expect(await picker.boundingBox()).toEqual(pickerBefore);
+    await picker.selectOption("general");
+  } else {
+    expect(await scrollTop(sidebar)).toBe(0);
+    await content.hover();
+    await page.mouse.wheel(0, -100);
+    await expect.poll(() => scrollTop(content)).toBeCloseTo(bottom - 100, 0);
+    await sidebar.hover();
+    await page.mouse.wheel(0, 250);
+    await expect.poll(() => scrollTop(sidebar)).toBeGreaterThan(0);
+    expect(await scrollTop(content)).toBeCloseTo(bottom - 100, 0);
+    await sidebar.getByRole("button", { name: "General", exact: true }).click();
+  }
+  await expect(content.getByRole("heading", { name: "General", exact: true })).toBeVisible();
+  await expect(footer).toBeHidden();
+  await expect.poll(() => scrollTop(content)).toBe(0);
+  expect(await dialog.boundingBox()).toEqual(bounds);
+  expect(await close.boundingBox()).toEqual(chromeBefore);
+});
+
 test("settings policy is version-bound and read-only; keyboard and reduced motion remain usable", async ({
   page,
 }) => {
@@ -701,11 +1038,90 @@ test("settings policy is version-bound and read-only; keyboard and reduced motio
       .selectOption("music_output");
   else await page.getByRole("button", { name: "Output policy", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Output policy", exact: true })).toBeVisible();
+  const profiles = page.getByRole("group", { name: "Accepted audio profiles" });
+  const rows = profiles.getByRole("switch");
+  await expect(rows.first()).toBeVisible();
+  const toggle = rows.first();
+  const wasChecked = await toggle.isChecked();
+  const save = page.getByRole("button", { name: "Save system output settings" });
+  await expect(save).toBeDisabled();
+  await toggle.press("Space");
+  await expect(toggle).toBeChecked({ checked: !wasChecked });
+  await expect(save).toBeEnabled();
+  await toggle.press("Space");
+  await expect(toggle).toBeChecked({ checked: wasChecked });
+  await expect(save).toBeDisabled();
+  const layout = await rows.evaluateAll((inputs) =>
+    inputs.map((input) => {
+      const box = input.getBoundingClientRect();
+      const text = (input as HTMLInputElement).labels![0]!.getBoundingClientRect();
+      const row = input.closest('[data-slot="settings-row"]')!.getBoundingClientRect();
+      return {
+        offset: box.y + box.height / 2 - text.y - text.height / 2,
+        top: row.top,
+        bottom: row.bottom,
+        rightGap: row.right - box.right,
+        height: row.height,
+        labelHeight: text.height,
+      };
+    }),
+  );
+  expect(layout.length).toBeGreaterThan(1);
+  for (const [index, row] of layout.entries()) {
+    expect(row.offset).toBeCloseTo(0);
+    expect(row.rightGap).toBeCloseTo(0);
+    expect(row.height).toBeCloseTo(Math.max(24, row.labelHeight));
+    if (index > 0) expect(row.top - layout[index - 1]!.bottom).toBeCloseTo(0);
+  }
+  await page.screenshot({ path: test.info().outputPath("output-policy.png") });
+  const genreAction = page.getByRole("combobox", { name: "Genre action", exact: true });
+  const genreMode = page.getByRole("combobox", { name: "Genre mode", exact: true });
+  await expect(genreAction).toHaveAccessibleDescription(
+    "Remove, keep, or replace the source genre tag.",
+  );
+  const actionLayout = await genreAction.evaluate((control: HTMLSelectElement) => {
+    const label = control.labels![0]!.getBoundingClientRect();
+    const hint = document.getElementById(control.getAttribute("aria-describedby")!)!;
+    const box = control.getBoundingClientRect();
+    return {
+      besideLabel: box.left >= label.right,
+      besideHint: box.left >= hint.getBoundingClientRect().right,
+      right: box.right,
+    };
+  });
+  expect(actionLayout.right).toBeCloseTo(
+    await genreMode.evaluate((control) => control.getBoundingClientRect().right),
+  );
+  expect(actionLayout.besideLabel).toBe(true);
+  expect(actionLayout.besideHint).toBe(true);
+  const template = page.getByRole("textbox", { name: "Album folder template", exact: true });
+  expect(
+    await template.evaluate((control: HTMLInputElement) => {
+      const caption = control.labels![0]!.getBoundingClientRect();
+      const box = control.getBoundingClientRect();
+      const hint = document.getElementById(control.getAttribute("aria-describedby")!)!;
+      return box.top >= caption.bottom && box.bottom <= hint.getBoundingClientRect().top;
+    }),
+  ).toBe(true);
   const settings: SettingsVersion = await (await page.request.get("/api/settings")).json();
-  await page.getByRole("button", { name: "Save system output settings" }).click();
+  const artwork = page.getByRole("combobox", { name: "Artwork size", exact: true });
+  const previousSize = await artwork.inputValue();
+  const nextSize = previousSize === "large" ? "recommended" : "large";
+  await artwork.selectOption(nextSize);
+  await expect(save).toBeEnabled();
+  await save.click();
   await expect(
     page.getByText(`New plans use version ${settings.version + 1}`, { exact: false }),
   ).toBeVisible();
+  await expect(artwork).toBeEnabled();
+  await expect(artwork).toHaveValue(nextSize);
+  await expect(save).toBeDisabled();
+  const persisted: SettingsVersion = await (await page.request.get("/api/settings")).json();
+  expect(persisted.settings.artwork_size).toBe(nextSize);
+  await artwork.selectOption(previousSize === "legacy" ? "small" : previousSize);
+  await expect(save).toBeEnabled();
+  await artwork.selectOption(nextSize);
+  await expect(save).toBeDisabled();
   const stale = await page.request.put("/api/settings", {
     headers: guards,
     data: { expected_version: settings.version, settings: settings.settings },

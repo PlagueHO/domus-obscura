@@ -367,6 +367,41 @@ mod tests {
     }
 
     #[test]
+    fn single_user_api_migrates_existing_selected_state_without_rewriting_configuration()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::infrastructure::server::configuration::ConfigurationService;
+        let parent = crate::infrastructure::permissions::private_test_directory()?;
+        let assets = generated_browser(parent.path())?;
+        let first = prepare_in(parent.path(), &assets)?;
+        let database = first.configuration.database.clone();
+        let configuration = parent
+            .path()
+            .join(APPLICATION_DIRECTORY)
+            .join(CONFIGURATION);
+        let bytes = std::fs::read(&configuration)?;
+        drop(first);
+        let raw = rusqlite::Connection::open(&database)?;
+        raw.execute_batch(
+            "DROP TABLE soulseek_account_changes;
+             DROP TABLE primary_library_changes;
+             DROP INDEX one_main_location;
+             ALTER TABLE locations DROP COLUMN retired;
+             CREATE UNIQUE INDEX one_main_location ON locations(kind) WHERE kind='main';
+             DROP TABLE library_scan_schedule;
+             DROP TABLE library_scan_settings;
+             PRAGMA user_version=33;",
+        )?;
+        drop(raw);
+        let source = ConfigurationService::open(&configuration)?;
+        assert!(!source.validate_saved()?.errors.is_empty());
+        let next = PreparedServer::load(&configuration)?;
+        assert!(source.validate_saved()?.errors.is_empty());
+        assert_eq!(next.store.library_scan_policy()?.interval_minutes, None);
+        assert_eq!(std::fs::read(&configuration)?, bytes);
+        Ok(())
+    }
+
+    #[test]
     fn single_user_explicit_storage_root_keeps_its_exact_name_and_relative_layout()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let fixture = crate::infrastructure::permissions::private_test_directory()?;

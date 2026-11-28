@@ -63,8 +63,7 @@ describe("operator-owned host configuration", () => {
       const value = { ...configuration, system_settings_read_only: readOnly };
       const markup = render({ ...state, active: value, saved: value });
       expect(markup).toContain("generated-browser");
-      expect(markup).toContain("Host configuration is read-only");
-      expect(markup).toContain("Stop the API and all workers");
+      expect(markup).toContain("Other host settings are managed by the operator");
       expect(markup).toContain("Configuration sections");
       expect(markup).toContain('aria-label="Refresh settings"');
       expect(markup).toContain('class="design-card-header"');
@@ -130,10 +129,13 @@ describe("operator-owned host configuration", () => {
       },
     };
     const markup = render({ ...state, active: value, saved: value });
-    expect(markup).toContain("generated-staging");
-    expect(markup).toContain("Queue capacity");
-    expect(markup).toContain("value hidden");
-    expect(markup).not.toContain("<form");
+    const [acquisition, account] = markup.split("</section>", 2);
+    expect(acquisition).toContain("generated-staging");
+    expect(acquisition).toContain("Queue capacity");
+    expect(acquisition).toContain("value hidden");
+    expect(acquisition).not.toContain("<form");
+    expect(account).toContain("<h2>Soulseek account</h2>");
+    expect(account).toMatch(/<input[^>]*type="password"[^>]*disabled/);
   });
 });
 

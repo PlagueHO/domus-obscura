@@ -1307,6 +1307,7 @@ mod tests {
             root_id: "certificate".into(),
             binding_revision: 1,
             role: StorageRole::Certificate,
+            scan_only: false,
             provider_scope: "application".into(),
             relative: "certificates".into(),
             expected,

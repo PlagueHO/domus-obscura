@@ -162,6 +162,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
                 println!("> {program} --dir frontend run test:browser");
                 let status = Command::new(program)
                     .args(["--dir", "frontend", "run", "test:browser"])
+                    .args(args.iter().skip(1))
                     .env("DOMUS_BROWSER_WORKFLOW_ASSETS", assets.path())
                     .status()?;
                 if !status.success() {

@@ -21,7 +21,7 @@ fn schema_one_upgrades_without_losing_existing_jobs() -> Result<(), Box<dyn std:
     drop(store);
     let current = rusqlite::Connection::open(&database)?;
     let version: i64 = current.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 33);
+    assert_eq!(version, 36);
     Ok(())
 }
 
@@ -63,7 +63,7 @@ fn settings_limit_upgrade_preserves_immutable_versions_and_plan_references()
     let current = rusqlite::Connection::open(&database)?;
     current.pragma_update(None, "foreign_keys", "ON")?;
     let version: i64 = current.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 33);
+    assert_eq!(version, 36);
     let preserved: (String, i64) = current.query_row(
         "SELECT body,created_at FROM settings_versions WHERE id=17",
         [],

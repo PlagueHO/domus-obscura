@@ -4,7 +4,8 @@ import type { Location } from "../src/generated/Location";
 import { query, request } from "./api";
 import { useCommand, useResource } from "./hooks";
 import { Alert, Badge, Button, Card, Empty, Pager } from "./components/ui";
-import { FolderRefresh, LibraryBrowser, libraryLink } from "./LibraryBrowse";
+import { LibraryBrowser, libraryLink } from "./LibraryBrowse";
+import { libraryFolder, libraryRole } from "./LibrarySetup";
 
 export function parentFolder(folder: string): string {
   return folder.slice(0, Math.max(folder.lastIndexOf("/"), 0));
@@ -97,7 +98,7 @@ export function Library({
         <nav className="actions" aria-label="Available library roots">
           {locations.map((item) => (
             <a key={item.id} href={libraryLink(item.id, { view: "folders" })}>
-              {item.kind} · {item.root}
+              {libraryRole(item)} · {libraryFolder(item)}
             </a>
           ))}
         </nav>
@@ -129,7 +130,6 @@ export function Library({
           locations={available}
           initialRoot={location?.id}
           initialFolder={params.get("folder") ?? ""}
-          readOnly={readOnly}
         />
       ) : (
         <LibraryBrowser
@@ -151,15 +151,12 @@ function LibraryFolders({
   locations,
   initialRoot,
   initialFolder,
-  readOnly,
 }: {
   locations: Location[];
   initialRoot: number | undefined;
   initialFolder: string;
-  readOnly: boolean;
 }) {
   const [selected, setSelected] = useState<number | undefined>(initialRoot);
-  const [revision, setRevision] = useState(0);
   const location = locations.find((item) => item.id === selected) ?? locations[0];
   const [view, setView] = useState<{ root: number | undefined; folder: string; pages: number[] }>({
     root: location?.id,
@@ -188,7 +185,7 @@ function LibraryFolders({
   const blocked = entries.loading || Boolean(entries.error);
   return (
     <>
-      <header className="hero">
+      <header className="page-heading">
         <div>
           <h1>Your Music library</h1>
           <p>Read-only indexed folders. Browsing never moves or changes media.</p>
@@ -198,7 +195,6 @@ function LibraryFolders({
           disabled={!location || entries.loading}
           onClick={() => {
             entries.refresh();
-            setRevision((value) => value + 1);
           }}
         >
           Refresh index view
@@ -207,7 +203,8 @@ function LibraryFolders({
       {locations.length === 0 ? (
         <Card title="No library roots">
           <Empty>
-            Register an existing library root in System settings, then run its explicit scan.
+            Register an existing library folder in System settings, then request an explicit scan
+            from Library scans.
           </Empty>
           <a href="#/settings">Open System settings</a>
         </Card>
@@ -226,7 +223,7 @@ function LibraryFolders({
             >
               {locations.map((location) => (
                 <option key={location.id} value={location.id}>
-                  {location.kind} · {location.root}
+                  {libraryRole(location)} · {libraryFolder(location)}
                 </option>
               ))}
             </select>
@@ -241,15 +238,7 @@ function LibraryFolders({
           )}
           {location?.last_error && <p className="warning">{location.last_error}</p>}
           {location && <RootAvailability key={location.id} id={location.id} />}
-          {location && (
-            <FolderRefresh
-              key={`${location.id}:${folder}`}
-              location={location.id}
-              folder={folder}
-              readOnly={readOnly}
-              revision={revision}
-            />
-          )}
+          <a href="#/library-scans">Open Library scans and backup checks</a>
           {location && location.coverage !== "complete" && (
             <p className="warning">
               This index has incomplete or unknown coverage. Missing entries do not prove that files

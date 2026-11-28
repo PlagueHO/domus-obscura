@@ -5,6 +5,23 @@ use std::path::Path;
 
 pub(crate) use super::filesystem::read_local_file as read_local;
 
+/// Missing references can select an approved shared account. Explicit empty
+/// paths remain invalid instead of silently selecting different credentials.
+pub(crate) fn deserialize_credential_reference<'de, D>(
+    deserializer: D,
+) -> std::result::Result<std::path::PathBuf, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let path = <std::path::PathBuf as serde::Deserialize>::deserialize(deserializer)?;
+    if path.as_os_str().is_empty() {
+        return Err(serde::de::Error::custom(
+            "an explicit credential-file reference must not be empty",
+        ));
+    }
+    Ok(path)
+}
+
 /// Stable no-follow lock files are retained across exits, never replaced.
 pub(crate) struct ProcessLock {
     _file: std::fs::File,

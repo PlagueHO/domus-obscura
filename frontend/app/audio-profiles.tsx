@@ -37,15 +37,21 @@ export function AudioProfileSelect({
   descriptors,
   disabled,
   onChange,
+  id,
+  "aria-describedby": describedBy,
 }: {
   value: AudioProfile | undefined;
   accepted: AudioProfile[];
   descriptors: AudioProfileDescriptor[];
   disabled: boolean;
   onChange: (profile: AudioProfile) => void;
+  id?: string;
+  "aria-describedby"?: string;
 }) {
   return (
     <select
+      id={id}
+      aria-describedby={describedBy}
       value={value && accepted.includes(value) ? value : ""}
       disabled={disabled}
       onChange={(event) => {

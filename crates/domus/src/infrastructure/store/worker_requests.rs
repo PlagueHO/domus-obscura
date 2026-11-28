@@ -55,7 +55,9 @@ fn require_ready(connection: &Connection, operation: &WorkerOperation) -> Result
             WorkerOperation::Publish { .. } => {
                 matches!(state.as_deref(), Some("publishing" | "backup_pending"))
             }
-            WorkerOperation::Scan { .. } | WorkerOperation::RefreshFolder { .. } => false,
+            WorkerOperation::ScanLibrary { .. }
+            | WorkerOperation::Scan { .. }
+            | WorkerOperation::RefreshFolder { .. } => false,
         };
         if !ready
             || planning::read_plan(connection, job, version)?
